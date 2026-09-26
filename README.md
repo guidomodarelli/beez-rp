@@ -54,6 +54,25 @@ it.each(REJECTED_VERSION_BUMP_CASES)("rechaza %s (%j)", (_reason, version) => {
 });
 ```
 
+## Publicar beez-rp
+
+```bash
+pnpm create-version            # o pnpm cv
+pnpm cv --bump patch|minor|major
+pnpm cv --set-version X.Y.Z    # solo la siguiente patch, minor o major
+pnpm cv --dry-run              # diagnóstico y plan, sin cambiar nada
+```
+
+El comando sale solo desde `main`, limpio y al día con origin (solo `CHANGELOG.md` puede quedar sin commitear).
+
+1. Si `[Unreleased]` está vacío, lo completa Codex a partir de los commits sin publicar.
+2. Corre `pnpm check`.
+3. Pide la versión, pasa `[Unreleased]` a `## [X.Y.Z] - AAAA-MM-DD` y crea el commit `X.Y.Z` con el tag `vX.Y.Z`.
+4. Sube `main` y el tag con `git push --atomic`.
+5. Publica en npm. El `.npmrc` del repo referencia `${NPM_TOKEN}`, que se toma del entorno o de un `.env` ignorado por Git.
+
+Si algo falla después del commit, volver a correr el comando retoma solo el push o la publicación, sin generar otra versión.
+
 ## Desarrollo
 
 ```bash

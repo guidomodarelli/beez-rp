@@ -65,6 +65,8 @@
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
     "check": "pnpm typecheck && pnpm test",
+    "create-version": "node scripts/release.js",
+    "cv": "node scripts/release.js",
     "prepack": "pnpm build:types"
   },
   "devDependencies": {
