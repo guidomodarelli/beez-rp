@@ -11,5 +11,5 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["src/**/*.js", "bin/**/*.js", "scripts/**/*.js", "tests/**/*.js"]
+  "include": ["src/**/*.js", "bin/**/*.js", "tests/**/*.js", "beez-rp.config.js"]
 }

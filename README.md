@@ -17,6 +17,7 @@ Proceso de release compartido por los proyectos Beez (beez-ui, TuTribu, Control 
 | `beez-rp/changelog` | Lectura y release del bloque `## [Unreleased]` de `CHANGELOG.md` (Keep a Changelog). |
 | `beez-rp/changelog-ai` | Prompt e invocación de Codex para completar `[Unreleased]` vacío. |
 | `beez-rp/terminal-ui` | Cajas, filas, banner, spinner y selector interactivo sin dependencias. |
+| `beez-rp/create-version` | Comando compartido de release: `runCreateVersion`, el planificador puro `buildReleasePlan`, el lector de estado y los tipos de `beez-rp.config.js`. |
 | `beez-rp/testing` | Fixtures de versiones permitidas y rechazadas para los tests de cada proyecto. |
 | `beez-rp/constants` | Todas las constantes, agrupadas por dominio. |
 
@@ -54,7 +55,13 @@ it.each(REJECTED_VERSION_BUMP_CASES)("rechaza %s (%j)", (_reason, version) => {
 });
 ```
 
-## Publicar beez-rp
+## create-version
+
+Cada proyecto versiona con el mismo comando y describe sus diferencias en `beez-rp.config.js`:
+
+```json
+{ "scripts": { "create-version": "beez-rp create-version", "cv": "beez-rp create-version" } }
+```
 
 ```bash
 pnpm create-version            # o pnpm cv
@@ -63,15 +70,46 @@ pnpm cv --set-version X.Y.Z    # solo la siguiente patch, minor o major
 pnpm cv --dry-run              # diagnóstico y plan, sin cambiar nada
 ```
 
-El comando sale solo desde `main`, limpio y al día con origin (solo `CHANGELOG.md` puede quedar sin commitear).
+El comando sale solo desde `main`, limpio y al día con origin (solo `CHANGELOG.md` puede quedar sin commitear). En una rama feature explica qué falta: pushear, abrir o mergear el PR (con `gh`).
 
-1. Si `[Unreleased]` está vacío, lo completa Codex a partir de los commits sin publicar.
-2. Corre `pnpm check`.
-3. Pide la versión, pasa `[Unreleased]` a `## [X.Y.Z] - AAAA-MM-DD` y crea el commit `X.Y.Z` con el tag `vX.Y.Z`.
-4. Sube `main` y el tag con `git push --atomic`.
-5. Publica en npm. El `.npmrc` del repo referencia `${NPM_TOKEN}`, que se toma del entorno o de un `.env` ignorado por Git.
+1. Actualiza `main` desde origin si está atrás.
+2. Aplica migraciones pendientes, si el proyecto tiene adaptador, después de pedir confirmación.
+3. Si `[Unreleased]` está vacío, lo completa Codex a partir de los commits sin publicar.
+4. Corre los `checks`.
+5. Pide la versión, pasa `[Unreleased]` a `## [X.Y.Z] - AAAA-MM-DD` y crea el commit `X.Y.Z` con el tag anotado `vX.Y.Z`.
+6. Corre `prepare`, sube `main` y el tag con `git push --atomic` y corre `publish`.
 
-Si algo falla después del commit, volver a correr el comando retoma solo el push o la publicación, sin generar otra versión.
+El último release es el último commit de `origin/main` que cambió el `version` de `package.json`, así que sirve con commits `X.Y.Z`, con otros asuntos de release y con versiones subidas a mano. Si algo falla después del commit, volver a correr el comando retoma solo lo que falta: el push de un commit de versión local o, con `registry: "npm"`, la preparación y publicación de una versión que npm todavía no tiene.
+
+### beez-rp.config.js
+
+```js
+/** @type {import("beez-rp/create-version").CreateVersionConfig} */
+export default {
+  projectName: "TuTribu",                       // banner; por defecto el name de package.json
+  changelog: { audience: "quien usa TuTribu", language: "es" }, // "en": entradas en inglés ASCII
+  releaseTypeDescriptions: { patch: "…", minor: "…", major: "…" },
+  publishedLabel: "en producción",              // banner: vX.Y.Z en producción
+  registry: "npm",                              // retoma y banner según las versiones en npm
+  checks: ["pnpm check"],                       // antes de tocar la versión
+  migrations: { check, apply, targetHint },     // adaptador de base de datos
+  prepare: ["pnpm release:prepare"],            // comandos o función, sobre el commit de versión
+  publish: "npm",                               // npm publish con NPM_TOKEN, o una función
+  summary: ["Vercel buildea {version}."],       // líneas extra del resumen final
+};
+```
+
+Solo `changelog.audience` es obligatorio. Los hooks (`migrations.check`, `migrations.apply`, `prepare`, `publish`) reciben `{ repositoryRoot, version, git, run, print, fail }`: `git` lee Git, `run("pnpm x")` corre un comando visible y devuelve su exit code, y `fail(mensaje, qué hacer)` corta el paso con una explicación. El config no necesita importar `beez-rp`.
+
+`migrations.check` devuelve `{ status: "up-to-date" | "pending" | "unknown", pending, target, reason }`; después de `apply`, el comando vuelve a llamar a `check` y falla si siguen pendientes. `publish: "npm"` toma `NPM_TOKEN` del entorno o de un `.env` ignorado por Git, referenciado por el `.npmrc` del repo.
+
+## Publicar beez-rp
+
+beez-rp se publica con su propio comando (`beez-rp.config.js`: `checks: ["pnpm check"]`, `publish: "npm"`):
+
+```bash
+pnpm cv
+```
 
 ## Desarrollo
 

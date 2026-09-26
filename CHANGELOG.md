@@ -6,6 +6,17 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y e
 
 ## [Unreleased]
 
+### Added
+
+- `beez-rp create-version` (y `beez-rp/create-version`): el comando de release compartido por todos los proyectos, configurable con `beez-rp.config.js` (checks, migraciones, preparación, publicación en npm o propia, textos y resumen).
+- Retoma en un mismo flujo el push de un commit de versión local y la publicación de una versión que npm todavía no tiene.
+- `buildChangelogPrompt` acepta el idioma de las entradas: español por defecto o inglés limitado a ASCII.
+
+### Changed
+
+- El último release es el último commit de `origin/main` que cambió la versión de `package.json`, así que también reconoce releases con otros asuntos o versiones subidas a mano.
+- beez-rp se publica con su propio `beez-rp create-version` en lugar de un script aparte.
+
 ## [0.1.1] - 2026-09-26
 
 ### Added
