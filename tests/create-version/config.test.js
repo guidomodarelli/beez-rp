@@ -67,10 +67,15 @@ describe("create-version config", () => {
     const repositoryRoot = mkdtempSync(path.join(os.tmpdir(), "beez-rp-config-"));
     temporaryDirectories.push(repositoryRoot);
 
-    await expect(loadCreateVersionConfig(repositoryRoot)).rejects.toThrow(/beez-rp.config.js not found/);
+    await expect(loadCreateVersionConfig(repositoryRoot)).rejects.toThrow(/beez-rp.config.mjs or beez-rp.config.js not found/);
 
     writeFileSync(path.join(repositoryRoot, "beez-rp.config.js"), 'export default { changelog: { audience: "equipo" }, checks: ["pnpm test"] };\n');
     await expect(loadCreateVersionConfig(repositoryRoot)).resolves.toMatchObject({ checks: ["pnpm test"], changelog: { language: "es" } });
+
+    // A CommonJS project keeps its config as .mjs, which wins over .js.
+    writeFileSync(path.join(repositoryRoot, "package.json"), '{ "type": "commonjs" }\n');
+    writeFileSync(path.join(repositoryRoot, "beez-rp.config.mjs"), 'export default { changelog: { audience: "equipo" }, checks: ["pnpm lint"] };\n');
+    await expect(loadCreateVersionConfig(repositoryRoot)).resolves.toMatchObject({ checks: ["pnpm lint"] });
   });
 });
 

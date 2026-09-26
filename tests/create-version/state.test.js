@@ -160,7 +160,7 @@ describe("beez-rp create-version command", () => {
       const { repositoryRoot } = createReleasedRepository();
       const missing = runCli(repositoryRoot, ["--dry-run"]);
       expect(missing.status).toBe(1);
-      expect(missing.output).toContain("beez-rp.config.js not found");
+      expect(missing.output).toContain("beez-rp.config.mjs or beez-rp.config.js not found");
 
       writeFileSync(path.join(repositoryRoot, "beez-rp.config.js"), 'export default { changelog: { audience: "equipo" } };\n');
       runGit(["add", "beez-rp.config.js"], repositoryRoot);

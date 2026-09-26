@@ -16,6 +16,12 @@ export const REMOTE_MAIN_REF = `${RELEASE_REMOTE}/${MAIN_BRANCH}`;
 /** Configuration module read from the repository root. */
 export const CREATE_VERSION_CONFIG_FILE = "beez-rp.config.js";
 
+/**
+ * Configuration candidates in lookup order: `.mjs` is always ESM, so projects
+ * without `"type": "module"` load it without Node warnings.
+ */
+export const CREATE_VERSION_CONFIG_FILES = Object.freeze(["beez-rp.config.mjs", CREATE_VERSION_CONFIG_FILE]);
+
 /** Manifest whose `version` is released; shared with the build gate. */
 export { PACKAGE_MANIFEST_FILE } from "./build-gate.js";
 

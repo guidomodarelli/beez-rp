@@ -57,7 +57,7 @@ it.each(REJECTED_VERSION_BUMP_CASES)("rechaza %s (%j)", (_reason, version) => {
 
 ## create-version
 
-Cada proyecto versiona con el mismo comando y describe sus diferencias en `beez-rp.config.js`:
+Cada proyecto versiona con el mismo comando y describe sus diferencias en `beez-rp.config.js` (o `beez-rp.config.mjs`, que tiene prioridad y conviene en proyectos sin `"type": "module"`):
 
 ```json
 { "scripts": { "create-version": "beez-rp create-version", "cv": "beez-rp create-version" } }

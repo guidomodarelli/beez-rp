@@ -17,6 +17,7 @@ import { pathToFileURL } from "node:url";
 import {
   CHANGELOG_LANGUAGE,
   CREATE_VERSION_CONFIG_FILE,
+  CREATE_VERSION_CONFIG_FILES,
   NPM_PUBLISHER,
   RELEASE_REGISTRY,
 } from "../constants/create-version.js";
@@ -198,17 +199,19 @@ export function resolveCreateVersionConfig(rawConfig) {
 }
 
 /**
- * Imports `beez-rp.config.js` from the repository root and validates it.
+ * Imports `beez-rp.config.mjs` or `beez-rp.config.js` from the repository root and validates it.
  *
  * @param {string} repositoryRoot - Repository root.
  * @returns {Promise<ResolvedCreateVersionConfig>} Resolved configuration.
  * @throws {Error} When the file is missing, fails to load or is invalid.
  */
 export async function loadCreateVersionConfig(repositoryRoot) {
-  const configPath = path.join(repositoryRoot, CREATE_VERSION_CONFIG_FILE);
+  const configPath = CREATE_VERSION_CONFIG_FILES.map((fileName) => path.join(repositoryRoot, fileName)).find((candidate) => existsSync(candidate));
 
-  if (!existsSync(configPath)) {
-    throw new Error(`beez-rp create-version: ${CREATE_VERSION_CONFIG_FILE} not found in ${repositoryRoot}; create it with at least changelog.audience`);
+  if (!configPath) {
+    throw new Error(
+      `beez-rp create-version: ${CREATE_VERSION_CONFIG_FILES.join(" or ")} not found in ${repositoryRoot}; create it with at least changelog.audience`
+    );
   }
 
   let module;
