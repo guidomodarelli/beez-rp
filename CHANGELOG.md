@@ -6,6 +6,12 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y e
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-26
+
+### Added
+
+- Plantilla `.env.example` para configurar el token de npm.
+
 ## [0.1.0] - 2026-09-26
 
 ### Added
