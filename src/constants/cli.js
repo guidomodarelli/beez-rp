@@ -7,4 +7,5 @@
 /** Command names accepted as the first `beez-rp` argument. */
 export const CLI_COMMAND = Object.freeze({
   ignoreBuild: "ignore-build",
+  createVersion: "create-version",
 });

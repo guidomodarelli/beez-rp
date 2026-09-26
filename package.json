@@ -46,6 +46,10 @@
       "types": "./types/testing.d.ts",
       "default": "./src/testing.js"
     },
+    "./create-version": {
+      "types": "./types/create-version/index.d.ts",
+      "default": "./src/create-version/index.js"
+    },
     "./constants": {
       "types": "./types/constants/index.d.ts",
       "default": "./src/constants/index.js"
@@ -65,8 +69,8 @@
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
     "check": "pnpm typecheck && pnpm test",
-    "create-version": "node scripts/release.js",
-    "cv": "node scripts/release.js",
+    "create-version": "node bin/beez-rp.js create-version",
+    "cv": "node bin/beez-rp.js create-version",
     "prepack": "pnpm build:types"
   },
   "devDependencies": {

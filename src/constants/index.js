@@ -10,3 +10,4 @@ export * from "./changelog-ai.js";
 export * from "./cli.js";
 export * from "./terminal-ui.js";
 export * from "./versions.js";
+export * from "./create-version.js";
