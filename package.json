@@ -1,0 +1,75 @@
+{
+  "name": "beez-rp",
+  "version": "0.0.0",
+  "description": "Dependency-free release process shared by the Beez projects: stable version rules, Vercel build gate, Keep a Changelog and terminal UI.",
+  "license": "MIT",
+  "author": "Guido Modarelli",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/guidomodarelli/beez-rp.git"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@12.6.0",
+  "bin": {
+    "beez-rp": "./bin/beez-rp.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./types/index.d.ts",
+      "default": "./src/index.js"
+    },
+    "./versions": {
+      "types": "./types/versions.d.ts",
+      "default": "./src/versions.js"
+    },
+    "./build-gate": {
+      "types": "./types/build-gate.d.ts",
+      "default": "./src/build-gate.js"
+    },
+    "./changelog": {
+      "types": "./types/changelog.d.ts",
+      "default": "./src/changelog.js"
+    },
+    "./changelog-ai": {
+      "types": "./types/changelog-ai.d.ts",
+      "default": "./src/changelog-ai.js"
+    },
+    "./terminal-ui": {
+      "types": "./types/terminal-ui.d.ts",
+      "default": "./src/terminal-ui.js"
+    },
+    "./testing": {
+      "types": "./types/testing.d.ts",
+      "default": "./src/testing.js"
+    },
+    "./constants": {
+      "types": "./types/constants/index.d.ts",
+      "default": "./src/constants/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "bin",
+    "src",
+    "types",
+    "CHANGELOG.md",
+    "README.md",
+    "LICENSE.md"
+  ],
+  "scripts": {
+    "build:types": "tsc -p tsconfig.types.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "check": "pnpm typecheck && pnpm test",
+    "prepack": "pnpm build:types"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.4",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.0"
+  }
+}

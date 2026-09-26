@@ -1,0 +1,93 @@
+/**
+ * Decides whether Vercel builds a commit (`vercel.json` → `ignoreCommand`).
+ *
+ * Only a stable `X.Y.Z` version that is the next patch, minor or major of the
+ * previous commit's version ships, the same rule `create-version` applies. An
+ * unchanged, lower or skipped version (`1.0.0` → `3.0.0`) and any prerelease
+ * or build-metadata version skip the build. When the previous version cannot
+ * be read there is nothing to compare, so a stable version builds.
+ *
+ * @module build-gate
+ */
+
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
+import { PACKAGE_MANIFEST_FILE, PREVIOUS_REVISION } from "./constants/build-gate.js";
+import { isStableReleaseVersion, listAllowedVersionsAfter } from "./versions.js";
+
+/**
+ * @typedef {{ shouldBuild: boolean, reason: string }} BuildDecision
+ */
+
+/**
+ * Decides whether a commit is built.
+ *
+ * @param {string | null} previousVersion - Version of the previous commit, or `null` when unreadable.
+ * @param {string | null} currentVersion - Version of the commit being deployed, or `null` when unreadable.
+ * @returns {BuildDecision} Decision and a log line.
+ */
+export function decideBuild(previousVersion, currentVersion) {
+  if (currentVersion === null) {
+    return { shouldBuild: false, reason: "Current package version could not be read. Skipping build." };
+  }
+
+  if (!isStableReleaseVersion(currentVersion)) {
+    return { shouldBuild: false, reason: `Version ${currentVersion} is not a stable X.Y.Z release. Skipping build.` };
+  }
+
+  const allowedVersions = previousVersion === null ? null : listAllowedVersionsAfter(previousVersion);
+
+  if (allowedVersions === null) {
+    return { shouldBuild: true, reason: `Previous package version could not be compared. Building stable ${currentVersion}.` };
+  }
+
+  if (currentVersion === previousVersion) {
+    return { shouldBuild: false, reason: "Version did not change. Skipping build." };
+  }
+
+  if (!allowedVersions.includes(currentVersion)) {
+    return {
+      shouldBuild: false,
+      reason: `Version ${previousVersion} -> ${currentVersion} is not the next patch, minor or major (${allowedVersions.join(", ")}). Skipping build.`,
+    };
+  }
+
+  return { shouldBuild: true, reason: `Version changed: ${previousVersion} -> ${currentVersion}. Building.` };
+}
+
+/**
+ * Reads the `version` field of a `package.json` text.
+ *
+ * @param {() => string} readManifest - Returns the manifest contents.
+ * @returns {string | null} Version, or `null` when unreadable.
+ */
+function readVersion(readManifest) {
+  try {
+    const version = JSON.parse(readManifest()).version;
+    return typeof version === "string" ? version : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Reads the previous and the current `package.json` versions of a Git
+ * checkout and decides whether it is built.
+ *
+ * @param {string} repositoryRoot - Checkout whose `HEAD` is being deployed.
+ * @returns {BuildDecision} Decision and a log line.
+ */
+export function decideBuildForCheckout(repositoryRoot) {
+  const previousVersion = readVersion(() =>
+    execFileSync("git", ["show", `${PREVIOUS_REVISION}:${PACKAGE_MANIFEST_FILE}`], {
+      cwd: repositoryRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    })
+  );
+  const currentVersion = readVersion(() => readFileSync(path.join(repositoryRoot, PACKAGE_MANIFEST_FILE), "utf8"));
+
+  return decideBuild(previousVersion, currentVersion);
+}
