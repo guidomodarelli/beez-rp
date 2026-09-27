@@ -23,6 +23,7 @@ export { ReleaseStepError } from "./errors.js";
 export {
   buildNpmAuthConfigLine,
   buildNpmPublishArguments,
+  buildNpmPublishEnvironment,
   lookupPublishedVersions,
   parseNpmPackDryRunOutput,
   publishToNpm,

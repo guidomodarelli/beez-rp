@@ -12,7 +12,7 @@ import { FIELD_SEPARATOR, PACKAGE_MANIFEST_FILE, RECORD_SEPARATOR } from "../con
 
 /**
  * @typedef {{ status: number, stdout: string, stderr: string }} CapturedResult
- * @typedef {{ cwd?: string, shell?: boolean }} CommandOptions
+ * @typedef {{ cwd?: string, shell?: boolean, env?: NodeJS.ProcessEnv }} CommandOptions
  * @typedef {{ git: (gitArguments: string[]) => Promise<string>, tryGit: (gitArguments: string[]) => Promise<string | null> }} GitReader
  * @typedef {{ sha: string, subject: string, body: string }} CommitRecord
  */
@@ -57,7 +57,7 @@ export function runCaptured(command, commandArguments, options = {}) {
  */
 export function runInherited(command, commandArguments, options = {}) {
   return new Promise((resolve) => {
-    const child = spawn(command, commandArguments, { cwd: options.cwd, shell: options.shell ?? false, stdio: "inherit" });
+    const child = spawn(command, commandArguments, { cwd: options.cwd, env: options.env, shell: options.shell ?? false, stdio: "inherit" });
     child.on("error", () => resolve(1));
     child.on("close", (status) => resolve(status ?? 1));
   });

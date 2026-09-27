@@ -10,6 +10,8 @@
  * - `beez-rp create-version [--bump patch|minor|major | --set-version X.Y.Z] [--dry-run]`
  *   diagnoses the repository in the current directory and ships its release
  *   from `main`, following its `beez-rp.config.js`.
+ * - `beez-rp guard-publish` is the `prepublishOnly` guard: it exits with `1`
+ *   and explains why when pnpm, yarn or bun publishes, and with `0` otherwise.
  *
  * @module beez-rp-cli
  */
@@ -18,14 +20,21 @@ import { decideBuildForCheckout } from "../src/build-gate.js";
 import { BUILD_DECISION, DECISION_EXIT_CODE, GATE_FAILURE_EXIT_CODE } from "../src/constants/build-gate.js";
 import { CLI_COMMAND } from "../src/constants/cli.js";
 import { runCreateVersion } from "../src/create-version/run.js";
+import { decidePublishGuardForEnvironment } from "../src/guard-publish.js";
 
 /** Usage printed for unknown commands. */
-const USAGE = `Usage: beez-rp ${CLI_COMMAND.ignoreBuild} | beez-rp ${CLI_COMMAND.createVersion} [options]`;
+const USAGE = `Usage: beez-rp ${CLI_COMMAND.ignoreBuild} | beez-rp ${CLI_COMMAND.createVersion} [options] | beez-rp ${CLI_COMMAND.guardPublish}`;
 
 const [command, ...commandArguments] = process.argv.slice(2);
 
 if (command === CLI_COMMAND.createVersion) {
   process.exitCode = await runCreateVersion({ repositoryRoot: process.cwd(), argv: commandArguments });
+} else if (command === CLI_COMMAND.guardPublish) {
+  const decision = decidePublishGuardForEnvironment();
+  if (decision.message) {
+    console.error(decision.message);
+  }
+  process.exitCode = decision.exitCode;
 } else if (command === CLI_COMMAND.ignoreBuild) {
   try {
     const decision = decideBuildForCheckout(process.cwd());

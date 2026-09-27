@@ -16,6 +16,7 @@ Proceso de release compartido por los proyectos Beez (beez-ui, TuTribu, Control 
 | `beez-rp/build-gate` | `decideBuild(previousVersion, currentVersion)` y `decideBuildForCheckout(repositoryRoot)` para el `ignoreCommand` de Vercel. |
 | `beez-rp/changelog` | Lectura y release del bloque `## [Unreleased]` de `CHANGELOG.md` (Keep a Changelog). |
 | `beez-rp/changelog-ai` | Prompt e invocación de Codex para completar `[Unreleased]` vacío. |
+| `beez-rp/guard-publish` | `decidePublishGuard(userAgent)` del `prepublishOnly` que bloquea publicaciones con pnpm, yarn o bun. |
 | `beez-rp/terminal-ui` | Cajas, filas, banner, spinner y selector interactivo sin dependencias. |
 | `beez-rp/create-version` | Comando compartido de release: `runCreateVersion`, el planificador puro `buildReleasePlan`, el lector de estado y los tipos de `beez-rp.config.js`. |
 | `beez-rp/testing` | Fixtures de versiones permitidas y rechazadas para los tests de cada proyecto. |
@@ -116,9 +117,21 @@ Ejemplo de `prepare` que deja `releases/{version}-{sha256}/{name}-{version}.tgz`
 
 Si no hay tarball o la verificación falla, no se publica nada y volver a correr el comando retoma preparación y publicación.
 
+## Bloquear publicaciones con pnpm
+
+`create-version` publica siempre con npm y verifica el tarball contra `npm pack --dry-run`, así que un `pnpm publish` manual saltearía esas garantías. Cada proyecto lo bloquea con:
+
+```json
+{ "scripts": { "prepublishOnly": "beez-rp guard-publish" } }
+```
+
+`beez-rp guard-publish` lee `npm_config_user_agent`: si empieza con `pnpm/`, `yarn/` o `bun/`, explica por stderr que se publica con `pnpm create-version` y sale con `1`; con `npm/`, sin la variable o con un valor desconocido sale con `0` sin imprimir nada. npm toma un `npm_config_user_agent` heredado como su config `user-agent`, por eso `create-version` lo quita del entorno de `npm publish`: así `pnpm create-version` no se bloquea a sí mismo.
+
+Es una protección contra errores, no un candado: `--ignore-scripts` la esquiva a propósito. Aun así, un tarball empaquetado con pnpm no pasa la verificación de hash de `create-version`.
+
 ## Publicar beez-rp
 
-beez-rp se publica con su propio comando (`beez-rp.config.js`: `checks: ["pnpm check"]`, `publish: "npm"`):
+beez-rp se publica con su propio comando (`beez-rp.config.js`: `checks: ["pnpm check"]`, `publish: "npm"`). Su `prepublishOnly` es `node bin/beez-rp.js guard-publish`, porque no se instala a sí mismo:
 
 ```bash
 pnpm cv

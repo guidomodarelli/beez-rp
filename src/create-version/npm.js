@@ -28,6 +28,7 @@ import {
   PUBLISH_CONFIG_FIELD,
   UNSAFE_QUOTED_PATH_PATTERN,
 } from "../constants/create-version.js";
+import { PACKAGE_MANAGER_USER_AGENT_VARIABLE } from "../constants/guard-publish.js";
 import { USES_SHELL_FOR_PACKAGE_MANAGERS, runCaptured, runInherited } from "./process.js";
 
 /**
@@ -193,6 +194,23 @@ export function buildNpmPublishArguments(artifactPath = null) {
 }
 
 /**
+ * Builds the environment of `npm publish` without the inherited package
+ * manager user agent. npm reads `npm_config_user_agent` as its `user-agent`
+ * config, so under `pnpm create-version` its lifecycle scripts would report
+ * pnpm and `beez-rp guard-publish` would block beez-rp's own npm publication.
+ * Without it npm reports its own user agent (`npm/…`). npm reads its config
+ * variables in any case (`NPM_CONFIG_USER_AGENT` too), so every casing is dropped.
+ *
+ * @param {NodeJS.ProcessEnv} [environment] - Environment to copy; the current process by default.
+ * @returns {NodeJS.ProcessEnv} Copy without `npm_config_user_agent` in any casing.
+ */
+export function buildNpmPublishEnvironment(environment = process.env) {
+  return Object.fromEntries(
+    Object.entries(environment).filter(([variableName]) => variableName.toLowerCase() !== PACKAGE_MANAGER_USER_AGENT_VARIABLE),
+  );
+}
+
+/**
  * Publishes the working tree, or a prepared archive, to npm. `NPM_TOKEN` comes
  * from the environment or the ignored `.env` and only reaches npm through the
  * environment and a temporary user config. npm inherits the terminal, so its
@@ -223,9 +241,10 @@ export async function publishToNpm(repositoryRoot, { authConfigLine, artifactPat
 
     // The command line is constant apart from validated paths; the token only travels through the environment.
     const publishArguments = buildNpmPublishArguments(artifactPath);
+    const env = buildNpmPublishEnvironment();
     return USES_SHELL_FOR_PACKAGE_MANAGERS
-      ? runInherited(`npm ${publishArguments.join(" ")} --userconfig "${userConfigPath}"`, [], { cwd: repositoryRoot, shell: true })
-      : runInherited("npm", [...publishArguments, "--userconfig", userConfigPath], { cwd: repositoryRoot });
+      ? runInherited(`npm ${publishArguments.join(" ")} --userconfig "${userConfigPath}"`, [], { cwd: repositoryRoot, shell: true, env })
+      : runInherited("npm", [...publishArguments, "--userconfig", userConfigPath], { cwd: repositoryRoot, env });
   });
 
   return { exitCode, missingToken: false };
