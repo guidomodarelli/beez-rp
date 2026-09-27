@@ -371,7 +371,7 @@ describe("beez-rp create-version command", () => {
       expect(missing.status).toBe(1);
       expect(missing.output).toContain("beez-rp.config.mjs or beez-rp.config.js not found");
 
-      writeFileSync(path.join(repositoryRoot, "beez-rp.config.js"), 'export default { changelog: { audience: "equipo" } };\n');
+      writeFileSync(path.join(repositoryRoot, "beez-rp.config.js"), 'export default { changelog: { audience: "equipo" }, checks: false };\n');
       runGit(["add", "beez-rp.config.js"], repositoryRoot);
       runGit(["commit", "--quiet", "-m", "chore: configure releases"], repositoryRoot);
       runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
@@ -379,8 +379,31 @@ describe("beez-rp create-version command", () => {
       const preview = runCli(repositoryRoot, ["--dry-run"]);
       expect(preview.status).toBe(0);
       expect(preview.output).toContain("Plan");
+      expect(preview.output).not.toContain("Validar el proyecto");
       expect(preview.output).toContain("--dry-run: no se cambió nada");
       expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should block a new release without checks nor a ci script, and run pnpm run ci when the project declares it",
+    () => {
+      const unchecked = createReleasedRepository();
+      pushConfiguration(unchecked.repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "};"]);
+
+      const blocked = runCli(unchecked.repositoryRoot, ["--dry-run"]);
+      expect(blocked.output).toContain("No se puede publicar todavía");
+      expect(blocked.output).toContain("El proyecto no valida nada antes de publicar");
+      expect(blocked.output).toContain("checks: false");
+
+      const checked = createReleasedRepository("0.1.0", { scripts: { ci: "node --version" } });
+      pushConfiguration(checked.repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "};"]);
+
+      const preview = runCli(checked.repositoryRoot, ["--dry-run"]);
+      expect(preview.status, preview.output).toBe(0);
+      expect(preview.output).toContain("Validar el proyecto");
+      expect(preview.output).not.toContain("El proyecto no valida nada antes de publicar");
     },
     GIT_FIXTURE_TEST_TIMEOUT_MS
   );
@@ -440,6 +463,7 @@ describe("beez-rp create-version command", () => {
         'import path from "node:path";',
         "export default {",
         '  changelog: { audience: "equipo" },',
+        "  checks: false,",
         '  publish: "npm",',
         "  registry: null,",
         '  artifact: "releases/{name}-{version}.tgz",',
@@ -508,12 +532,13 @@ describe("beez-rp create-version command", () => {
     () => {
       const { repositoryRoot, remoteRoot } = createReleasedRepository();
       const hookLog = path.join(path.dirname(repositoryRoot), "hooks.log");
-      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "};"]);
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", "};"]);
       pushConfiguration(repositoryRoot, [
         'import { appendFileSync } from "node:fs";',
         `const log = ${JSON.stringify(hookLog)};`,
         "export default {",
         '  changelog: { audience: "equipo" },',
+        "  checks: false,",
         '  prepare: ({ version }) => appendFileSync(log, `prepare ${version}\\n`),',
         "};",
       ]);
@@ -626,6 +651,7 @@ describe("beez-rp create-version command", () => {
       `const log = ${JSON.stringify(hookLog)};`,
       "export default {",
       '  changelog: { audience: "equipo" },',
+      "  checks: false,",
       '  registry: "npm",',
       '  publish: "npm",',
       "  prepare: ({ version }) => appendFileSync(log, `prepare ${version}\\n`),",
@@ -779,6 +805,7 @@ describe("beez-rp create-version command", () => {
       pushConfiguration(repositoryRoot, [
         "export default {",
         '  changelog: { audience: "equipo" },',
+        "  checks: false,",
         '  registry: "npm",',
         '  publish: "npm",',
         '  prepare: () => { throw new Error("prepare fixture failure"); },',

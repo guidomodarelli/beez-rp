@@ -407,7 +407,8 @@ function requireReleaseVersion(context) {
  */
 function describeReleaseCapabilities(config) {
   return {
-    checks: config.checks.length > 0,
+    checks: (config.checks?.length ?? 0) > 0,
+    checksMissing: config.checks === null,
     prepare: config.prepare !== null,
     publish: config.publish !== null,
     publishTitle: config.publish === NPM_PUBLISHER ? "Publicar en npm" : "Publicar el release",
@@ -529,7 +530,7 @@ async function generateChangelogStep(context) {
  * @returns {Promise<void>}
  */
 async function runChecksStep(context) {
-  await runConfiguredCommands(context, context.config.checks, "Corregí el error de arriba; todavía no se tocó la versión.");
+  await runConfiguredCommands(context, context.config.checks ?? [], "Corregí el error de arriba; todavía no se tocó la versión.");
 }
 
 /**

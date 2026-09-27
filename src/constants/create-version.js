@@ -178,6 +178,12 @@ export const RELEASE_REGISTRY = Object.freeze({
   npm: "npm",
 });
 
+/** `package.json` script run as the release checks when the configuration does not set `checks`. */
+export const DEFAULT_CHECKS_SCRIPT = "ci";
+
+/** Command line of the default release checks. */
+export const DEFAULT_CHECKS_COMMAND = `pnpm run ${DEFAULT_CHECKS_SCRIPT}`;
+
 /** Built-in publisher selected with `publish: "npm"`. */
 export const NPM_PUBLISHER = "npm";
 

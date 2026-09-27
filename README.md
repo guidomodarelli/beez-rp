@@ -77,7 +77,7 @@ El comando sale solo desde `main`, limpio y al día con origin (solo `CHANGELOG.
 1. Si `main` está atrás de origin, lo actualiza en fast-forward y termina (código de salida 0) sin tocar la versión ni los tags: hay que volver a correr `pnpm create-version`, que en un proceso nuevo carga `beez-rp.config.(m)js`, sus módulos y el diagnóstico desde el código actualizado.
 2. Aplica migraciones pendientes, si el proyecto tiene adaptador, después de pedir confirmación.
 3. Si `[Unreleased]` está vacío, lo completa Codex a partir de los commits sin publicar.
-4. Corre los `checks`.
+4. Corre los `checks` (por defecto `pnpm run ci`; ver abajo).
 5. Pide la versión, pasa `[Unreleased]` a `## [X.Y.Z] - AAAA-MM-DD` y crea el commit `X.Y.Z` con el tag anotado `vX.Y.Z`.
 6. Corre `prepare`, sube `main` y el tag con `git push --atomic` y corre `publish`.
 
@@ -95,7 +95,7 @@ export default {
   releaseTypeDescriptions: { patch: "…", minor: "…", major: "…" },
   publishedLabel: "en producción",              // banner: vX.Y.Z en producción
   registry: "npm",                              // retoma y banner según las versiones en npm
-  checks: ["pnpm check"],                       // antes de tocar la versión
+  checks: ["pnpm check"],                       // antes de tocar la versión; false para no validar
   migrations: { check, apply, targetHint },     // adaptador de base de datos
   prepare: ["pnpm release:prepare"],            // comandos o función, sobre el commit de versión
   publish: "npm",                               // npm publish con NPM_TOKEN, o una función
@@ -104,7 +104,7 @@ export default {
 };
 ```
 
-Solo `changelog.audience` es obligatorio. Los hooks (`migrations.check`, `migrations.apply`, `prepare`, `publish`) reciben `{ repositoryRoot, version, git, run, print, fail }`: `git` lee Git, `run("pnpm x")` corre un comando visible y devuelve su exit code, y `fail(mensaje, qué hacer)` corta el paso con una explicación. El config no necesita importar `beez-rp`.
+Solo `changelog.audience` es obligatorio. Sin `checks`, un release nuevo corre `pnpm run ci` si el `package.json` declara el script `ci`; si no lo declara, el plan se bloquea para no publicar sin validar. `checks: false` saltea la validación a propósito (por ejemplo, cuando `prepare` ya corre lint, typecheck, tests y build) y una lista vacía no es válida. Los hooks (`migrations.check`, `migrations.apply`, `prepare`, `publish`) reciben `{ repositoryRoot, version, git, run, print, fail }`: `git` lee Git, `run("pnpm x")` corre un comando visible y devuelve su exit code, y `fail(mensaje, qué hacer)` corta el paso con una explicación. El config no necesita importar `beez-rp`.
 
 `migrations.check` devuelve `{ status: "up-to-date" | "pending" | "unknown", pending, target, reason }`; después de `apply`, el comando vuelve a llamar a `check` y falla si siguen pendientes. `publish: "npm"` toma `NPM_TOKEN` de una sola búsqueda, compartida por el diagnóstico, `npm view` y la publicación (ver [Token de npm](#token-de-npm)). No hace falta `.npmrc`: el comando escribe una config de npm temporal fuera del repo que asocia `${NPM_TOKEN}` al registry donde realmente se publica, resuelto como npm: `publishConfig["@scope:registry"]` si el paquete tiene ese scope, si no `publishConfig.registry` y, si el `package.json` no declara ninguno, lo que devuelve `npm config get @scope:registry` (paquete con scope) o `npm config get registry` en la raíz del repo, que incluye el `.npmrc` del proyecto, las variables `npm_config_*` y la config global (como la publicación, no lee `~/.npmrc`, que se reemplaza por la config temporal); tiene que ser una URL http(s) válida o no se publica. Con `NPM_TOKEN` disponible, el diagnóstico también consulta `npm view` con esa config temporal, así que funciona con paquetes privados; sin token consulta sin autenticar. El resumen final enlaza a npmjs.com solo si el registry es `https://registry.npmjs.org/`; si no, muestra `Registro: <url>` con el paquete y la versión. Solo guarda esa referencia: npm la expande, el token nunca queda en disco ni en la línea de comandos, y la config se borra al terminar. npm hereda la terminal, así que la confirmación 2FA (navegador o código) funciona igual.
 

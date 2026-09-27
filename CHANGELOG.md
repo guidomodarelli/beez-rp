@@ -6,6 +6,10 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y e
 
 ## [Unreleased]
 
+### Changed
+
+- Un release nuevo ya no se publica sin validar: si `beez-rp.config.(m)js` no define `checks`, corre `pnpm run ci` cuando el `package.json` declara el script `ci`, y si no lo declara el plan se bloquea y explica cómo agregarlo. `checks: false` saltea la validación a propósito (por ejemplo, cuando `prepare` ya valida) y `checks: []` deja de ser válido.
+
 ## [0.3.1] - 2026-09-27
 
 ### Added

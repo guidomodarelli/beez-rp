@@ -10,7 +10,7 @@
  * @module create-version/config
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -19,7 +19,10 @@ import {
   CHANGELOG_LANGUAGE,
   CREATE_VERSION_CONFIG_FILE,
   CREATE_VERSION_CONFIG_FILES,
+  DEFAULT_CHECKS_COMMAND,
+  DEFAULT_CHECKS_SCRIPT,
   NPM_PUBLISHER,
+  PACKAGE_MANIFEST_FILE,
   RELEASE_REGISTRY,
 } from "../constants/create-version.js";
 import { RELEASE_TYPE_ORDER } from "../constants/versions.js";
@@ -48,27 +51,31 @@ import { RELEASE_TYPE_ORDER } from "../constants/versions.js";
  *   releaseTypeDescriptions?: Partial<Record<ReleaseType, string>>,
  *   registry?: "npm" | null,
  *   publishedLabel?: string,
- *   checks?: string[],
+ *   checks?: string[] | false,
  *   migrations?: MigrationsAdapter | null,
  *   prepare?: string[] | ReleaseHook | null,
  *   publish?: "npm" | ReleaseHook | null,
  *   artifact?: string | null,
  *   summary?: string[],
  * }} CreateVersionConfig
- *   `summary` lines replace `{version}` with the released version.
+ *   `summary` lines replace `{version}` with the released version. Without `checks`, the release
+ *   runs `pnpm run ci` when `package.json` declares a `ci` script; `false` skips the checks on purpose.
  * @typedef {{
  *   projectName: string | null,
  *   changelog: { audience: string, language: "es" | "en" },
  *   releaseTypeDescriptions: Record<ReleaseType, string>,
  *   registry: "npm" | null,
  *   publishedLabel: string,
- *   checks: string[],
+ *   checks: string[] | null,
  *   migrations: MigrationsAdapter | null,
  *   prepare: string[] | ReleaseHook | null,
  *   publish: "npm" | ReleaseHook | null,
  *   artifact: string | null,
  *   summary: string[],
  * }} ResolvedCreateVersionConfig
+ *   `checks` is empty when they are skipped on purpose and `null` when none are configured nor
+ *   found, which blocks a new release.
+ * @typedef {{ packageScripts?: Record<string, unknown> }} ConfigResolutionContext
  */
 
 /** What each release type means when a project does not describe it. */
@@ -113,13 +120,39 @@ function isStringList(value) {
 }
 
 /**
+ * Resolves the release checks: the configured commands, none when `false` skips them on purpose,
+ * or `pnpm run ci` when the configuration leaves them out and `package.json` declares `ci`.
+ *
+ * @param {unknown} checks - Raw `checks` field.
+ * @param {Record<string, unknown>} packageScripts - `scripts` of the project `package.json`.
+ * @returns {string[] | null} Commands to run, or `null` when there is nothing to run.
+ * @throws {Error} When `checks` is neither a non-empty list of command lines nor `false`.
+ */
+function resolveChecks(checks, packageScripts) {
+  if (checks === undefined) {
+    return Object.hasOwn(packageScripts, DEFAULT_CHECKS_SCRIPT) ? [DEFAULT_CHECKS_COMMAND] : null;
+  }
+
+  if (checks === false) {
+    return [];
+  }
+
+  if (!isStringList(checks) || checks.length === 0) {
+    throw invalidField("checks", "a non-empty list of command lines, or false to skip them on purpose");
+  }
+
+  return checks;
+}
+
+/**
  * Validates a raw configuration and fills its defaults.
  *
  * @param {unknown} rawConfig - Default export of `beez-rp.config.js`.
+ * @param {ConfigResolutionContext} [resolutionContext] - Project data the defaults depend on.
  * @returns {ResolvedCreateVersionConfig} Configuration ready for the command.
  * @throws {Error} When a field has an unsupported type or value.
  */
-export function resolveCreateVersionConfig(rawConfig) {
+export function resolveCreateVersionConfig(rawConfig, { packageScripts = {} } = {}) {
   if (!rawConfig || typeof rawConfig !== "object" || Array.isArray(rawConfig)) {
     throw invalidField("the default export", "an object");
   }
@@ -160,10 +193,7 @@ export function resolveCreateVersionConfig(rawConfig) {
     throw invalidField("registry", `one of ${Object.values(RELEASE_REGISTRY).join(", ")} or null`);
   }
 
-  const checks = config.checks ?? [];
-  if (!isStringList(checks)) {
-    throw invalidField("checks", "a list of command lines");
-  }
+  const checks = resolveChecks(config.checks, packageScripts);
 
   const prepare = config.prepare ?? null;
   if (prepare !== null && typeof prepare !== "function" && !isStringList(prepare)) {
@@ -237,5 +267,30 @@ export async function loadCreateVersionConfig(repositoryRoot) {
     throw new Error(`beez-rp create-version: could not load ${configPath}`, { cause: error });
   }
 
-  return resolveCreateVersionConfig(module.default);
+  return resolveCreateVersionConfig(module.default, { packageScripts: readPackageScripts(repositoryRoot) });
+}
+
+/**
+ * Reads the `scripts` of the project `package.json`, which decide the default release checks.
+ *
+ * @param {string} repositoryRoot - Repository root.
+ * @returns {Record<string, unknown>} Declared scripts; empty without a manifest or scripts.
+ * @throws {Error} When `package.json` exists but cannot be parsed.
+ */
+function readPackageScripts(repositoryRoot) {
+  const manifestPath = path.join(repositoryRoot, PACKAGE_MANIFEST_FILE);
+
+  if (!existsSync(manifestPath)) {
+    return {};
+  }
+
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  } catch (error) {
+    throw new Error(`beez-rp create-version: could not read the scripts of ${manifestPath}`, { cause: error });
+  }
+
+  const scripts = manifest?.scripts;
+  return scripts && typeof scripts === "object" && !Array.isArray(scripts) ? scripts : {};
 }

@@ -23,7 +23,7 @@ describe("create-version config", () => {
       projectName: null,
       changelog: { audience: "quien usa la app", language: "es" },
       registry: "npm",
-      checks: [],
+      checks: null,
       prepare: null,
       publish: "npm",
       migrations: null,
@@ -53,12 +53,23 @@ describe("create-version config", () => {
     expect(tarball).toMatchObject({ registry: "npm", artifact: "releases/{version}-*/{name}-{version}.tgz" });
   });
 
+  it("should default the checks to pnpm run ci only when package.json declares a ci script, and skip them with false", () => {
+    const withCi = { packageScripts: { ci: "pnpm lint && pnpm test" } };
+
+    expect(resolveCreateVersionConfig({ changelog: { audience: "x" } }, withCi).checks).toEqual(["pnpm run ci"]);
+    expect(resolveCreateVersionConfig({ changelog: { audience: "x" } }, { packageScripts: { test: "vitest" } }).checks).toBeNull();
+    expect(resolveCreateVersionConfig({ changelog: { audience: "x" }, checks: ["pnpm check"] }, withCi).checks).toEqual(["pnpm check"]);
+    expect(resolveCreateVersionConfig({ changelog: { audience: "x" }, checks: false }, withCi).checks).toEqual([]);
+  });
+
   it.each([
     [null, /default export/],
     [{}, /changelog.audience/],
     [{ changelog: { audience: "x", language: "fr" } }, /changelog.language/],
     [{ changelog: { audience: "x" }, publish: "yarn" }, /publish/],
     [{ changelog: { audience: "x" }, checks: "pnpm check" }, /checks/],
+    [{ changelog: { audience: "x" }, checks: [] }, /checks.*false/],
+    [{ changelog: { audience: "x" }, checks: true }, /checks/],
     [{ changelog: { audience: "x" }, prepare: [""] }, /prepare/],
     [{ changelog: { audience: "x" }, migrations: { check: () => {} } }, /migrations/],
     [{ changelog: { audience: "x" }, releaseTypeDescriptions: { huge: "x" } }, /releaseTypeDescriptions.huge/],
@@ -82,6 +93,20 @@ describe("create-version config", () => {
     writeFileSync(path.join(repositoryRoot, "package.json"), '{ "type": "commonjs" }\n');
     writeFileSync(path.join(repositoryRoot, "beez-rp.config.mjs"), 'export default { changelog: { audience: "equipo" }, checks: ["pnpm lint"] };\n');
     await expect(loadCreateVersionConfig(repositoryRoot)).resolves.toMatchObject({ checks: ["pnpm lint"] });
+  });
+
+  it("should read the ci script of package.json for the default checks and name an unreadable manifest", async () => {
+    const repositoryRoot = mkdtempSync(path.join(os.tmpdir(), "beez-rp-config-"));
+    temporaryDirectories.push(repositoryRoot);
+    writeFileSync(path.join(repositoryRoot, "beez-rp.config.mjs"), 'export default { changelog: { audience: "equipo" } };\n');
+
+    await expect(loadCreateVersionConfig(repositoryRoot)).resolves.toMatchObject({ checks: null });
+
+    writeFileSync(path.join(repositoryRoot, "package.json"), '{ "scripts": { "ci": "pnpm test" } }\n');
+    await expect(loadCreateVersionConfig(repositoryRoot)).resolves.toMatchObject({ checks: ["pnpm run ci"] });
+
+    writeFileSync(path.join(repositoryRoot, "package.json"), "{ not json");
+    await expect(loadCreateVersionConfig(repositoryRoot)).rejects.toThrow(/could not read the scripts of .*package\.json/);
   });
 });
 

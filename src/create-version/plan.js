@@ -22,6 +22,8 @@ import { parseArgs } from "node:util";
 import { CHANGE_TYPES, CHANGELOG_FILE, UNRELEASED_HEADING } from "../constants/changelog.js";
 import {
   CREATE_VERSION_FLAG,
+  DEFAULT_CHECKS_COMMAND,
+  DEFAULT_CHECKS_SCRIPT,
   MAIN_BRANCH,
   MAX_LISTED_ITEMS,
   MIGRATION_STATUS,
@@ -68,7 +70,9 @@ import { describeNpmAuthProblem, describeNpmFirstPublicationWarning } from "./np
  *   migrations: MigrationCheck | null,
  *   changelog: { exists: boolean, entryCount: number, unknownSections: string[] },
  * }} ReleaseState
- * @typedef {{ checks: boolean, prepare: boolean, publish: boolean, publishTitle: string }} ReleaseCapabilities
+ * @typedef {{ checks: boolean, checksMissing?: boolean, prepare: boolean, publish: boolean, publishTitle: string }} ReleaseCapabilities
+ *   `checksMissing` means the project configures no checks, has no `ci` script and did not skip
+ *   them with `checks: false`: a new release is blocked.
  * @typedef {{ id: string, title: string, detail?: string }} ReleasePlanStep
  * @typedef {{ title: string, details: string[] }} ReleaseBlocker
  * @typedef {{ mode: string, steps: ReleasePlanStep[], blockers: ReleaseBlocker[], warnings: string[], pendingVersion: string | null }} ReleasePlan
@@ -79,7 +83,7 @@ import { describeNpmAuthProblem, describeNpmFirstPublicationWarning } from "./np
  */
 
 /** Capabilities of a project without checks, preparation or publication. */
-export const DEFAULT_CAPABILITIES = Object.freeze({ checks: false, prepare: false, publish: false, publishTitle: "Publicar el release" });
+export const DEFAULT_CAPABILITIES = Object.freeze({ checks: false, checksMissing: false, prepare: false, publish: false, publishTitle: "Publicar el release" });
 
 /** Usage printed by `create-version --help`. */
 export const RELEASE_USAGE = [
@@ -584,6 +588,15 @@ function applyNpmAuth(plan, npmAuth) {
   return firstPublicationWarning ? { ...plan, warnings: [...plan.warnings, firstPublicationWarning] } : plan;
 }
 
+/** Stops a new release that nothing would validate before the version is touched. */
+const MISSING_CHECKS_BLOCKER = Object.freeze({
+  title: "El proyecto no valida nada antes de publicar",
+  details: [
+    `Agregá un script ${DEFAULT_CHECKS_SCRIPT} en package.json (se corre ${DEFAULT_CHECKS_COMMAND}) o checks en beez-rp.config.(m)js.`,
+    "Para saltear la validación a propósito: checks: false.",
+  ],
+});
+
 /**
  * Decides what is still missing to publish a release from `main` (or, from a detached `HEAD` on
  * a release tag, to publish that release).
@@ -667,6 +680,10 @@ function planRelease(state, capabilities, { skipUnpublished = false }) {
       detail: `${state.main.behindCount} commit(s) nuevos. Después hay que volver a correr pnpm create-version, que diagnostica con el código nuevo.`,
     });
     return { mode: RELEASE_MODE.newRelease, steps, blockers: [], warnings, pendingVersion: null };
+  }
+
+  if (capabilities.checksMissing) {
+    return { mode: RELEASE_MODE.blocked, steps: [], blockers: [MISSING_CHECKS_BLOCKER], warnings: [], pendingVersion: null };
   }
 
   if (state.migrations?.status === MIGRATION_STATUS.pending) {

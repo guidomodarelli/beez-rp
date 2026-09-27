@@ -120,6 +120,20 @@ describe("create-version plan", () => {
     expect(plan.steps[0].detail).toContain("volver a correr pnpm create-version");
   });
 
+  it("should block a new release without checks, but still sync main and resume a release commit", () => {
+    const unchecked = { ...DEPLOYED_APP, checksMissing: true };
+    const plan = buildReleasePlan(createMainState(), unchecked);
+
+    expect(plan.mode).toBe(RELEASE_MODE.blocked);
+    expect(plan.blockers).toEqual([expect.objectContaining({ title: "El proyecto no valida nada antes de publicar" })]);
+    expect(plan.blockers[0].details.join(" ")).toContain("pnpm run ci");
+    expect(plan.blockers[0].details.join(" ")).toContain("checks: false");
+    // Syncing may bring the configuration that adds the checks, so it is not blocked.
+    expect(stepIds(createMainState({ main: { aheadCommits: [], behindCount: 1 } }), unchecked)).toEqual([RELEASE_STEP.syncMain]);
+    // A release commit already exists: only the push is left, which checks would not run before anyway.
+    expect(stepIds(createMainState({ headSubject: "0.1.0", main: { aheadCommits: [{ subject: "0.1.0" }], behindCount: 0 } }), unchecked)).toEqual([RELEASE_STEP.pushRelease]);
+  });
+
   it("should apply pending migrations before the version and warn when they cannot be verified", () => {
     const pending = createMainState({ migrations: { status: MIGRATION_STATUS.pending, pending: ["0001_init"], target: "db.example.test", reason: null } });
     expect(stepIds(pending)).toEqual([RELEASE_STEP.applyMigrations, RELEASE_STEP.bumpVersion, RELEASE_STEP.pushRelease]);
