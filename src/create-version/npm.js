@@ -57,7 +57,8 @@ import { PACKAGE_MANAGER_USER_AGENT_VARIABLE } from "../constants/guard-publish.
 import { USES_SHELL_FOR_PACKAGE_MANAGERS, runCaptured, runInherited } from "./process.js";
 
 /**
- * @typedef {{ status: string, publishedVersions: string[], reason: string | null }} NpmLookup
+ * @typedef {{ status: string, publishedVersions: string[], latestVersion?: string | null, reason: string | null }} NpmLookup
+ *   `latestVersion` is the version the `latest` dist-tag points at, which may be a prerelease.
  * @typedef {{ name: unknown, version: unknown, integrity: string }} NpmPackDescription
  *   What `npm pack --dry-run --json` reports for the release checkout: package name, version and `sha512-<base64>` integrity.
  * @typedef {{ pack: NpmPackDescription | null, problem: string | null }} NpmPackResult
@@ -102,7 +103,7 @@ function runNpmCaptured(npmArguments, repositoryRoot, environment = process.env)
 }
 
 /**
- * Builds the `npm view` arguments that list the published versions of a package on a registry.
+ * Builds the `npm view` arguments that list the published versions and dist-tags of a package on a registry.
  * `npm view` ignores the manifest `publishConfig`, so the registry is always passed explicitly.
  *
  * @param {string} packageName - npm package name, already checked with `NPM_PACKAGE_NAME_PATTERN`.
@@ -113,7 +114,7 @@ function runNpmCaptured(npmArguments, repositoryRoot, environment = process.env)
  * @throws {Error} When the registry is not a valid http(s) URL or has characters unsafe on the Windows shell.
  */
 export function buildNpmViewArguments(packageName, registryUrl, userConfigPath = null) {
-  return ["view", packageName, "versions", "--json", ...buildRegistryOptions(registryUrl, userConfigPath, "npm view")];
+  return ["view", packageName, "versions", "dist-tags", "--json", ...buildRegistryOptions(registryUrl, userConfigPath, "npm view")];
 }
 
 /**
@@ -396,8 +397,10 @@ export async function lookupPublishedVersions(packageName, repositoryRoot, regis
   }
 
   try {
-    const versions = JSON.parse(result.stdout);
-    return { status: NPM_LOOKUP_STATUS.ok, publishedVersions: Array.isArray(versions) ? versions : [versions], reason: null };
+    // With two fields `npm view --json` answers `{ versions, "dist-tags" }`; a single version comes as a string.
+    const { versions = [], "dist-tags": distTags = {} } = JSON.parse(result.stdout);
+    const latestVersion = typeof distTags[NPM_DIST_TAG] === "string" ? distTags[NPM_DIST_TAG] : null;
+    return { status: NPM_LOOKUP_STATUS.ok, publishedVersions: Array.isArray(versions) ? versions : [versions], latestVersion, reason: null };
   } catch (error) {
     return {
       status: NPM_LOOKUP_STATUS.failed,

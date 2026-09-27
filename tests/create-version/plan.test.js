@@ -419,6 +419,30 @@ describe("create-version plan from a detached release tag", () => {
     expect(onlyPrerelease.mode).toBe(RELEASE_MODE.resume);
   });
 
+  it("should push only the tag first when it is missing from origin but origin/main already has its commit", () => {
+    const plan = buildReleasePlan(createMainState({ ...DETACHED_ON_TAG, remoteReleaseTagSha: null, headOnRemoteMain: true }), NPM_PACKAGE);
+
+    expect(plan.mode).toBe(RELEASE_MODE.resume);
+    expect(plan.steps.map((planStep) => planStep.id)).toEqual([RELEASE_STEP.pushReleaseTag, RELEASE_STEP.prepareRelease, RELEASE_STEP.publishRelease]);
+    expect(plan.steps[0].title).toBe("Subir v0.2.0 a origin");
+  });
+
+  it("should refuse to publish a tag below the version the latest dist-tag points at, even a prerelease", () => {
+    const behindPrerelease = buildReleasePlan(
+      createMainState({ ...DETACHED_ON_TAG, npm: { ...NPM_WITH_FIRST_RELEASE, publishedVersions: ["0.1.0", "0.3.0-beta.1"], latestVersion: "0.3.0-beta.1" } }),
+      NPM_PACKAGE
+    );
+
+    expect(behindPrerelease.mode).toBe(RELEASE_MODE.blocked);
+    expect(behindPrerelease.blockers.map((blocker) => blocker.title)).toEqual(["0.2.0 no es mayor que 0.3.0-beta.1, la versión del dist-tag latest en npm"]);
+
+    const aboveOwnPrerelease = buildReleasePlan(
+      createMainState({ ...DETACHED_ON_TAG, npm: { ...NPM_WITH_FIRST_RELEASE, publishedVersions: ["0.1.0", "0.2.0-beta.1"], latestVersion: "0.2.0-beta.1" } }),
+      NPM_PACKAGE
+    );
+    expect(aboveOwnPrerelease.mode).toBe(RELEASE_MODE.resume);
+  });
+
   it("should still require valid npm credentials to publish from the tag", () => {
     const plan = buildReleasePlan(createMainState({ ...DETACHED_ON_TAG, npmAuth: createNpmAuth({ status: NPM_AUTH_STATUS.invalidToken }) }), NPM_PACKAGE);
 

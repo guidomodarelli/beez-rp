@@ -35,7 +35,7 @@ import {
   VERSION_PREFIX_PATTERN,
 } from "../constants/create-version.js";
 import { RELEASE_TYPE } from "../constants/versions.js";
-import { compareReleaseVersions, findHighestStableVersion, isReleaseCommitSubject, isStableReleaseVersion, toReleaseTag } from "../versions.js";
+import { compareReleaseVersions, findHighestStableVersion, isReleaseCommitSubject, isStableReleaseVersion, isStableVersionAbove, toReleaseTag } from "../versions.js";
 import { describeNpmAuthProblem, describeNpmFirstPublicationWarning } from "./npm-auth.js";
 
 /**
@@ -59,6 +59,7 @@ import { describeNpmAuthProblem, describeNpmFirstPublicationWarning } from "./np
  *   headSha?: string | null,
  *   headReleaseTag?: string | null,
  *   remoteReleaseTagSha?: string | null,
+ *   headOnRemoteMain?: boolean,
  *   releasedVersion?: string | null,
  *   lastRelease?: LastReleaseSnapshot | null,
  *   unreleasedCommits: ReleaseCommit[],
@@ -378,9 +379,10 @@ function findDetachedReleaseVersion(state) {
 }
 
 /**
- * Lists why a detached release tag cannot be published: its commit and tag must already be on
- * `origin` (a detached publication never pushes), and its version must be higher than every
- * stable version on npm (the publication moves the `latest` dist-tag).
+ * Lists why a detached release tag cannot be published: its commit must already be on `origin`
+ * (a detached publication never pushes `main`; it only pushes a tag missing from `origin` whose
+ * commit `origin/main` already has), and its version must be higher than every stable version on
+ * npm and than the version the `latest` dist-tag points at (the publication moves `latest`).
  *
  * @param {string} version - Version found by {@link findDetachedReleaseVersion}.
  * @param {ReleaseState} state - Snapshot.
@@ -392,23 +394,28 @@ function findDetachedReleaseBlockers(version, state) {
   /** @type {ReleaseBlocker[]} */
   const blockers = [];
 
-  if (!state.remoteReleaseTagSha) {
+  if (!state.remoteReleaseTagSha && !state.headOnRemoteMain) {
     blockers.push({
       title: `${tag} no está en origin (o no se pudo consultar origin)`,
-      details: ["Desacoplado solo se publica un release cuyo commit y tag ya están en origin: publicarlo dejaría en npm una versión sin su commit en origin.", returnToMain],
+      details: ["Desacoplado solo se publica un release cuyo commit ya está en origin: publicarlo dejaría en npm una versión sin su commit en origin.", returnToMain],
     });
-  } else if (state.remoteReleaseTagSha !== state.headSha) {
+  } else if (state.remoteReleaseTagSha && state.remoteReleaseTagSha !== state.headSha) {
     blockers.push({
       title: `${tag} de origin apunta a otro commit que el ${tag} local`,
       details: [`origin: ${state.remoteReleaseTagSha} · HEAD: ${state.headSha ?? "desconocido"}.`, `Revisá cuál es el release correcto antes de publicar. ${returnToMain}`],
     });
   }
 
-  const latestPublished = findHighestStableVersion(state.npm?.publishedVersions ?? []);
+  const highestStable = findHighestStableVersion(state.npm?.publishedVersions ?? []);
+  const latestDistTag = state.npm?.latestVersion ?? null;
+  const higherPublished = [
+    { publishedVersion: highestStable, description: "la versión más alta publicada en npm" },
+    { publishedVersion: latestDistTag, description: `la versión del dist-tag ${NPM_DIST_TAG} en npm` },
+  ].find(({ publishedVersion }) => publishedVersion && !isStableVersionAbove(version, publishedVersion));
 
-  if (latestPublished && compareReleaseVersions(version, latestPublished) <= 0) {
+  if (higherPublished) {
     blockers.push({
-      title: `${version} no es mayor que ${latestPublished}, la versión más alta publicada en npm`,
+      title: `${version} no es mayor que ${higherPublished.publishedVersion}, ${higherPublished.description}`,
       details: [
         `Publicarla con --tag ${NPM_DIST_TAG} movería ${NPM_DIST_TAG} hacia atrás: si hace falta, publicala a mano con otro dist-tag.`,
         `Hacé git switch ${MAIN_BRANCH} para volver.`,
@@ -450,6 +457,10 @@ function planDetachedResume(version, capabilities, state) {
 
   /** @type {ReleasePlanStep[]} */
   const steps = [];
+
+  if (!state.remoteReleaseTagSha) {
+    steps.push({ id: RELEASE_STEP.pushReleaseTag, title: `Subir ${tag} a origin`, detail: `Su commit ya está en ${MAIN_BRANCH} de origin: solo falta el tag.` });
+  }
 
   if (capabilities.prepare) {
     steps.push({ id: RELEASE_STEP.prepareRelease, title: `Preparar el release ${version}`, detail: `Desde el tag ${tag} (HEAD desacoplado): no se toca ${MAIN_BRANCH}.` });

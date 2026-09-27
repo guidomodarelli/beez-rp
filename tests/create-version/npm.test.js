@@ -238,11 +238,12 @@ describe("npm view arguments", () => {
       "view",
       "@team/pkg",
       "versions",
+      "dist-tags",
       "--json",
       "--registry",
       "https://npm.example.test/team/",
     ]);
-    expect(buildNpmViewArguments("pkg", "https://registry.npmjs.org/")).toEqual(["view", "pkg", "versions", "--json", "--registry", "https://registry.npmjs.org/"]);
+    expect(buildNpmViewArguments("pkg", "https://registry.npmjs.org/")).toEqual(["view", "pkg", "versions", "dist-tags", "--json", "--registry", "https://registry.npmjs.org/"]);
   });
 
   it("adds the temporary authenticated user config when there is one", () => {
@@ -250,6 +251,7 @@ describe("npm view arguments", () => {
       "view",
       "pkg",
       "versions",
+      "dist-tags",
       "--json",
       "--registry",
       "https://npm.example.test/",
@@ -304,7 +306,7 @@ describe("published versions lookup", () => {
 
         writeFileSync(path.join(packageRoot, ".env"), `NPM_TOKEN=${FIXTURE_TOKEN}\n`);
         const authenticated = await lookupPublishedVersions(PRIVATE_PACKAGE_NAME, packageRoot, registry.registryUrl);
-        expect(authenticated).toEqual({ status: NPM_LOOKUP_STATUS.ok, publishedVersions: ["1.0.0", "1.1.0"], reason: null });
+        expect(authenticated).toEqual({ status: NPM_LOOKUP_STATUS.ok, publishedVersions: ["1.0.0", "1.1.0"], latestVersion: "1.1.0", reason: null });
       } finally {
         await registry.close();
       }

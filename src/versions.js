@@ -67,6 +67,26 @@ export function compareReleaseVersions(leftVersion, rightVersion) {
 }
 
 /**
+ * Tells whether a stable version is above any semver version, prereleases included: `1.0.0` is
+ * above `1.0.0-beta.1` and `0.9.0`, but not above `1.1.0-beta.1`.
+ *
+ * @param {string} stableVersion - Stable `X.Y.Z` version.
+ * @param {string} otherVersion - Version to compare with, such as the `latest` dist-tag of npm.
+ * @returns {boolean} `true` when `stableVersion` is higher; `false` otherwise or when `otherVersion` is not semver.
+ */
+export function isStableVersionAbove(stableVersion, otherVersion) {
+  const match = SEMVER_PATTERN.exec(String(otherVersion));
+
+  if (!match) {
+    return false;
+  }
+
+  const [, core, prerelease] = match;
+  const difference = compareReleaseVersions(stableVersion, core);
+  return difference > 0 || (difference === 0 && Boolean(prerelease));
+}
+
+/**
  * Returns the highest stable version of a list, ignoring prereleases and invalid entries.
  *
  * @param {unknown[]} versions - Versions, such as the ones `npm view <pkg> versions` lists.

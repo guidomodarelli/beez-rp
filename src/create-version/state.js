@@ -309,6 +309,11 @@ export async function collectReleaseState({
   const headReleaseTag = headSha ? await findReleaseTagAt(reader, headVersion, headSha) : null;
   // Only a detached publication from a tag needs to prove that the tag is on origin.
   const remoteReleaseTagSha = !currentBranch && headReleaseTag ? await readRemoteReleaseTagCommit(reader, headReleaseTag) : null;
+  // A tag missing from origin can still be pushed from the detached HEAD when origin/main already has its commit.
+  const headOnRemoteMain =
+    !currentBranch && headReleaseTag && !remoteReleaseTagSha && remoteMainExists
+      ? (await reader.tryGit(["merge-base", "--is-ancestor", "HEAD", REMOTE_MAIN_REF])) !== null
+      : false;
   const releasedVersion = remoteMainExists ? await readPackageVersionAt(reader, REMOTE_MAIN_REF) : null;
   const lastRelease = remoteMainExists ? await findLastRelease(reader, REMOTE_MAIN_REF) : null;
   const unreleasedCommits = remoteMainExists ? await listCommits(reader, lastRelease ? `${lastRelease.sha}..${REMOTE_MAIN_REF}` : REMOTE_MAIN_REF) : [];
@@ -350,6 +355,7 @@ export async function collectReleaseState({
     headSha,
     headReleaseTag,
     remoteReleaseTagSha,
+    headOnRemoteMain,
     releasedVersion,
     lastRelease,
     unreleasedCommits,

@@ -903,4 +903,59 @@ describe("beez-rp create-version command", () => {
     },
     GIT_FIXTURE_TEST_TIMEOUT_MS
   );
+
+  it(
+    "should push only a local release tag whose commit origin/main already has, and publish it from the detached HEAD",
+    async () => {
+      const registry = await startOwnedRegistry({ publishedVersions: ["0.1.0"] });
+      const manifestFields = publishTo(registry.registryUrl);
+      const { repositoryRoot, remoteRoot } = createReleasedRepository("0.1.0", manifestFields);
+      const hookLog = path.join(path.dirname(repositoryRoot), "hooks.log");
+      pushConfiguration(repositoryRoot, npmReleaseConfiguration(hookLog));
+      commitVersion(repositoryRoot, "0.2.0", "0.2.0", manifestFields);
+      runGit(["tag", "-a", "v0.2.0", "-m", "0.2.0"], repositoryRoot);
+      const releaseSha = runGit(["rev-parse", "HEAD"], repositoryRoot);
+      commitVersion(repositoryRoot, "0.2.0", "Merge pull request #3 from fixture/feature", manifestFields);
+      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+      const remoteMainSha = runGit(["rev-parse", "main"], remoteRoot);
+      const ownerToken = { NPM_TOKEN: OWNER_TOKEN };
+
+      runGit(["switch", "--quiet", "--detach", "v0.2.0"], repositoryRoot);
+      const resumed = await runCliAsync(repositoryRoot, [], ownerToken);
+      const resumedOutput = flattenOutput(resumed.output);
+
+      expect(resumed.status, resumed.output).toBe(0);
+      expect(resumedOutput).not.toContain("v0.2.0 no está en origin");
+      expect(resumedOutput).toContain("v0.2.0 publicado");
+      expect(runGit(["rev-parse", "refs/tags/v0.2.0^{commit}"], remoteRoot)).toBe(releaseSha);
+      expect(runGit(["rev-parse", "main"], remoteRoot)).toBe(remoteMainSha);
+      expect(readFileSync(hookLog, "utf8")).toBe("prepare 0.2.0\n");
+      expect(registry.publications).toEqual([{ packageName: "fixture-app", version: "0.2.0", user: OWNER_USER }]);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should not publish from a detached release tag below the prerelease the latest dist-tag points at",
+    async () => {
+      const registry = await startOwnedRegistry({ publishedVersions: ["0.1.0", "0.3.0-beta.1"] });
+      const manifestFields = publishTo(registry.registryUrl);
+      const { repositoryRoot } = createReleasedRepository("0.1.0", manifestFields);
+      const hookLog = path.join(path.dirname(repositoryRoot), "hooks.log");
+      pushConfiguration(repositoryRoot, npmReleaseConfiguration(hookLog));
+      commitVersion(repositoryRoot, "0.2.0", "0.2.0", manifestFields);
+      runGit(["tag", "-a", "v0.2.0", "-m", "0.2.0"], repositoryRoot);
+      runGit(["push", "--quiet", "origin", "main", "refs/tags/v0.2.0"], repositoryRoot);
+      runGit(["switch", "--quiet", "--detach", "v0.2.0"], repositoryRoot);
+
+      const detached = await runCliAsync(repositoryRoot, [], { NPM_TOKEN: OWNER_TOKEN });
+      const output = flattenOutput(detached.output);
+
+      expect(detached.status, detached.output).toBe(0);
+      expect(output).toContain("0.2.0 no es mayor que 0.3.0-beta.1, la versión del dist-tag latest en npm");
+      expect(existsSync(hookLog)).toBe(false);
+      expect(registry.publications).toEqual([]);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
 });

@@ -7,6 +7,7 @@ import {
   findHighestStableVersion,
   isReleaseCommitSubject,
   isStableReleaseVersion,
+  isStableVersionAbove,
   listAllowedVersionsAfter,
   listNextVersions,
   parseReleaseVersion,
@@ -104,5 +105,13 @@ describe("release version ordering", () => {
   it("should find the highest stable version, ignoring prereleases and invalid entries", () => {
     expect(findHighestStableVersion(["1.8.0", "1.10.0-beta.1", "1.9.0", "latest", 3])).toBe("1.9.0");
     expect(findHighestStableVersion([])).toBeNull();
+  });
+
+  it("should compare a stable version with any semver version, prereleases included", () => {
+    expect(isStableVersionAbove("1.9.0", "1.8.5")).toBe(true);
+    expect(isStableVersionAbove("1.9.0", "1.9.0-beta.1")).toBe(true);
+    expect(isStableVersionAbove("1.9.0", "1.9.0")).toBe(false);
+    expect(isStableVersionAbove("1.9.0", "2.0.0-beta.1")).toBe(false);
+    expect(isStableVersionAbove("1.9.0", "not-a-version")).toBe(false);
   });
 });

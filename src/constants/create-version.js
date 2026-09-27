@@ -141,6 +141,7 @@ export const RELEASE_STEP = Object.freeze({
   bumpVersion: "bump-version",
   prepareRelease: "prepare-release",
   pushRelease: "push-release",
+  pushReleaseTag: "push-release-tag",
   publishRelease: "publish-release",
 });
 

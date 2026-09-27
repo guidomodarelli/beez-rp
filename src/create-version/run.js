@@ -217,7 +217,7 @@ function renderDiagnosis(state, repositoryRoot) {
   ];
 
   if (state.npm) {
-    const latestPublished = state.npm.publishedVersions.at(-1);
+    const latestPublished = state.npm.latestVersion ?? state.npm.publishedVersions.at(-1);
     rows.push(
       renderRow(
         state.npm.status === NPM_LOOKUP_STATUS.ok ? ICON.success : ICON.failure,
@@ -652,6 +652,33 @@ async function pushReleaseStep(context) {
 }
 
 /**
+ * Pushes only the release tag of a detached `HEAD` whose commit `origin/main` already has, so
+ * the detached publication can go on without touching `main`. The push is not forced: a tag that
+ * already exists on `origin` with another commit rejects it.
+ *
+ * @param {ReleaseContext} context - Release context.
+ * @returns {Promise<void>}
+ * @throws {ReleaseStepError} When the push fails or the tag does not show up on `origin`.
+ */
+async function pushReleaseTagStep(context) {
+  const version = requireReleaseVersion(context);
+  const tag = toReleaseTag(version);
+
+  await runGitStep(
+    context,
+    ["push", RELEASE_REMOTE, `refs/tags/${tag}`],
+    `El push de ${tag} falló`,
+    `No se publicó nada: corregí el error y corré pnpm create-version desde ${tag} (HEAD desacoplado).`
+  );
+
+  if (!(await context.reader.tryGit(["ls-remote", "--tags", RELEASE_REMOTE, `refs/tags/${tag}`]))) {
+    throw new ReleaseStepError(`${tag} no aparece en ${RELEASE_REMOTE} después del push.`, `Subilo con git push ${RELEASE_REMOTE} ${tag} y volvé a correr pnpm create-version desde el tag.`);
+  }
+
+  context.version = version;
+}
+
+/**
  * Lists the tracked files that differ from `HEAD`. `prepare` may create untracked or ignored
  * output (`dist/`, `releases/`), but a modified tracked file (such as `package.json`) means
  * `npm pack --dry-run` would no longer read the release commit.
@@ -837,6 +864,7 @@ const STEP_EXECUTORS = {
   [RELEASE_STEP.bumpVersion]: bumpVersionStep,
   [RELEASE_STEP.prepareRelease]: prepareReleaseStep,
   [RELEASE_STEP.pushRelease]: pushReleaseStep,
+  [RELEASE_STEP.pushReleaseTag]: pushReleaseTagStep,
   [RELEASE_STEP.publishRelease]: publishReleaseStep,
 };
 
