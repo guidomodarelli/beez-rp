@@ -13,15 +13,25 @@ export {
   computeSha256,
   expandArtifactPattern,
   findArchiveProblems,
+  findPackedFileSetProblems,
   findPreparedArtifact,
+  findReleaseManifestProblems,
+  isRewrittenDependencySpecifier,
   isSafeArtifactPath,
   readTarballEntries,
   verifyPreparedArtifact,
 } from "./artifact.js";
 export { defineCreateVersionConfig, loadCreateVersionConfig, resolveCreateVersionConfig } from "./config.js";
 export { ReleaseStepError } from "./errors.js";
-export { buildNpmPublishArguments, lookupPublishedVersions, publishToNpm, withNpmAuthConfig } from "./npm.js";
+export {
+  buildNpmPublishArguments,
+  listNpmPackFiles,
+  lookupPublishedVersions,
+  parseNpmPackDryRunOutput,
+  publishToNpm,
+  withNpmAuthConfig,
+} from "./npm.js";
 export { DEFAULT_CAPABILITIES, RELEASE_USAGE, buildReleasePlan, describeFeatureBranchGaps, parseReleaseArguments } from "./plan.js";
-export { createGitReader, listCommits, parseCommitLog, readPackageVersionAt, runCaptured, runCommandLine, runInherited } from "./process.js";
+export { createGitReader, listCommits, parseCommitLog, readPackageManifestAt, readPackageVersionAt, runCaptured, runCommandLine, runInherited } from "./process.js";
 export { createHookContext, runCreateVersion } from "./run.js";
 export { collectReleaseState, findLastRelease, readChangelogState } from "./state.js";

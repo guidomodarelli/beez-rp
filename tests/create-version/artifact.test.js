@@ -8,15 +8,21 @@ import { gzipSync } from "node:zlib";
 import {
   computeSha256,
   expandArtifactPattern,
+  findPackedFileSetProblems,
   findPreparedArtifact,
+  findReleaseManifestProblems,
+  isRewrittenDependencySpecifier,
   isSafeArtifactPath,
   readTarballEntries,
   verifyPreparedArtifact,
 } from "../../src/create-version/artifact.js";
-import { withNpmAuthConfig } from "../../src/create-version/npm.js";
+import { listNpmPackFiles, parseNpmPackDryRunOutput, withNpmAuthConfig } from "../../src/create-version/npm.js";
 
 /** Layout used by checksum-addressed release preparation. */
 const CHECKSUM_ARCHIVE_PATTERN = "releases/{version}-{sha256}/{name}-{version}.tgz";
+
+/** Running the real npm CLI (through the Windows shell) can exceed the default timeout. */
+const NPM_COMMAND_TEST_TIMEOUT_MS = 60_000;
 
 /** Manifest of the fixture package. */
 const MANIFEST = { name: "fixture-pkg", version: "1.2.0", files: ["dist"], exports: { ".": { types: "./dist/index.d.ts", default: "./dist/index.js" } } };
@@ -217,33 +223,110 @@ describe("prepared artifact lookup", () => {
 
 describe("prepared artifact verification", () => {
   /**
+   * Builds the `npm pack --dry-run` listing of a package.
+   *
    * @param {Record<string, string>} files - Packed files.
-   * @param {Record<string, unknown>} [manifest] - Repository manifest.
+   * @param {Record<string, unknown>} [manifest] - Release manifest.
+   * @returns {import("../../src/create-version/artifact.js").NpmPackListing} Listing with exactly those files.
+   */
+  function npmListingOf(files, manifest = MANIFEST) {
+    return { name: manifest.name, version: manifest.version, files: Object.keys(files) };
+  }
+
+  /**
+   * @param {Record<string, string>} files - Packed files.
+   * @param {Record<string, unknown>} [manifest] - Release manifest.
+   * @param {string[]} [npmFiles] - Files npm reports; defaults to the packed ones.
    * @returns {string[]} Verification problems.
    */
-  function verify(files, manifest = MANIFEST) {
+  function verify(files, manifest = MANIFEST, npmFiles = Object.keys(files)) {
     const root = createRoot();
     const stored = storeWithChecksum(root, packArchive(root, files));
     const artifact = findPreparedArtifact(root, CHECKSUM_ARCHIVE_PATTERN, { version: MANIFEST.version, packageName: MANIFEST.name });
     expect(artifact?.path).toBe(stored);
-    return verifyPreparedArtifact(root, /** @type {import("../../src/create-version/artifact.js").PreparedArtifact} */ (artifact), manifest);
+    return verifyPreparedArtifact(root, /** @type {import("../../src/create-version/artifact.js").PreparedArtifact} */ (artifact), {
+      manifest,
+      npmPack: { ...npmListingOf(files, manifest), files: npmFiles },
+    });
   }
 
   /**
    * @param {Buffer} archive - Gzipped tar written by {@link writeTarFixture}.
-   * @param {Record<string, unknown>} [manifest] - Repository manifest.
+   * @param {Record<string, unknown>} [manifest] - Release manifest.
+   * @param {string[]} [npmFiles] - Files npm reports; defaults to the valid package.
    * @returns {string[]} Verification problems.
    */
-  function verifyArchive(archive, manifest = MANIFEST) {
+  function verifyArchive(archive, manifest = MANIFEST, npmFiles = Object.keys(validPackage())) {
     const root = createRoot();
     writeFileSync(path.join(root, "archive.tgz"), archive);
     storeWithChecksum(root, "archive.tgz");
     const artifact = findPreparedArtifact(root, CHECKSUM_ARCHIVE_PATTERN, { version: MANIFEST.version, packageName: MANIFEST.name });
-    return verifyPreparedArtifact(root, /** @type {import("../../src/create-version/artifact.js").PreparedArtifact} */ (artifact), manifest);
+    return verifyPreparedArtifact(root, /** @type {import("../../src/create-version/artifact.js").PreparedArtifact} */ (artifact), {
+      manifest,
+      npmPack: { name: manifest.name, version: manifest.version, files: npmFiles },
+    });
+  }
+
+  /**
+   * @param {Record<string, unknown>} packedManifest - `package.json` inside the archive.
+   * @param {Record<string, unknown>} releaseManifest - `package.json` of the release commit.
+   * @returns {string[]} Verification problems.
+   */
+  function verifyPackedManifest(packedManifest, releaseManifest) {
+    return verify({ ...validPackage(), "package.json": JSON.stringify(packedManifest) }, releaseManifest);
   }
 
   it("should accept an exact tar archive of the valid package, so the fixture writer is sound", () => {
     expect(verifyArchive(writeTarFixture([{ name: "package/", type: "5" }, ...validTarEntries()]))).toEqual([]);
+  });
+
+  it("should accept a package whose checksum, name, version, files and entrypoints match", () => {
+    expect(verify(validPackage())).toEqual([]);
+  });
+
+  it("should require exactly the files npm packs, reporting missing and unexpected ones", () => {
+    const withSecret = { ...validPackage(), ".env": "NPM_TOKEN=secret", "src/index.ts": "export {};" };
+
+    expect(verify(withSecret, MANIFEST, Object.keys(validPackage()))).toEqual([
+      "archivo que npm no empaqueta en el tarball: .env",
+      "archivo que npm no empaqueta en el tarball: src/index.ts",
+    ]);
+    expect(verify(validPackage(), MANIFEST, [...Object.keys(validPackage()), "LICENSE", "dist/extra.js"])).toEqual([
+      "falta en el tarball un archivo que npm empaqueta: LICENSE",
+      "falta en el tarball un archivo que npm empaqueta: dist/extra.js",
+    ]);
+  });
+
+  it("should accept whatever npm reports, such as COPYING, browser files, dotfiles or bundled dependencies", () => {
+    const npmDecidedPackage = {
+      ...validPackage(),
+      COPYING: "license",
+      "browser/index.js": "export {};",
+      ".eslintrc.json": "{}",
+      "node_modules/bundled/index.js": "module.exports = {};",
+    };
+
+    expect(verify(npmDecidedPackage)).toEqual([]);
+  });
+
+  it("should compare file sets independently of order and report each difference once", () => {
+    expect(findPackedFileSetProblems(["b.js", "a.js", "a.js"], ["a.js", "b.js"])).toEqual([]);
+    expect(findPackedFileSetProblems(["a.js", "c.js"], ["b.js", "a.js"])).toEqual([
+      "falta en el tarball un archivo que npm empaqueta: c.js",
+      "archivo que npm no empaqueta en el tarball: b.js",
+    ]);
+  });
+
+  it("should reject an npm listing of another package or version", () => {
+    const root = createRoot();
+    storeWithChecksum(root, packArchive(root, validPackage()));
+    const artifact = /** @type {import("../../src/create-version/artifact.js").PreparedArtifact} */ (
+      findPreparedArtifact(root, CHECKSUM_ARCHIVE_PATTERN, { version: MANIFEST.version, packageName: MANIFEST.name })
+    );
+
+    expect(
+      verifyPreparedArtifact(root, artifact, { manifest: MANIFEST, npmPack: { name: MANIFEST.name, version: "9.9.9", files: Object.keys(validPackage()) } })
+    ).toEqual([expect.stringContaining("npm pack --dry-run describe fixture-pkg@9.9.9")]);
   });
 
   it("should reject repeated archive paths, including a second package.json that npm would publish", () => {
@@ -297,6 +380,44 @@ describe("prepared artifact verification", () => {
     ]);
   });
 
+  it("should honor a PAX size override, so an entry hidden behind a larger ustar size is still found", () => {
+    const readme = Buffer.from("# fixture", "utf8");
+    const hiddenSecret = Buffer.from("NPM_TOKEN=secret", "utf8");
+    // The ustar size covers the next header and its data; the PAX size (the one tar readers honor) only covers the README.
+    const hidingReadme = [
+      tarHeader({ name: "PaxHeader/README.md", type: "x", size: Buffer.byteLength(paxRecord("size", String(readme.length))) }),
+      padToBlock(Buffer.from(paxRecord("size", String(readme.length)), "utf8")),
+      tarHeader({ name: "package/README.md", type: "0", size: 1024 }),
+      padToBlock(readme),
+      tarHeader({ name: "package/.env", type: "0", size: hiddenSecret.length }),
+      padToBlock(hiddenSecret),
+    ];
+    const otherEntries = validTarEntries().filter((entry) => entry.name !== "package/README.md");
+    const archive = gzipSync(
+      Buffer.concat([
+        ...hidingReadme,
+        ...otherEntries.flatMap(({ name, content = "" }) => [tarHeader({ name, type: "0", size: Buffer.byteLength(content) }), padToBlock(Buffer.from(content))]),
+        Buffer.alloc(1024),
+      ])
+    );
+
+    const entries = readTarballEntries(archive);
+    expect(entries.find((entry) => entry.name === "package/README.md")?.content.toString("utf8")).toBe("# fixture");
+    expect(entries.map((entry) => entry.name)).toContain("package/.env");
+    expect(verifyArchive(archive)).toEqual(["archivo que npm no empaqueta en el tarball: .env"]);
+  });
+
+  it("should reject PAX global size overrides, invalid PAX sizes and truncated entries", () => {
+    const globalSize = { name: "pax_global_header", type: "g", content: paxRecord("size", "0") };
+    const invalidSize = [{ name: "PaxHeader/README.md", type: "x", content: paxRecord("size", "-1") }, ...validTarEntries()];
+    const truncated = gzipSync(Buffer.concat([tarHeader({ name: "package/README.md", type: "0", size: 4096 }), padToBlock(Buffer.from("# fixture"))]));
+
+    expect(verifyArchive(writeTarFixture([globalSize, ...validTarEntries()]))).toEqual([expect.stringContaining("pax_global_header")]);
+    expect(readTarballEntries(writeTarFixture([globalSize])).map(({ name, kind }) => ({ name, kind }))).toEqual([{ name: "pax_global_header", kind: "unsupported" }]);
+    expect(verifyArchive(writeTarFixture(invalidSize))).toEqual([expect.stringContaining('no se pudo leer el tarball (size PAX inválido ("-1"))')]);
+    expect(verifyArchive(truncated)).toEqual([expect.stringContaining("no se pudo leer el tarball (la entrada package/README.md declara 4096 bytes")]);
+  });
+
   it("should ignore directory entries but reject unsafe directory names", () => {
     const withDirectories = [{ name: "package/", type: "5" }, { name: "package/dist/", type: "5" }, ...validTarEntries()];
 
@@ -309,61 +430,12 @@ describe("prepared artifact verification", () => {
     ]);
   });
 
-  it("should match files globs with character classes, negated classes, ranges and brace alternations like npm", () => {
-    const globManifest = { ...MANIFEST, files: ["dist/[ab].js", "dist/index.*", "lib/[!xv]*.js", "lib/v[0-9].js", "types/*.{d.ts,d.mts}", "extra/[^.]*"] };
-    const globPackage = {
-      ...validPackage(),
-      "package.json": JSON.stringify(globManifest),
-      "dist/a.js": "export {};",
-      "dist/b.js": "export {};",
-      "lib/main.js": "export {};",
-      "lib/v2.js": "export {};",
-      "types/index.d.ts": "export {};",
-      "types/index.d.mts": "export {};",
-      "extra/notes.txt": "notes",
-    };
-
-    expect(verify(globPackage, globManifest)).toEqual([]);
-    expect(verify({ ...globPackage, "dist/c.js": "export {};" }, globManifest)).toEqual([expect.stringContaining('fuera de "files" en el tarball: dist/c.js')]);
-    expect(verify({ ...globPackage, "lib/x-internal.js": "export {};" }, globManifest)).toEqual([expect.stringContaining("lib/x-internal.js")]);
-    expect(verify({ ...globPackage, "lib/va.js": "export {};" }, globManifest)).toEqual([expect.stringContaining("lib/va.js")]);
-    expect(verify({ ...globPackage, "types/index.d.cts": "export {};" }, globManifest)).toEqual([expect.stringContaining("types/index.d.cts")]);
-  });
-
   it("should require the module entrypoint of the packed manifest", () => {
     const moduleManifest = { ...MANIFEST, module: "./dist/index.mjs" };
     const modulePackage = { ...validPackage(), "package.json": JSON.stringify(moduleManifest) };
 
     expect(verify(modulePackage, moduleManifest)).toEqual([expect.stringContaining("falta el entrypoint público dist/index.mjs")]);
     expect(verify({ ...modulePackage, "dist/index.mjs": "export {};" }, moduleManifest)).toEqual([]);
-  });
-
-  it("should accept declared bundled dependencies under node_modules and reject any other node_modules file", () => {
-    const bundledManifest = { ...MANIFEST, dependencies: { foo: "^1.0.0", "@scope/bar": "^2.0.0" }, bundleDependencies: ["foo", "@scope/bar"] };
-    const bundledPackage = {
-      ...validPackage(),
-      "package.json": JSON.stringify(bundledManifest),
-      "node_modules/foo/index.js": "module.exports = {};",
-      "node_modules/foo/node_modules/nested/index.js": "module.exports = {};",
-      "node_modules/@scope/bar/index.js": "module.exports = {};",
-    };
-    const allBundledManifest = { ...MANIFEST, dependencies: { foo: "^1.0.0" }, bundledDependencies: true };
-
-    expect(verify(bundledPackage, bundledManifest)).toEqual([]);
-    expect(verify({ ...bundledPackage, "node_modules/other/index.js": "steal();" }, bundledManifest)).toEqual([
-      expect.stringContaining("archivo privado en el tarball: node_modules/other/index.js"),
-    ]);
-    expect(verify({ ...bundledPackage, "node_modules/foo/.env": "NPM_TOKEN=secret" }, bundledManifest)).toEqual([
-      expect.stringContaining("archivo privado en el tarball: node_modules/foo/.env"),
-    ]);
-    expect(
-      verify({ ...validPackage(), "package.json": JSON.stringify(allBundledManifest), "node_modules/foo/index.js": "module.exports = {};" }, allBundledManifest)
-    ).toEqual([]);
-    expect(verify({ ...validPackage(), "node_modules/foo/index.js": "module.exports = {};" })).toEqual([expect.stringContaining("archivo privado")]);
-  });
-
-  it("should accept a package whose checksum, name, version, files and entrypoints match", () => {
-    expect(verify(validPackage())).toEqual([]);
   });
 
   it("should read long file names written as GNU or PAX tar headers", () => {
@@ -382,82 +454,167 @@ describe("prepared artifact verification", () => {
       findPreparedArtifact(root, CHECKSUM_ARCHIVE_PATTERN, { version: MANIFEST.version, packageName: MANIFEST.name })
     );
 
-    expect(verifyPreparedArtifact(root, artifact, MANIFEST)).toEqual([expect.stringContaining("no coincide")]);
+    expect(verifyPreparedArtifact(root, artifact, { manifest: MANIFEST, npmPack: npmListingOf(validPackage()) })).toEqual([expect.stringContaining("no coincide")]);
   });
 
-  it("should reject private files, undeclared files, missing entrypoints and a different package", () => {
+  it("should reject missing entrypoints and a different package", () => {
     const { "dist/index.d.ts": _removed, ...withoutTypes } = validPackage();
 
-    expect(verify({ ...validPackage(), ".env": "NPM_TOKEN=secret" })).toEqual([expect.stringContaining("archivo privado")]);
-    expect(verify({ ...validPackage(), "src/index.ts": "export {};" })).toEqual([expect.stringContaining('fuera de "files"')]);
     expect(verify(withoutTypes)).toEqual([expect.stringContaining("dist/index.d.ts")]);
     expect(verify({ ...validPackage(), "package.json": JSON.stringify({ ...MANIFEST, version: "1.1.0" }) })).toEqual([expect.stringContaining("fixture-pkg@1.1.0")]);
   });
 
-  it("should accept files matched by npm globs and directory entries, and reject files no entry covers", () => {
-    const globManifest = { ...MANIFEST, files: ["./dist/**/*.js", "dist/*.d.ts", "docs/", "!dist/internal"] };
-    const globPackage = {
-      ...validPackage(),
-      "package.json": JSON.stringify(globManifest),
-      "dist/nested/deep/util.js": "export {};",
-      "docs/rules/guide.md": "# guide",
-    };
+  it("should reject a packed manifest whose dependencies, install scripts or exports differ from the release commit", () => {
+    const releaseManifest = { ...MANIFEST, dependencies: { "left-pad": "^1.3.0" } };
 
-    expect(verify(globPackage, globManifest)).toEqual([]);
-    expect(verify({ ...globPackage, "dist/notes.md": "notes" }, globManifest)).toEqual([expect.stringContaining('fuera de "files" en el tarball: dist/notes.md')]);
-    expect(verify({ ...globPackage, "dist/internal/secret.js": "export {};" }, globManifest)).toEqual([
-      expect.stringContaining('fuera de "files" en el tarball: dist/internal/secret.js'),
+    expect(verifyPackedManifest(releaseManifest, releaseManifest)).toEqual([]);
+    expect(verifyPackedManifest({ ...releaseManifest, dependencies: { "left-pad": "^2.0.0" } }, releaseManifest)).toEqual([expect.stringContaining('"dependencies"')]);
+    expect(verifyPackedManifest({ ...releaseManifest, scripts: { postinstall: "node steal.js" } }, releaseManifest)).toEqual([
+      expect.stringContaining('script "postinstall"'),
     ]);
+    expect(verifyPackedManifest({ ...releaseManifest, exports: "./dist/index.js" }, releaseManifest)).toEqual([expect.stringContaining('"exports"')]);
   });
 
-  it("should accept main and bin files outside files, as npm always packs them", () => {
-    const binObjectManifest = { ...MANIFEST, main: "./lib/main.js", bin: { "fixture-cli": "./bin/cli.js" } };
-    const binStringManifest = { ...MANIFEST, bin: "bin/cli.js" };
-    const withEntryFiles = { ...validPackage(), "lib/main.js": "export {};", "bin/cli.js": "#!/usr/bin/env node" };
+  it("should reject a packed publishConfig that differs from the release commit, since npm applies it when publishing", () => {
+    const releaseManifest = { ...MANIFEST, publishConfig: { access: "public", provenance: true } };
 
-    expect(verify({ ...withEntryFiles, "package.json": JSON.stringify(binObjectManifest) }, binObjectManifest)).toEqual([]);
-    expect(verify({ ...validPackage(), "bin/cli.js": "#!/usr/bin/env node", "package.json": JSON.stringify(binStringManifest) }, binStringManifest)).toEqual([]);
+    expect(verifyPackedManifest(releaseManifest, releaseManifest)).toEqual([]);
+    expect(verifyPackedManifest({ ...releaseManifest, publishConfig: { access: "public", provenance: true, registry: "https://evil.example/" } }, releaseManifest)).toEqual([
+      expect.stringContaining('"publishConfig" del package.json del tarball'),
+    ]);
+    expect(verifyPackedManifest({ ...releaseManifest, publishConfig: { access: "public" } }, releaseManifest)).toEqual([expect.stringContaining('"publishConfig"')]);
+    expect(verifyPackedManifest({ ...MANIFEST, publishConfig: { tag: "next" } }, MANIFEST)).toEqual([expect.stringContaining('"publishConfig"')]);
   });
 
-  it("should reject a packed manifest whose dependencies or install scripts differ from the repository", () => {
-    const repositoryManifest = { ...MANIFEST, dependencies: { "left-pad": "^1.3.0" } };
-    const withDependencies = { ...validPackage(), "package.json": JSON.stringify(repositoryManifest) };
-
-    expect(verify(withDependencies, repositoryManifest)).toEqual([]);
-    expect(verify({ ...withDependencies, "package.json": JSON.stringify({ ...repositoryManifest, dependencies: { "left-pad": "^2.0.0" } }) }, repositoryManifest)).toEqual([
-      expect.stringContaining('"dependencies"'),
-    ]);
-    expect(
-      verify({ ...withDependencies, "package.json": JSON.stringify({ ...repositoryManifest, scripts: { postinstall: "node steal.js" } }) }, repositoryManifest)
-    ).toEqual([expect.stringContaining('script "postinstall"')]);
-    expect(verify({ ...withDependencies, "package.json": JSON.stringify({ ...repositoryManifest, exports: "./dist/index.js" }) }, repositoryManifest)).toEqual([
-      expect.stringContaining('"exports"'),
-    ]);
-  });
-
-  it("should accept the fields pnpm pack rewrites: publishConfig overrides and workspace or catalog dependencies", () => {
-    const repositoryManifest = {
+  it("should accept the fields pnpm pack rewrites: hoisted publishConfig overrides and workspace or catalog dependencies", () => {
+    const releaseManifest = {
       ...MANIFEST,
-      dependencies: { "shared-utils": "workspace:^", "shared-theme": "catalog:" },
+      dependencies: { "shared-utils": "workspace:^", "shared-theme": "catalog:", "shared-alias": "workspace:*" },
       publishConfig: { access: "public", types: "./dist/index.d.ts" },
     };
-    const packedManifest = { ...repositoryManifest, dependencies: { "shared-utils": "^1.4.0", "shared-theme": "^2.0.0" }, types: "./dist/index.d.ts" };
+    const rewrittenDependencies = { "shared-utils": "^1.4.0", "shared-theme": ">=2.0.0 <3.0.0 || 3.x", "shared-alias": "npm:@scope/real-alias@1.0.0" };
+    const packedByPnpm = { ...MANIFEST, dependencies: rewrittenDependencies, types: "./dist/index.d.ts", publishConfig: { access: "public" } };
 
-    expect(verify({ ...validPackage(), "package.json": JSON.stringify(packedManifest) }, repositoryManifest)).toEqual([]);
-    expect(
-      verify({ ...validPackage(), "package.json": JSON.stringify({ ...packedManifest, dependencies: { "shared-utils": "^1.4.0" } }) }, repositoryManifest)
-    ).toEqual([expect.stringContaining('"dependencies"')]);
+    expect(verifyPackedManifest(packedByPnpm, releaseManifest)).toEqual([]);
+    expect(verifyPackedManifest({ ...packedByPnpm, publishConfig: releaseManifest.publishConfig }, releaseManifest)).toEqual([]);
+    expect(verifyPackedManifest({ ...packedByPnpm, dependencies: { "shared-utils": "^1.4.0" } }, releaseManifest)).toEqual([
+      expect.stringContaining('"dependencies"'),
+    ]);
+  });
+
+  it("should reject workspace or catalog dependencies rewritten to URLs, Git, local paths or other protocols", () => {
+    const releaseManifest = { ...MANIFEST, dependencies: { "shared-utils": "workspace:^" } };
+    const invalidRewrites = [
+      "https://evil.example/shared-utils-1.4.0.tgz",
+      "git+https://github.com/evil/shared-utils.git",
+      "github:evil/shared-utils",
+      "file:../shared-utils",
+      "link:../shared-utils",
+      "workspace:^",
+      "npm:shared-utils@https://evil.example/x.tgz",
+      "latest",
+      "",
+    ];
+
+    for (const specifier of invalidRewrites) {
+      expect(isRewrittenDependencySpecifier(specifier), specifier).toBe(false);
+      expect(verifyPackedManifest({ ...MANIFEST, dependencies: { "shared-utils": specifier } }, releaseManifest), specifier).toEqual([
+        expect.stringContaining('"dependencies"'),
+      ]);
+    }
+    for (const specifier of ["1.4.0", "^1.4.0", "~1.4", "1.0.0 - 2.0.0", "npm:shared-utils@^1.4.0"]) {
+      expect(isRewrittenDependencySpecifier(specifier), specifier).toBe(true);
+    }
   });
 
   it("should check the entrypoints of the packed manifest, the one npm publishes", () => {
-    const repositoryManifest = { ...MANIFEST, publishConfig: { main: "./dist/published.js" } };
+    const releaseManifest = { ...MANIFEST, publishConfig: { main: "./dist/published.js" } };
     const packedManifest = { ...MANIFEST, main: "./dist/published.js" };
 
-    expect(verify({ ...validPackage(), "package.json": JSON.stringify(packedManifest) }, repositoryManifest)).toEqual([
-      expect.stringContaining("falta el entrypoint público dist/published.js"),
-    ]);
-    expect(verify({ ...validPackage(), "dist/published.js": "export {};", "package.json": JSON.stringify(packedManifest) }, repositoryManifest)).toEqual([]);
+    expect(verifyPackedManifest(packedManifest, releaseManifest)).toEqual([expect.stringContaining("falta el entrypoint público dist/published.js")]);
+    expect(verify({ ...validPackage(), "dist/published.js": "export {};", "package.json": JSON.stringify(packedManifest) }, releaseManifest)).toEqual([]);
   });
+});
+
+describe("release manifest identity", () => {
+  it("should accept a working tree that still describes the release commit being published", () => {
+    expect(findReleaseManifestProblems({ releaseManifest: MANIFEST, workingManifest: { ...MANIFEST }, version: MANIFEST.version })).toEqual([]);
+  });
+
+  it("should reject an unreadable release manifest or one that declares another version", () => {
+    expect(findReleaseManifestProblems({ releaseManifest: null, workingManifest: MANIFEST, version: MANIFEST.version })).toEqual([
+      "no se pudo leer el package.json del commit de release",
+    ]);
+    expect(findReleaseManifestProblems({ releaseManifest: MANIFEST, workingManifest: MANIFEST, version: "1.3.0" })).toEqual([
+      "el package.json del commit de release es fixture-pkg@1.2.0 y se está publicando 1.3.0",
+    ]);
+  });
+
+  it("should reject a working tree whose identity or packing fields prepare rewrote", () => {
+    const rewrittenByPrepare = { ...MANIFEST, version: "9.9.9", files: ["dist", ".env"], scripts: { postinstall: "node steal.js" } };
+
+    expect(findReleaseManifestProblems({ releaseManifest: MANIFEST, workingManifest: rewrittenByPrepare, version: MANIFEST.version })).toEqual([
+      '"version" del package.json del working tree no coincide con el del commit de release',
+      '"files" del package.json del working tree no coincide con el del commit de release',
+      'el script "postinstall" del package.json del working tree no coincide con el del commit de release',
+    ]);
+  });
+});
+
+describe("npm pack file listing", () => {
+  it("should parse the file list of npm pack --dry-run --json and reject unusable output", () => {
+    const output = JSON.stringify([{ name: "fixture-pkg", version: "1.2.0", files: [{ path: "package.json" }, { path: "dist/index.js" }] }]);
+
+    expect(parseNpmPackDryRunOutput(output)).toEqual({ listing: { name: "fixture-pkg", version: "1.2.0", files: ["package.json", "dist/index.js"] }, problem: null });
+    expect(parseNpmPackDryRunOutput("npm notice")).toEqual({ listing: null, problem: expect.stringContaining("no es JSON válido") });
+    expect(parseNpmPackDryRunOutput("[]")).toEqual({ listing: null, problem: expect.stringContaining("único paquete") });
+    expect(parseNpmPackDryRunOutput(JSON.stringify([{ files: [{ size: 1 }] }]))).toEqual({ listing: null, problem: expect.stringContaining("único paquete") });
+  });
+
+  it(
+    "should list exactly what the real npm would pack from a checkout, without running scripts",
+    async () => {
+      const root = createRoot();
+      const manifest = { ...MANIFEST, files: ["dist", "!dist/internal"], scripts: { prepack: "node -e \"require('fs').writeFileSync('dist/prepack.js', '')\"" } };
+      writeFileSync(path.join(root, "package.json"), JSON.stringify(manifest));
+      mkdirSync(path.join(root, "dist", "internal"), { recursive: true });
+      mkdirSync(path.join(root, "src"), { recursive: true });
+      for (const [relativePath, content] of Object.entries({
+        "README.md": "# fixture",
+        COPYING: "license",
+        "CHANGELOG.md": "# changes",
+        ".env": "NPM_TOKEN=secret",
+        "dist/index.js": "export {};",
+        "dist/index.d.ts": "export {};",
+        "dist/internal/secret.js": "export {};",
+        "src/index.ts": "export {};",
+      })) {
+        writeFileSync(path.join(root, relativePath), content);
+      }
+
+      const { listing, problem } = await listNpmPackFiles(root);
+
+      expect(problem).toBeNull();
+      expect(listing?.name).toBe(MANIFEST.name);
+      expect(listing?.version).toBe(MANIFEST.version);
+      expect([...(listing?.files ?? [])].sort()).toEqual(["COPYING", "README.md", "dist/index.d.ts", "dist/index.js", "package.json"]);
+    },
+    NPM_COMMAND_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should report npm failures instead of an empty listing",
+    async () => {
+      const root = createRoot();
+      writeFileSync(path.join(root, "package.json"), "{ not json");
+
+      const { listing, problem } = await listNpmPackFiles(root);
+
+      expect(listing).toBeNull();
+      expect(problem).toMatch(/npm pack --dry-run/u);
+    },
+    NPM_COMMAND_TEST_TIMEOUT_MS
+  );
 });
 
 describe("repeated checksum placeholders", () => {

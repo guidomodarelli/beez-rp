@@ -214,52 +214,89 @@ describe("beez-rp create-version command", () => {
     GIT_FIXTURE_TEST_TIMEOUT_MS
   );
 
+  /**
+   * Configures `publish: "npm"` with an `artifact` that `prepare` packs with the real `npm pack`.
+   *
+   * @param {string} repositoryRoot - Checkout.
+   * @param {string} [extraPrepare] - Statement run after packing, with `repositoryRoot` in scope.
+   */
+  function configureNpmPackArtifact(repositoryRoot, extraPrepare = "") {
+    writeFileSync(path.join(repositoryRoot, ".gitignore"), "releases/\n");
+    writeFileSync(
+      path.join(repositoryRoot, "beez-rp.config.js"),
+      [
+        'import { execSync } from "node:child_process";',
+        'import { mkdirSync, readFileSync, writeFileSync } from "node:fs";',
+        'import path from "node:path";',
+        "export default {",
+        '  changelog: { audience: "equipo" },',
+        '  publish: "npm",',
+        "  registry: null,",
+        '  artifact: "releases/{name}-{version}.tgz",',
+        "  prepare: ({ repositoryRoot }) => {",
+        '    mkdirSync(path.join(repositoryRoot, "releases"), { recursive: true });',
+        '    execSync("npm pack --pack-destination releases --ignore-scripts", { cwd: repositoryRoot, stdio: "ignore" });',
+        `    ${extraPrepare}`,
+        "  },",
+        "};",
+        "",
+      ].join("\n")
+    );
+    runGit(["add", "-A"], repositoryRoot);
+    runGit(["commit", "--quiet", "-m", "chore: configure releases"], repositoryRoot);
+    runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+  }
+
+  /**
+   * Runs a release that stops right after verifying the artifact: without NPM_TOKEN npm never publishes.
+   *
+   * @param {string} repositoryRoot - Checkout.
+   * @returns {string} Combined output.
+   */
+  function runReleaseWithoutToken(repositoryRoot) {
+    /** @type {NodeJS.ProcessEnv} */
+    const environment = { ...cleanEnvironment(), NO_COLOR: "1" };
+    delete environment.NPM_TOKEN;
+    const result = spawnSync(process.execPath, [CLI_PATH, "create-version", "--bump", "minor"], { cwd: repositoryRoot, encoding: "utf8", env: environment });
+    return `${result.stdout}${result.stderr}`;
+  }
+
   it(
-    "should resolve the prepared artifact with the package name brought by syncing main",
+    "should verify the npm-packed artifact against npm pack --dry-run, with the package name brought by syncing main",
     () => {
       const { repositoryRoot } = createReleasedRepository();
-      writeFileSync(path.join(repositoryRoot, ".gitignore"), "releases/\n");
-      writeFileSync(
-        path.join(repositoryRoot, "beez-rp.config.js"),
-        [
-          'import { spawnSync } from "node:child_process";',
-          'import { mkdirSync, readFileSync, writeFileSync } from "node:fs";',
-          'import path from "node:path";',
-          "export default {",
-          '  changelog: { audience: "equipo" },',
-          '  publish: "npm",',
-          "  registry: null,",
-          '  artifact: "releases/{name}-{version}.tgz",',
-          "  prepare: ({ repositoryRoot, version }) => {",
-          '    const manifest = readFileSync(path.join(repositoryRoot, "package.json"), "utf8");',
-          '    const staging = path.join(repositoryRoot, "releases", "staging");',
-          '    mkdirSync(path.join(staging, "package"), { recursive: true });',
-          '    writeFileSync(path.join(staging, "package", "package.json"), manifest);',
-          '    const archive = `../${JSON.parse(manifest).name}-${version}.tgz`;',
-          '    spawnSync("tar", ["-czf", archive, "package"], { cwd: staging });',
-          "  },",
-          "};",
-          "",
-        ].join("\n")
-      );
-      runGit(["add", "-A"], repositoryRoot);
-      runGit(["commit", "--quiet", "-m", "chore: configure releases"], repositoryRoot);
-      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+      configureNpmPackArtifact(repositoryRoot);
       const renamedManifest = { name: "fixture-app-renamed", version: "0.1.0" };
       writeFileSync(path.join(repositoryRoot, "package.json"), `${JSON.stringify(renamedManifest, null, 2)}\n`);
       runGit(["commit", "--quiet", "-am", "chore: rename package"], repositoryRoot);
       runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
       runGit(["reset", "--quiet", "--hard", "HEAD~1"], repositoryRoot);
 
-      /** @type {NodeJS.ProcessEnv} Without NPM_TOKEN, publication stops right after verifying the artifact and never runs npm. */
-      const environment = { ...cleanEnvironment(), NO_COLOR: "1" };
-      delete environment.NPM_TOKEN;
-      const result = spawnSync(process.execPath, [CLI_PATH, "create-version", "--bump", "minor"], { cwd: repositoryRoot, encoding: "utf8", env: environment });
-      const output = `${result.stdout}${result.stderr}`;
+      const output = runReleaseWithoutToken(repositoryRoot);
 
-      expect(output).toContain("releases/fixture-app-renamed-0.2.0.tgz verificado");
+      expect(output).toContain("releases/fixture-app-renamed-0.2.0.tgz verificado (contenido y lista de npm pack)");
       expect(output).not.toContain("No hay un artefacto preparado");
       expect(output).toContain("Falta NPM_TOKEN para publicar 0.2.0.");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should take the expected version from the release commit and stop when prepare rewrites package.json",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      configureNpmPackArtifact(
+        repositoryRoot,
+        'const manifestPath = path.join(repositoryRoot, "package.json"); writeFileSync(manifestPath, JSON.stringify({ ...JSON.parse(readFileSync(manifestPath, "utf8")), version: "9.9.9" }));'
+      );
+
+      const output = runReleaseWithoutToken(repositoryRoot);
+
+      expect(output).toContain("No se puede verificar el artefacto de 0.2.0");
+      // The failure box wraps long lines, so only the start of the reason is matched.
+      expect(output).toContain('"version" del package.json');
+      expect(output).not.toContain("Falta NPM_TOKEN");
+      expect(JSON.parse(runGit(["show", "v0.2.0:package.json"], remoteRoot)).version).toBe("0.2.0");
     },
     GIT_FIXTURE_TEST_TIMEOUT_MS
   );

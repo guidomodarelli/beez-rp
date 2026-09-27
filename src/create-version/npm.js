@@ -1,6 +1,7 @@
 /**
  * npm adapter of `beez-rp create-version`: lists the published versions of a
- * package and publishes the working tree or a prepared archive with `NPM_TOKEN`.
+ * package, lists the files npm would pack from the release checkout, and
+ * publishes the working tree or a prepared archive with `NPM_TOKEN`.
  *
  * @module create-version/npm
  */
@@ -17,6 +18,7 @@ import {
   NPM_DIST_TAG,
   NPM_LOOKUP_STATUS,
   NPM_NOT_FOUND_CODE,
+  NPM_PACK_DRY_RUN_ARGUMENTS,
   NPM_PACKAGE_NAME_PATTERN,
   NPM_TOKEN_VARIABLE,
   UNSAFE_QUOTED_PATH_PATTERN,
@@ -25,6 +27,8 @@ import { USES_SHELL_FOR_PACKAGE_MANAGERS, runCaptured, runInherited } from "./pr
 
 /**
  * @typedef {{ status: string, publishedVersions: string[], reason: string | null }} NpmLookup
+ * @typedef {import("./artifact.js").NpmPackListing} NpmPackListing
+ * @typedef {{ listing: NpmPackListing | null, problem: string | null }} NpmPackResult
  */
 
 /**
@@ -60,6 +64,50 @@ export async function lookupPublishedVersions(packageName, repositoryRoot) {
       reason: `respuesta inválida de npm view (${error instanceof Error ? error.message : String(error)})`,
     };
   }
+}
+
+/**
+ * Parses the output of `npm pack --dry-run --json`: an array with one package that lists its files.
+ *
+ * @param {string} output - Standard output of npm.
+ * @returns {NpmPackResult} Package name, version and file paths, or why the output is unusable.
+ */
+export function parseNpmPackDryRunOutput(output) {
+  let parsed;
+  try {
+    parsed = JSON.parse(output);
+  } catch (error) {
+    return { listing: null, problem: `la salida de npm pack --dry-run no es JSON válido (${error instanceof Error ? error.message : String(error)})` };
+  }
+
+  const packages = Array.isArray(parsed) ? parsed : [];
+  /** @type {unknown[] | null} */
+  const files = packages.length === 1 && Array.isArray(packages[0]?.files) ? packages[0].files : null;
+  const filePaths = files?.map((file) => (file && typeof file === "object" ? /** @type {Record<string, unknown>} */ (file).path : undefined));
+  if (!filePaths || !filePaths.every((filePath) => typeof filePath === "string" && filePath !== "")) {
+    return { listing: null, problem: "la salida de npm pack --dry-run no describe un único paquete con su lista de archivos" };
+  }
+
+  return { listing: { name: packages[0].name, version: packages[0].version, files: /** @type {string[]} */ (filePaths) }, problem: null };
+}
+
+/**
+ * Asks npm which files it would pack from the release checkout, without writing anything nor
+ * running lifecycle scripts. The command line is constant, so it is safe on the Windows shell.
+ *
+ * @param {string} repositoryRoot - Package root, as `prepare` left it.
+ * @returns {Promise<NpmPackResult>} npm listing, or why npm failed or its output is unusable.
+ */
+export async function listNpmPackFiles(repositoryRoot) {
+  const result = USES_SHELL_FOR_PACKAGE_MANAGERS
+    ? await runCaptured(`npm ${NPM_PACK_DRY_RUN_ARGUMENTS.join(" ")}`, [], { cwd: repositoryRoot, shell: true })
+    : await runCaptured("npm", [...NPM_PACK_DRY_RUN_ARGUMENTS], { cwd: repositoryRoot });
+
+  if (result.status !== 0) {
+    return { listing: null, problem: `npm pack --dry-run salió con código ${result.status}: ${result.stderr.split("\n")[0] || "sin detalle"}` };
+  }
+
+  return parseNpmPackDryRunOutput(result.stdout);
 }
 
 /**

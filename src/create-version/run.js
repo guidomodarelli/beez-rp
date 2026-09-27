@@ -61,12 +61,12 @@ import {
   startSpinner,
 } from "../terminal-ui.js";
 import { listNextVersions, resolveRequestedVersion, suggestReleaseType, toReleaseTag } from "../versions.js";
-import { expandArtifactPattern, findPreparedArtifact, isSafeArtifactPath, verifyPreparedArtifact } from "./artifact.js";
+import { expandArtifactPattern, findPreparedArtifact, findReleaseManifestProblems, isSafeArtifactPath, verifyPreparedArtifact } from "./artifact.js";
 import { loadCreateVersionConfig } from "./config.js";
 import { ReleaseStepError } from "./errors.js";
-import { lookupPublishedVersions, publishToNpm } from "./npm.js";
+import { listNpmPackFiles, lookupPublishedVersions, publishToNpm } from "./npm.js";
 import { RELEASE_USAGE, buildReleasePlan, parseReleaseArguments } from "./plan.js";
-import { createGitReader, listCommits, runCommandLine, runInherited } from "./process.js";
+import { createGitReader, listCommits, readPackageManifestAt, runCommandLine, runInherited } from "./process.js";
 import { collectReleaseState } from "./state.js";
 
 /**
@@ -560,21 +560,47 @@ async function pushReleaseStep(context) {
 }
 
 /**
- * Finds and verifies the archive prepared for the release when the project configured `artifact`.
+ * Reads the `package.json` of the release commit: the one the `v<version>` tag points to or,
+ * when the tag does not exist, `HEAD`. `prepare` may rewrite the working tree, so the identity
+ * the archive must match never comes from it.
  *
  * @param {ReleaseContext} context - Release context.
  * @param {string} version - Version being published.
- * @param {import("./artifact.js").PackageManifest} manifest - Current working tree `package.json`, whose name `{name}` expands to.
- * @returns {string | null} Verified archive path relative to the root, or `null` to publish the working tree.
+ * @returns {Promise<import("./artifact.js").PackageManifest | null>} Release manifest, or `null` when unreadable.
  */
-function resolvePublishedArtifact(context, version, manifest) {
+async function readReleaseManifest(context, version) {
+  return (await readPackageManifestAt(context.reader, toReleaseTag(version))) ?? readPackageManifestAt(context.reader, "HEAD");
+}
+
+/**
+ * Finds and verifies the archive prepared for the release when the project configured `artifact`:
+ * the release commit must declare the version being published, the working tree must still describe
+ * it, and the archive must match that manifest and contain exactly the files `npm pack --dry-run` lists.
+ *
+ * @param {ReleaseContext} context - Release context.
+ * @param {string} version - Version being published.
+ * @param {import("./artifact.js").PackageManifest} workingManifest - Working tree `package.json`, after `prepare`.
+ * @returns {Promise<string | null>} Verified archive path relative to the root, or `null` to publish the working tree.
+ */
+async function resolvePublishedArtifact(context, version, workingManifest) {
   const { artifact } = context.config;
 
   if (!artifact) {
     return null;
   }
 
-  const release = { version, packageName: String(manifest.name) };
+  const notPublishedHint = "No se publicó nada. Borrá ese tarball y volvé a correr pnpm create-version: vuelve a prepararlo y a verificarlo.";
+  const releaseManifest = await readReleaseManifest(context, version);
+  const releaseProblems = findReleaseManifestProblems({ releaseManifest, workingManifest, version });
+
+  if (!releaseManifest || releaseProblems.length > 0) {
+    throw new ReleaseStepError(
+      `No se puede verificar el artefacto de ${version}: ${releaseProblems.slice(0, MAX_LISTED_ITEMS).join("; ")}.`,
+      `No se publicó nada. Revisá que ${toReleaseTag(version)} (o HEAD) sea el commit de release y que prepare no cambie package.json.`
+    );
+  }
+
+  const release = { version, packageName: String(releaseManifest.name) };
   const prepared = findPreparedArtifact(context.repositoryRoot, artifact, release);
 
   if (!prepared) {
@@ -588,16 +614,22 @@ function resolvePublishedArtifact(context, version, manifest) {
     throw new ReleaseStepError(`La ruta del artefacto ${prepared.path} tiene caracteres no permitidos.`, "Usá rutas con letras, números, ., -, _, @, + y /.");
   }
 
-  const problems = verifyPreparedArtifact(context.repositoryRoot, prepared, manifest);
+  const npmPack = await listNpmPackFiles(context.repositoryRoot);
 
-  if (problems.length > 0) {
+  if (!npmPack.listing) {
     throw new ReleaseStepError(
-      `El artefacto ${prepared.path} no se puede publicar: ${problems.slice(0, MAX_LISTED_ITEMS).join("; ")}.`,
-      "No se publicó nada. Borrá ese tarball y volvé a correr pnpm create-version: vuelve a prepararlo y a verificarlo."
+      `No se pudo verificar ${prepared.path}: ${npmPack.problem}.`,
+      "No se publicó nada. Corré npm pack --dry-run --json --ignore-scripts en la raíz para ver el error y volvé a correr pnpm create-version."
     );
   }
 
-  print(`${ICON.success} ${prepared.path} verificado${prepared.expectedSha256 ? " (SHA-256 y contenido)" : " (contenido)"}.`);
+  const problems = verifyPreparedArtifact(context.repositoryRoot, prepared, { manifest: releaseManifest, npmPack: npmPack.listing });
+
+  if (problems.length > 0) {
+    throw new ReleaseStepError(`El artefacto ${prepared.path} no se puede publicar: ${problems.slice(0, MAX_LISTED_ITEMS).join("; ")}.`, notPublishedHint);
+  }
+
+  print(`${ICON.success} ${prepared.path} verificado${prepared.expectedSha256 ? " (SHA-256, contenido y lista de npm pack)" : " (contenido y lista de npm pack)"}.`);
   return prepared.path;
 }
 
@@ -616,7 +648,7 @@ async function publishReleaseStep(context) {
     const manifest = readWorkingManifest(context.repositoryRoot);
     const packageName = String(manifest.name);
     context.packageName = packageName;
-    const artifactPath = resolvePublishedArtifact(context, version, manifest);
+    const artifactPath = await resolvePublishedArtifact(context, version, manifest);
     if (artifactPath) {
       print(paint("gray", `Publicando ${artifactPath}; npm puede pedir la confirmación 2FA en el navegador o un código.`));
     }

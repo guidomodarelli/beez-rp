@@ -181,47 +181,17 @@ export const LOCAL_PATH_PREFIX = "./";
 /** Root directory of every entry inside an npm tarball. */
 export const PACKED_ROOT_DIRECTORY = "package/";
 
-/** Files npm always packs regardless of `files`, matched case-insensitively by base name. */
-export const ALWAYS_PACKED_FILE_PATTERN = /^(package\.json|readme(\.[^/]*)?|licen[cs]e(\.[^/]*)?|changelog(\.[^/]*)?|notice(\.[^/]*)?)$/iu;
-
-/** Prefix of a negated `files` entry: a later match excludes what earlier entries included. */
-export const FILES_NEGATION_PREFIX = "!";
-
-/** `files` glob segment that matches any number of directories. */
-export const FILES_GLOBSTAR = "**";
-
-/** `files` glob character that matches exactly one character other than `/`. */
-export const FILES_SINGLE_CHARACTER_WILDCARD = "?";
-
-/** `files` glob character that matches any run of characters other than `/`. */
-export const FILES_ANY_CHARACTERS_WILDCARD = "*";
-
-/** Opening bracket of a `files` character class, such as `[ab]` or `[a-z]`. */
-export const FILES_CHARACTER_CLASS_START = "[";
-
-/** Closing bracket of a `files` character class. */
-export const FILES_CHARACTER_CLASS_END = "]";
-
-/** Leading characters that negate a `files` character class (`[!ab]` or `[^ab]`). */
-export const FILES_CHARACTER_CLASS_NEGATIONS = Object.freeze(["!", "^"]);
-
-/** Opening brace of a `files` alternation, such as `{js,mjs}`. */
-export const FILES_BRACE_START = "{";
-
-/** Closing brace of a `files` alternation. */
-export const FILES_BRACE_END = "}";
-
-/** Separator of the alternatives inside a `files` brace. */
-export const FILES_BRACE_SEPARATOR = ",";
-
-/** Suffix npm widens to `/**`, so `dir/*` also includes nested directories. */
-export const FILES_DIRECTORY_CONTENTS_SUFFIX = "/*";
-
-/** Leading `./` or `/` of `files` entries and manifest paths, both relative to the package root. */
+/** Leading `./` or `/` of manifest paths, relative to the package root. */
 export const PACKAGE_ROOT_PREFIX_PATTERN = /^(?:\.\/|\/)+/u;
 
-/** Trailing `/` of directory entries and `files` patterns. */
+/** Trailing `/` of directory entries. */
 export const TRAILING_SLASH_PATTERN = /\/+$/u;
+
+/**
+ * Arguments of the `npm pack` run that lists the files npm would pack from the release checkout:
+ * nothing is written and no lifecycle script runs, so it only reports what `prepare` left.
+ */
+export const NPM_PACK_DRY_RUN_ARGUMENTS = Object.freeze(["pack", "--dry-run", "--json", "--ignore-scripts"]);
 
 /**
  * Manifest fields compared between the packed and the repository `package.json`:
@@ -241,6 +211,37 @@ export const PUBLISH_CRITICAL_MANIFEST_FIELDS = Object.freeze([
   "bundledDependencies",
 ]);
 
+/**
+ * Manifest field npm applies as publish options (`registry`, `tag`, `access`, `provenance`...)
+ * when it publishes an archive, so the packed value must equal the repository one.
+ */
+export const PUBLISH_CONFIG_FIELD = "publishConfig";
+
+/**
+ * `publishConfig` keys `pnpm pack` moves to the top level of the packed manifest (and removes
+ * from `publishConfig`), as listed by pnpm's `PUBLISH_CONFIG_WHITELIST`.
+ */
+export const PNPM_HOISTED_PUBLISH_CONFIG_FIELDS = Object.freeze([
+  "bin",
+  "engines",
+  "type",
+  "imports",
+  "main",
+  "module",
+  "typings",
+  "types",
+  "exports",
+  "browser",
+  "esnext",
+  "es2015",
+  "unpkg",
+  "umd:main",
+  "os",
+  "cpu",
+  "libc",
+  "typesVersions",
+]);
+
 /** Dependency maps compared entry by entry; `pnpm pack` rewrites some specifiers. */
 export const PUBLISH_CRITICAL_DEPENDENCY_FIELDS = Object.freeze(["dependencies", "peerDependencies", "optionalDependencies"]);
 
@@ -250,23 +251,32 @@ export const INSTALL_LIFECYCLE_SCRIPTS = Object.freeze(["preinstall", "install",
 /** Dependency specifiers `pnpm pack` replaces with the resolved version range (`workspace:^`, `catalog:`). */
 export const PACK_REWRITTEN_DEPENDENCY_SPECIFIER_PATTERN = /^(?:workspace|catalog):/u;
 
-/** Path segments that must never reach a published archive. */
-export const PRIVATE_PACKED_SEGMENT_PATTERN = /^(\..*|node_modules)$/u;
+/** Numeric identifier of a semantic version, or an `x`/`X`/`*` wildcard of a range. */
+const SEMVER_RANGE_IDENTIFIER_SOURCE = String.raw`(?:0|[1-9]\d*|[xX*])`;
+
+/** Optional prerelease and build suffixes of a semantic version. */
+const SEMVER_SUFFIXES_SOURCE = String.raw`(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?`;
+
+/** Full or partial version of a range (`1`, `1.2`, `1.2.3-beta.1`, `1.x`). */
+const SEMVER_PARTIAL_VERSION_SOURCE = String.raw`v?${SEMVER_RANGE_IDENTIFIER_SOURCE}(?:\.${SEMVER_RANGE_IDENTIFIER_SOURCE}(?:\.${SEMVER_RANGE_IDENTIFIER_SOURCE}${SEMVER_SUFFIXES_SOURCE})?)?`;
+
+/** One comparator of a range, such as `^1.2.0`, `>=2` or `~1.4`. */
+const SEMVER_COMPARATOR_SOURCE = String.raw`(?:<=|>=|<|>|=|~>|~|\^)?\s*${SEMVER_PARTIAL_VERSION_SOURCE}`;
+
+/** One comparator set: a hyphen range (`1.0.0 - 2.0.0`) or comparators joined by spaces. */
+const SEMVER_COMPARATOR_SET_SOURCE = String.raw`(?:${SEMVER_PARTIAL_VERSION_SOURCE}\s+-\s+${SEMVER_PARTIAL_VERSION_SOURCE}|${SEMVER_COMPARATOR_SOURCE}(?:\s+${SEMVER_COMPARATOR_SOURCE})*)`;
+
+/**
+ * Semantic version or range as node-semver accepts it (comparator sets joined by `||`); the only
+ * form a `workspace:` or `catalog:` specifier may be rewritten to, besides an `npm:` alias.
+ */
+export const SEMVER_RANGE_PATTERN = new RegExp(String.raw`^\s*${SEMVER_COMPARATOR_SET_SOURCE}(?:\s*\|\|\s*${SEMVER_COMPARATOR_SET_SOURCE})*\s*$`, "u");
+
+/** npm alias specifier `npm:<name>@<range>`; the `name` and `range` groups are validated separately. */
+export const NPM_ALIAS_SPECIFIER_PATTERN = /^npm:(?<name>(?:@[^/@]+\/)?[^/@]+)@(?<range>.+)$/u;
 
 /** Archive path segments that make an entry name ambiguous: parent, current and empty. */
 export const UNSAFE_PACKED_SEGMENTS = Object.freeze(["..", ".", ""]);
-
-/** Dotfile segments, rejected even inside a bundled dependency. */
-export const DOTFILE_SEGMENT_PATTERN = /^\./u;
-
-/** Directory where `npm pack` places the dependencies a manifest declares as bundled. */
-export const BUNDLED_DEPENDENCIES_DIRECTORY = "node_modules";
-
-/** Prefix of a scope segment, such as `@scope` in `node_modules/@scope/pkg`. */
-export const PACKAGE_SCOPE_PREFIX = "@";
-
-/** Manifest fields listing bundled dependencies: an array of names, or `true` for every `dependencies` entry. */
-export const BUNDLED_DEPENDENCIES_FIELDS = Object.freeze(["bundleDependencies", "bundledDependencies"]);
 
 /** Size of a tar header and data block, in bytes. */
 export const TAR_BLOCK_SIZE = 512;
@@ -314,6 +324,15 @@ export const PAX_PATH_KEY = "path";
 
 /** PAX record key holding a link target longer than the header allows. */
 export const PAX_LINK_PATH_KEY = "linkpath";
+
+/** PAX record key holding the entry data size, which overrides the ustar header size. */
+export const PAX_SIZE_KEY = "size";
+
+/** Decimal size of a PAX `size` record. */
+export const PAX_DECIMAL_SIZE_PATTERN = /^\d+$/u;
+
+/** Octal size of a ustar header, after trimming spaces; base-256 sizes are rejected. */
+export const TAR_OCTAL_SIZE_PATTERN = /^[0-7]*$/u;
 
 /** Separator between the byte length and the `key=value` text of a PAX record. */
 export const PAX_LENGTH_SEPARATOR = " ";

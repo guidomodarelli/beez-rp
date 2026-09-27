@@ -131,6 +131,24 @@ export async function listCommits(reader, range) {
 }
 
 /**
+ * Reads `package.json` at a revision.
+ *
+ * @param {GitReader} reader - Git reader.
+ * @param {string} revision - Revision such as `HEAD`, `v1.2.0` or `origin/main`.
+ * @returns {Promise<Record<string, unknown> | null>} Parsed manifest, or `null` when missing, unreadable or not a JSON object.
+ */
+export async function readPackageManifestAt(reader, revision) {
+  const manifest = await reader.tryGit(["show", `${revision}:${PACKAGE_MANIFEST_FILE}`]);
+
+  try {
+    const parsed = manifest ? JSON.parse(manifest) : null;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Reads the `version` field of `package.json` at a revision.
  *
  * @param {GitReader} reader - Git reader.
@@ -138,11 +156,6 @@ export async function listCommits(reader, range) {
  * @returns {Promise<string | null>} Version, or `null` when unreadable.
  */
 export async function readPackageVersionAt(reader, revision) {
-  const manifest = await reader.tryGit(["show", `${revision}:${PACKAGE_MANIFEST_FILE}`]);
-
-  try {
-    return manifest ? (JSON.parse(manifest).version ?? null) : null;
-  } catch {
-    return null;
-  }
+  const manifest = await readPackageManifestAt(reader, revision);
+  return typeof manifest?.version === "string" ? manifest.version : null;
 }
