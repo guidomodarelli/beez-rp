@@ -17,7 +17,6 @@ import { pathToFileURL } from "node:url";
 import {
   ARTIFACT_VERSION_PLACEHOLDER,
   CHANGELOG_LANGUAGE,
-  CONFIG_RELOAD_QUERY_PARAMETER,
   CREATE_VERSION_CONFIG_FILE,
   CREATE_VERSION_CONFIG_FILES,
   NPM_PUBLISHER,
@@ -215,18 +214,14 @@ export function resolveCreateVersionConfig(rawConfig) {
 
 /**
  * Imports `beez-rp.config.mjs` or `beez-rp.config.js` from the repository root and validates it.
- *
- * Node caches ES modules by URL, so a second import of the same file returns the first result.
- * Passing `reloadKey` (for example the current commit) imports the file with a
- * `?reload=<reloadKey>` query, which evaluates what the checkout holds now. Only the configuration
- * file itself is evaluated again; modules it imports keep their cached instance.
+ * It is imported once per process: after syncing `main` the command stops and asks to run it
+ * again, so a new process imports the updated file and everything it imports.
  *
  * @param {string} repositoryRoot - Repository root.
- * @param {{ reloadKey?: string }} [options] - `reloadKey` forces a fresh evaluation of the file.
  * @returns {Promise<ResolvedCreateVersionConfig>} Resolved configuration.
  * @throws {Error} When the file is missing, fails to load or is invalid.
  */
-export async function loadCreateVersionConfig(repositoryRoot, { reloadKey } = {}) {
+export async function loadCreateVersionConfig(repositoryRoot) {
   const configPath = CREATE_VERSION_CONFIG_FILES.map((fileName) => path.join(repositoryRoot, fileName)).find((candidate) => existsSync(candidate));
 
   if (!configPath) {
@@ -237,9 +232,7 @@ export async function loadCreateVersionConfig(repositoryRoot, { reloadKey } = {}
 
   let module;
   try {
-    const configUrl = pathToFileURL(configPath);
-    if (reloadKey) configUrl.searchParams.set(CONFIG_RELOAD_QUERY_PARAMETER, reloadKey);
-    module = await import(configUrl.href);
+    module = await import(pathToFileURL(configPath).href);
   } catch (error) {
     throw new Error(`beez-rp create-version: could not load ${configPath}`, { cause: error });
   }

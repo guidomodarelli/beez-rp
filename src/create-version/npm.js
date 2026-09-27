@@ -1,6 +1,7 @@
 /**
  * npm adapter of `beez-rp create-version`: resolves the registry a package is
- * published to, lists the versions published there, reads the integrity npm
+ * published to (`publishConfig`, else npm's own config), lists the versions
+ * published there (authenticated with `NPM_TOKEN` when available), reads the integrity npm
  * would pack from the release checkout, and publishes the working tree or a
  * prepared archive with `NPM_TOKEN` bound to the publish registry.
  *
@@ -17,6 +18,7 @@ import {
   LOCAL_PATH_PREFIX,
   NPM_AUTH_DIRECTORY_PREFIX,
   NPM_AUTH_TOKEN_REFERENCE,
+  NPM_CONFIG_GET_ARGUMENTS,
   NPM_DIST_TAG,
   NPM_INTEGRITY_PATTERN,
   NPM_LOOKUP_STATUS,
@@ -26,6 +28,9 @@ import {
   NPM_REGISTRY_OPTION,
   NPM_REGISTRY_PROTOCOLS,
   NPM_TOKEN_VARIABLE,
+  NPM_UNSET_CONFIG_VALUE,
+  NPM_USER_CONFIG_OPTION,
+  NPMJS_PACKAGE_PAGE_URL,
   PACKAGE_SCOPE_PATTERN,
   PUBLISH_CONFIG_FIELD,
   PUBLISH_CONFIG_REGISTRY_KEY,
@@ -44,24 +49,66 @@ import { USES_SHELL_FOR_PACKAGE_MANAGERS, runCaptured, runInherited } from "./pr
  */
 
 /**
+ * Runs npm with captured output. On Windows npm only resolves through the shell, so every argument
+ * is double-quoted there; callers pass validated names, registries and temporary paths only.
+ *
+ * @param {string[]} npmArguments - Arguments that follow `npm`.
+ * @param {string} repositoryRoot - Working directory, whose `.npmrc` npm reads.
+ * @param {NodeJS.ProcessEnv} [environment] - Environment of npm; the current process by default.
+ * @returns {ReturnType<typeof runCaptured>} Exit status and output.
+ * @throws {Error} When an argument could break out of its quotes on the Windows shell.
+ */
+function runNpmCaptured(npmArguments, repositoryRoot, environment = process.env) {
+  const unsafeArgument = npmArguments.find((npmArgument) => UNSAFE_QUOTED_PATH_PATTERN.test(npmArgument));
+  if (unsafeArgument !== undefined) {
+    throw new Error(`beez-rp create-version: argumento de npm no permitido en la línea de comandos: ${unsafeArgument}`);
+  }
+
+  return USES_SHELL_FOR_PACKAGE_MANAGERS
+    ? runCaptured(`npm ${npmArguments.map((npmArgument) => `"${npmArgument}"`).join(" ")}`, [], { cwd: repositoryRoot, shell: true, env: environment })
+    : runCaptured("npm", npmArguments, { cwd: repositoryRoot, env: environment });
+}
+
+/**
  * Builds the `npm view` arguments that list the published versions of a package on a registry.
  * `npm view` ignores the manifest `publishConfig`, so the registry is always passed explicitly.
  *
  * @param {string} packageName - npm package name, already checked with `NPM_PACKAGE_NAME_PATTERN`.
  * @param {string} registryUrl - Registry resolved by {@link resolvePublishRegistry}.
+ * @param {string | null} [userConfigPath] - Temporary npm config from {@link withNpmAuthConfig} that
+ *   authenticates the query; `null` queries with npm's usual config.
  * @returns {string[]} Arguments that follow `npm`.
  * @throws {Error} When the registry is not a valid http(s) URL or has characters unsafe on the Windows shell.
  */
-export function buildNpmViewArguments(packageName, registryUrl) {
+export function buildNpmViewArguments(packageName, registryUrl, userConfigPath = null) {
   const { href } = parseRegistryUrl(registryUrl);
   if (!SHELL_SAFE_REGISTRY_URL_PATTERN.test(href)) {
     throw new Error(`beez-rp create-version: el registry "${registryUrl}" tiene caracteres no permitidos en la línea de comandos de npm view`);
   }
-  return ["view", packageName, "versions", "--json", NPM_REGISTRY_OPTION, href];
+  const userConfig = userConfigPath ? [NPM_USER_CONFIG_OPTION, userConfigPath] : [];
+  return ["view", packageName, "versions", "--json", NPM_REGISTRY_OPTION, href, ...userConfig];
 }
 
 /**
- * Lists the versions of a package published on a registry.
+ * Loads `NPM_TOKEN` from the ignored `.env` when the environment does not define it.
+ *
+ * @param {string} repositoryRoot - Repository root holding the optional `.env`.
+ * @returns {boolean} Whether `NPM_TOKEN` is available in the environment.
+ */
+export function loadNpmToken(repositoryRoot) {
+  const environmentFilePath = path.join(repositoryRoot, LOCAL_ENVIRONMENT_FILE);
+
+  if (!process.env[NPM_TOKEN_VARIABLE] && existsSync(environmentFilePath)) {
+    process.loadEnvFile(environmentFilePath);
+  }
+
+  return Boolean(process.env[NPM_TOKEN_VARIABLE]);
+}
+
+/**
+ * Lists the versions of a package published on a registry. With `NPM_TOKEN` (environment or `.env`)
+ * the query authenticates through the same temporary config the publication uses, so a private
+ * package can be diagnosed; without it the registry is queried with npm's usual config.
  *
  * @param {string} packageName - npm package name.
  * @param {string} repositoryRoot - Directory whose `.npmrc` npm reads.
@@ -74,18 +121,15 @@ export async function lookupPublishedVersions(packageName, repositoryRoot, regis
     return { status: NPM_LOOKUP_STATUS.failed, publishedVersions: [], reason: `nombre de paquete inválido: ${packageName}` };
   }
 
-  /** @type {string[]} */
-  let viewArguments;
+  /** @param {string | null} userConfigPath - Temporary authenticated config, or `null`. */
+  const view = (userConfigPath) => runNpmCaptured(buildNpmViewArguments(packageName, registryUrl, userConfigPath), repositoryRoot);
+
+  let result;
   try {
-    viewArguments = buildNpmViewArguments(packageName, registryUrl);
+    result = loadNpmToken(repositoryRoot) ? await withNpmAuthConfig(buildNpmAuthConfigLine(registryUrl), view) : await view(null);
   } catch (error) {
     return { status: NPM_LOOKUP_STATUS.failed, publishedVersions: [], reason: error instanceof Error ? error.message : String(error) };
   }
-
-  // The name and registry are validated above, so the command line built for the Windows shell keeps a fixed shape.
-  const result = USES_SHELL_FOR_PACKAGE_MANAGERS
-    ? await runCaptured(`npm ${viewArguments.join(" ")}`, [], { cwd: repositoryRoot, shell: true })
-    : await runCaptured("npm", viewArguments, { cwd: repositoryRoot });
 
   if (result.status !== 0) {
     return `${result.stdout}\n${result.stderr}`.includes(NPM_NOT_FOUND_CODE)
@@ -172,24 +216,103 @@ function parseRegistryUrl(registryUrl) {
 }
 
 /**
- * Returns the registry `npm publish` sends the package to, as npm resolves it from the manifest:
- * `publishConfig["@scope:registry"]` for a scoped package that declares it, else
- * `publishConfig.registry`, else npm's default registry.
+ * Returns the scope of a package name (`team` for `@team/pkg`), or `undefined` when it has none.
+ *
+ * @param {unknown} packageName - `name` of the manifest.
+ * @returns {string | undefined} Scope without `@`.
+ */
+function readPackageScope(packageName) {
+  return typeof packageName === "string" ? PACKAGE_SCOPE_PATTERN.exec(packageName)?.groups?.scope : undefined;
+}
+
+/**
+ * Returns the registry the manifest `publishConfig` declares: `publishConfig["@scope:registry"]`
+ * for a scoped package that declares it, else `publishConfig.registry`.
  *
  * @param {Record<string, unknown>} manifest - `package.json` being published.
- * @returns {string} Registry URL as written in the manifest.
- * @throws {Error} When the resolved registry is not a plain http(s) URL.
+ * @returns {string | null} Declared registry, or `null` when `publishConfig` declares none.
  */
-export function resolvePublishRegistry(manifest) {
+function readPublishConfigRegistry(manifest) {
   const publishConfig = manifest[PUBLISH_CONFIG_FIELD];
   const registries = publishConfig && typeof publishConfig === "object" ? /** @type {Record<string, unknown>} */ (publishConfig) : {};
-  const scope = typeof manifest.name === "string" ? PACKAGE_SCOPE_PATTERN.exec(manifest.name)?.groups?.scope : undefined;
+  const scope = readPackageScope(manifest.name);
   const candidates = [scope ? registries[`@${scope}${SCOPED_REGISTRY_KEY_SUFFIX}`] : undefined, registries[PUBLISH_CONFIG_REGISTRY_KEY]];
   const declared = candidates.find((candidate) => typeof candidate === "string" && candidate !== "");
-  const registryUrl = typeof declared === "string" ? declared : DEFAULT_NPM_REGISTRY_URL;
+  return typeof declared === "string" ? declared : null;
+}
+
+/**
+ * Asks npm for the registry it would publish the package to without `publishConfig`:
+ * `@scope:registry` for a scoped package when some config sets it, else `registry`. It runs in the
+ * repository root with the environment and the kind of temporary user config `npm publish` gets,
+ * so it reads the project `.npmrc`, `npm_config_*` variables and the global config, like the
+ * publication (which replaces `~/.npmrc` with its temporary config).
+ *
+ * @param {Record<string, unknown>} manifest - `package.json` being published.
+ * @param {string} repositoryRoot - Package root.
+ * @returns {Promise<string>} Registry URL npm resolves.
+ * @throws {Error} When the package name is invalid or `npm config get` fails.
+ */
+async function readNpmConfigRegistry(manifest, repositoryRoot) {
+  const packageName = String(manifest.name);
+  if (!NPM_PACKAGE_NAME_PATTERN.test(packageName)) {
+    throw new Error(`beez-rp create-version: nombre de paquete inválido: ${packageName}`);
+  }
+
+  // The scope comes from a name that matches the npm name pattern, so the key keeps a fixed shape.
+  const scope = readPackageScope(packageName);
+  const configKeys = [...(scope ? [`@${scope}${SCOPED_REGISTRY_KEY_SUFFIX}`] : []), PUBLISH_CONFIG_REGISTRY_KEY];
+
+  return withNpmAuthConfig("", async (userConfigPath) => {
+    for (const configKey of configKeys) {
+      const result = await runNpmCaptured(
+        [...NPM_CONFIG_GET_ARGUMENTS, configKey, NPM_USER_CONFIG_OPTION, userConfigPath],
+        repositoryRoot,
+        buildNpmPublishEnvironment()
+      );
+
+      if (result.status !== 0) {
+        throw new Error(`beez-rp create-version: npm config get ${configKey} salió con código ${result.status}: ${result.stderr.split("\n")[0] || "sin detalle"}`);
+      }
+
+      const value = result.stdout.trim();
+      if (value !== "" && value !== NPM_UNSET_CONFIG_VALUE) {
+        return value;
+      }
+    }
+
+    return DEFAULT_NPM_REGISTRY_URL;
+  });
+}
+
+/**
+ * Returns the registry `npm publish` sends the package to: `publishConfig["@scope:registry"]` for a
+ * scoped package that declares it, else `publishConfig.registry`, else the registry npm's own config
+ * resolves (project `.npmrc`, environment, global config; see {@link readNpmConfigRegistry}).
+ *
+ * @param {Record<string, unknown>} manifest - `package.json` being published.
+ * @param {string} repositoryRoot - Package root, where npm reads its project config.
+ * @returns {Promise<string>} Registry URL, already checked to be a plain http(s) URL.
+ * @throws {Error} When the resolved registry is not a plain http(s) URL or npm cannot report its config.
+ */
+export async function resolvePublishRegistry(manifest, repositoryRoot) {
+  const registryUrl = readPublishConfigRegistry(manifest) ?? (await readNpmConfigRegistry(manifest, repositoryRoot));
 
   parseRegistryUrl(registryUrl);
   return registryUrl;
+}
+
+/**
+ * Describes where a published release can be seen: its npmjs.com page when the registry is the
+ * public npm registry, else the registry URL with the package and version.
+ *
+ * @param {{ registryUrl: string, packageName: string, version: string }} release - Published release.
+ * @returns {string} Summary text.
+ */
+export function describePublishedRelease({ registryUrl, packageName, version }) {
+  return parseRegistryUrl(registryUrl).href === DEFAULT_NPM_REGISTRY_URL
+    ? `${NPMJS_PACKAGE_PAGE_URL}${packageName}/v/${version}`
+    : `Registro: ${registryUrl} · ${packageName}@${version}`;
 }
 
 /**
@@ -214,7 +337,8 @@ export function buildNpmAuthConfigLine(registryUrl) {
  * about). The config is always removed afterwards.
  *
  * @template T
- * @param {string} authConfigLine - Line built by {@link buildNpmAuthConfigLine}.
+ * @param {string} authConfigLine - Line built by {@link buildNpmAuthConfigLine}; an empty line
+ *   gives npm a user config without credentials, which only replaces `~/.npmrc`.
  * @param {(userConfigPath: string) => Promise<T>} operation - Receives the path for `npm --userconfig`.
  * @param {string} [parentDirectory] - Where the temporary directory is created; defaults to the OS temp directory.
  * @returns {Promise<T>} The operation result.
@@ -277,13 +401,7 @@ export function buildNpmPublishEnvironment(environment = process.env) {
  * @throws {Error} When the temporary config path could break out of its shell quotes.
  */
 export async function publishToNpm(repositoryRoot, { authConfigLine, artifactPath = null }) {
-  const environmentFilePath = path.join(repositoryRoot, LOCAL_ENVIRONMENT_FILE);
-
-  if (!process.env[NPM_TOKEN_VARIABLE] && existsSync(environmentFilePath)) {
-    process.loadEnvFile(environmentFilePath);
-  }
-
-  if (!process.env[NPM_TOKEN_VARIABLE]) {
+  if (!loadNpmToken(repositoryRoot)) {
     return { exitCode: 1, missingToken: true };
   }
 

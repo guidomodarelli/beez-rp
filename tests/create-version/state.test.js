@@ -177,6 +177,28 @@ describe("create-version state", () => {
   );
 
   it(
+    "should look up published versions on the registry the project .npmrc selects when publishConfig declares none",
+    async () => {
+      const { repositoryRoot } = createReleasedRepository();
+      writeFileSync(path.join(repositoryRoot, ".npmrc"), "registry=https://npm.example.test/plain/\n");
+      /** @type {unknown[][]} */
+      const lookups = [];
+
+      await collectReleaseState({
+        repositoryRoot,
+        trackNpm: true,
+        lookupNpm: async (...lookupArguments) => {
+          lookups.push(lookupArguments);
+          return { status: NPM_LOOKUP_STATUS.ok, publishedVersions: [], reason: null };
+        },
+      });
+
+      expect(lookups).toEqual([["fixture-app", repositoryRoot, "https://npm.example.test/plain/"]]);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
     "should report a failed npm lookup instead of querying npmjs when the declared registry is invalid",
     async () => {
       const { repositoryRoot } = createReleasedRepository();
@@ -320,6 +342,7 @@ describe("beez-rp create-version command", () => {
       runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
       runGit(["reset", "--quiet", "--hard", "HEAD~1"], repositoryRoot);
 
+      expect(runReleaseWithoutToken(repositoryRoot)).toContain("volvé a correr pnpm create-version");
       const output = runReleaseWithoutToken(repositoryRoot);
 
       expect(output).toContain("releases/fixture-app-renamed-0.2.0.tgz verificado (integrity de npm pack)");
@@ -343,44 +366,37 @@ describe("beez-rp create-version command", () => {
   }
 
   it(
-    "should verify the artifact that origin/main configures when local main was behind with a configuration without artifact",
-    () => {
-      const { repositoryRoot } = createReleasedRepository();
-      pushConfiguration(repositoryRoot, [
-        "export default {",
-        '  changelog: { audience: "equipo" },',
-        '  publish: "npm",',
-        "  registry: null,",
-        "  prepare: () => {},",
-        "};",
-      ]);
-      configureNpmPackArtifact(repositoryRoot);
-      runGit(["reset", "--quiet", "--hard", "HEAD~1"], repositoryRoot);
-
-      const output = runReleaseWithoutToken(repositoryRoot);
-
-      expect(output).toContain("releases/fixture-app-0.2.0.tgz verificado (integrity de npm pack)");
-      expect(output).toContain("Falta NPM_TOKEN para publicar 0.2.0.");
-    },
-    GIT_FIXTURE_TEST_TIMEOUT_MS
-  );
-
-  it(
-    "should stop before touching the version when the configuration brought by syncing main changes the plan",
+    "should stop right after syncing main without a new version, and release with the new configuration when run again",
     () => {
       const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      const hookLog = path.join(path.dirname(repositoryRoot), "hooks.log");
       pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "};"]);
-      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', '  checks: ["node --version"],', "};"]);
+      pushConfiguration(repositoryRoot, [
+        'import { appendFileSync } from "node:fs";',
+        `const log = ${JSON.stringify(hookLog)};`,
+        "export default {",
+        '  changelog: { audience: "equipo" },',
+        '  prepare: ({ version }) => appendFileSync(log, `prepare ${version}\\n`),',
+        "};",
+      ]);
+      const remoteMainSha = runGit(["rev-parse", "HEAD"], repositoryRoot);
       runGit(["reset", "--quiet", "--hard", "HEAD~1"], repositoryRoot);
 
-      const release = runCli(repositoryRoot, ["--bump", "minor"]);
+      const synced = runCli(repositoryRoot, ["--bump", "minor"]);
 
-      expect(release.status, release.output).toBe(1);
-      expect(release.output).toContain("origin/main cambió beez-rp.config.js");
-      expect(release.output).toContain("Volvé a correr pnpm create-version");
+      expect(synced.status, synced.output).toBe(0);
+      expect(synced.output).toContain("main se actualizó desde origin: volvé a correr pnpm create-version");
+      expect(runGit(["rev-parse", "main"], repositoryRoot)).toBe(remoteMainSha);
       expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
       expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
       expect(JSON.parse(readFileSync(path.join(repositoryRoot, "package.json"), "utf8")).version).toBe("0.1.0");
+      expect(existsSync(hookLog)).toBe(false);
+
+      const release = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(release.status, release.output).toBe(0);
+      expect(readFileSync(hookLog, "utf8")).toBe("prepare 0.2.0\n");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("v0.2.0");
     },
     GIT_FIXTURE_TEST_TIMEOUT_MS
   );

@@ -27,6 +27,7 @@ import {
   FAILURE_EXIT_CODE,
   GITHUB_REPOSITORY_PATTERN,
   MAIN_BRANCH,
+  MAIN_SYNCED_RESTART_MESSAGE,
   MAX_LISTED_COMMITS,
   MAX_LISTED_ITEMS,
   MIGRATION_STATUS,
@@ -71,7 +72,7 @@ import {
 } from "./artifact.js";
 import { loadCreateVersionConfig } from "./config.js";
 import { ReleaseStepError } from "./errors.js";
-import { buildNpmAuthConfigLine, lookupPublishedVersions, publishToNpm, readNpmPackIntegrity, resolvePublishRegistry } from "./npm.js";
+import { buildNpmAuthConfigLine, describePublishedRelease, lookupPublishedVersions, publishToNpm, readNpmPackIntegrity, resolvePublishRegistry } from "./npm.js";
 import { RELEASE_USAGE, buildReleasePlan, parseReleaseArguments } from "./plan.js";
 import { createGitReader, listCommits, runCommandLine, runInherited } from "./process.js";
 import { collectReleaseState } from "./state.js";
@@ -92,11 +93,19 @@ import { collectReleaseState } from "./state.js";
  *   published: boolean,
  *   commitCount: number | null,
  *   packageName: string,
+ *   registryUrl: string | null,
  * }} ReleaseContext
  */
 
 /** Raised when the user cancels on purpose; ends the run without an error box. */
 class ReleaseCancelledError extends Error {}
+
+/**
+ * Raised after syncing `main` brought new commits: the diagnosis, the plan and the configuration
+ * (with every module it imports) belong to the previous `main`, so the run ends without an error
+ * and asks to run the command again in a new process.
+ */
+class MainSyncedRestartError extends Error {}
 
 /** Answers of the pending-migrations prompt. */
 const MIGRATION_CHOICE = Object.freeze({ apply: "apply", skip: "skip", cancel: "cancel" });
@@ -355,30 +364,18 @@ function describeReleaseCapabilities(config) {
 }
 
 /**
- * Settings the diagnosis and the plan were built from: the plan steps, the tracked registry and
- * whether pending migrations were checked. Anything else is read by each step when it runs.
- *
- * @param {ResolvedCreateVersionConfig} config - Resolved configuration.
- * @returns {string} Comparable description.
- */
-function describePlanInputs(config) {
-  return JSON.stringify({ ...describeReleaseCapabilities(config), registry: config.registry, migrations: config.migrations !== null });
-}
-
-/**
- * Fast-forwards local `main` to `origin/main` and reloads `beez-rp.config.(m)js` from the updated
- * checkout, because the configuration imported at startup is the one `main` had before syncing.
- * The following steps use the reloaded configuration (artifact, prepare, checks commands,
- * publication...). When it changes what the plan was built from (which steps run, the registry or
- * the migrations adapter), the release stops before touching the version: the diagnosis and the
- * plan would be stale, and running `pnpm create-version` again builds both from the new file.
+ * Fast-forwards local `main` to `origin/main`. When that brings new commits the release stops
+ * before touching the version: the diagnosis, the plan and `beez-rp.config.(m)js` (imported with
+ * its modules at startup) come from the previous `main`, so the command must run again in a new
+ * process to diagnose with the new code and configuration.
  *
  * @param {ReleaseContext} context - Release context.
  * @returns {Promise<void>}
- * @throws {ReleaseStepError} When the fast-forward fails, the updated configuration cannot be
- *   loaded or it changes the plan.
+ * @throws {ReleaseStepError} When the fast-forward fails.
+ * @throws {MainSyncedRestartError} When `main` moved and the command has to run again.
  */
 async function syncMainStep(context) {
+  const headBeforeSync = await context.reader.git(["rev-parse", "HEAD"]);
   await runGitStep(
     context,
     ["merge", "--ff-only", "--quiet", REMOTE_MAIN_REF],
@@ -387,26 +384,9 @@ async function syncMainStep(context) {
   );
   print(`${ICON.success} ${MAIN_BRANCH} quedó igual a ${REMOTE_MAIN_REF}.`);
 
-  const headSha = await context.reader.git(["rev-parse", "HEAD"]);
-  let updatedConfig;
-  try {
-    updatedConfig = await loadCreateVersionConfig(context.repositoryRoot, { reloadKey: headSha });
-  } catch (error) {
-    throw new ReleaseStepError(
-      `No se pudo cargar la configuración de ${MAIN_BRANCH} actualizado (${headSha.slice(0, SHORT_SHA_LENGTH)}): ${error instanceof Error ? error.message : String(error)}`,
-      "Corregí beez-rp.config.js en main y volvé a correr pnpm create-version.",
-      { cause: error }
-    );
+  if ((await context.reader.git(["rev-parse", "HEAD"])) !== headBeforeSync) {
+    throw new MainSyncedRestartError();
   }
-
-  if (describePlanInputs(updatedConfig) !== describePlanInputs(context.config)) {
-    throw new ReleaseStepError(
-      `${REMOTE_MAIN_REF} cambió beez-rp.config.js y el plan ya no corresponde (pasos de validación, preparación o publicación, registry o migraciones).`,
-      "No se tocó la versión. Volvé a correr pnpm create-version para diagnosticar con la configuración nueva."
-    );
-  }
-
-  context.config = updatedConfig;
 }
 
 /**
@@ -723,19 +703,21 @@ async function resolvePublishedArtifact(context, version, workingManifest) {
 
 /**
  * Resolves the registry the release is published to: `publishConfig["@scope:registry"]` for a
- * scoped package, else `publishConfig.registry`, else npm's default registry.
+ * scoped package, else `publishConfig.registry`, else the registry npm's config resolves in the
+ * repository (project `.npmrc`, environment, global config).
  *
  * @param {Record<string, unknown>} manifest - Working tree `package.json`.
- * @returns {string} Registry URL, already checked to be a plain http(s) URL.
- * @throws {ReleaseStepError} When the registry `publishConfig` declares is not a valid http(s) URL.
+ * @param {string} repositoryRoot - Repository root.
+ * @returns {Promise<string>} Registry URL, already checked to be a plain http(s) URL.
+ * @throws {ReleaseStepError} When the registry is not a valid http(s) URL or npm cannot report it.
  */
-function resolveReleaseRegistry(manifest) {
+async function resolveReleaseRegistry(manifest, repositoryRoot) {
   try {
-    return resolvePublishRegistry(manifest);
+    return await resolvePublishRegistry(manifest, repositoryRoot);
   } catch (error) {
     throw new ReleaseStepError(
       `No se puede publicar: ${error instanceof Error ? error.message : String(error)}.`,
-      "No se publicó nada. Corregí publishConfig.registry o publishConfig[\"@scope:registry\"] en package.json (una URL http(s) sin credenciales) y volvé a correr pnpm create-version."
+      "No se publicó nada. Corregí el registry (publishConfig.registry o publishConfig[\"@scope:registry\"] en package.json, o registry/@scope:registry en .npmrc) con una URL http(s) sin credenciales y volvé a correr pnpm create-version."
     );
   }
 }
@@ -755,7 +737,8 @@ async function publishReleaseStep(context) {
     const manifest = readWorkingManifest(context.repositoryRoot);
     const packageName = String(manifest.name);
     context.packageName = packageName;
-    const registryUrl = resolveReleaseRegistry(manifest);
+    const registryUrl = await resolveReleaseRegistry(manifest, context.repositoryRoot);
+    context.registryUrl = registryUrl;
     const authConfigLine = buildNpmAuthConfigLine(registryUrl);
     const artifactPath = await resolvePublishedArtifact(context, version, manifest);
     if (artifactPath) {
@@ -827,8 +810,8 @@ function renderReleaseSummary(context, remoteUrl, startedAt) {
     lines.push(`${ICON.success} ${paint("bold", "Git")}       ${MAIN_BRANCH} + ${tag} en ${RELEASE_REMOTE}`);
   }
 
-  if (context.published && context.config.registry === RELEASE_REGISTRY.npm) {
-    lines.push(`${ICON.success} ${paint("bold", "npm")}       https://www.npmjs.com/package/${context.packageName}/v/${version}`);
+  if (context.published && context.registryUrl) {
+    lines.push(`${ICON.success} ${paint("bold", "npm")}       ${describePublishedRelease({ registryUrl: context.registryUrl, packageName: context.packageName, version })}`);
   }
 
   const githubRepository = GITHUB_REPOSITORY_PATTERN.exec(remoteUrl)?.[1];
@@ -941,7 +924,7 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   }
 
   /** @type {ReleaseContext} */
-  const context = { repositoryRoot, config, state, options, reader, version: plan.pendingVersion, pushed: false, published: false, commitCount: null, packageName: state.packageName };
+  const context = { repositoryRoot, config, state, options, reader, version: plan.pendingVersion, pushed: false, published: false, commitCount: null, packageName: state.packageName, registryUrl: null };
 
   for (const [index, planStep] of plan.steps.entries()) {
     print(renderStepHeader(index + 1, plan.steps.length, planStep.title));
@@ -950,6 +933,18 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
       await STEP_EXECUTORS[planStep.id](context);
     } catch (error) {
       if (error instanceof ReleaseCancelledError) {
+        return 0;
+      }
+
+      // Not a failure: the run ends on purpose so the next one diagnoses the updated main.
+      if (error instanceof MainSyncedRestartError) {
+        print(
+          renderBox({
+            title: `${MAIN_BRANCH} actualizado`,
+            lines: [`${ICON.info} ${MAIN_SYNCED_RESTART_MESSAGE}`, "", paint("gray", "No se tocó la versión ni los tags.")],
+            tone: BOX_TONE.info,
+          })
+        );
         return 0;
       }
 

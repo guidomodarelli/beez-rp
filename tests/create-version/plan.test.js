@@ -92,13 +92,11 @@ describe("create-version plan", () => {
 
   it("should run every configured step of an npm package in order", () => {
     const state = createMainState({
-      main: { aheadCommits: [], behindCount: 2 },
       changelog: { exists: true, entryCount: 0, unknownSections: [] },
       npm: { status: NPM_LOOKUP_STATUS.ok, publishedVersions: ["0.1.0"], reason: null },
     });
 
     expect(stepIds(state, NPM_PACKAGE)).toEqual([
-      RELEASE_STEP.syncMain,
       RELEASE_STEP.generateChangelog,
       RELEASE_STEP.runChecks,
       RELEASE_STEP.bumpVersion,
@@ -108,7 +106,20 @@ describe("create-version plan", () => {
     ]);
   });
 
-  it("should apply pending migrations after syncing and warn when they cannot be verified", () => {
+  it("should only sync main when it is behind origin, because the next run diagnoses the updated code", () => {
+    const state = createMainState({
+      main: { aheadCommits: [], behindCount: 2 },
+      changelog: { exists: true, entryCount: 0, unknownSections: [] },
+      migrations: { status: MIGRATION_STATUS.pending, pending: ["0001_init"], target: "db.example.test", reason: null },
+    });
+    const plan = buildReleasePlan(state, NPM_PACKAGE);
+
+    expect(plan.mode).toBe(RELEASE_MODE.newRelease);
+    expect(plan.steps.map((planStep) => planStep.id)).toEqual([RELEASE_STEP.syncMain]);
+    expect(plan.steps[0].detail).toContain("volver a correr pnpm create-version");
+  });
+
+  it("should apply pending migrations before the version and warn when they cannot be verified", () => {
     const pending = createMainState({ migrations: { status: MIGRATION_STATUS.pending, pending: ["0001_init"], target: "db.example.test", reason: null } });
     expect(stepIds(pending)).toEqual([RELEASE_STEP.applyMigrations, RELEASE_STEP.bumpVersion, RELEASE_STEP.pushRelease]);
 

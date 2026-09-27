@@ -140,13 +140,14 @@ async function readMigrations(checkMigrations) {
  * @param {typeof lookupPublishedVersions} lookupNpm - npm lookup adapter.
  * @param {Record<string, unknown>} manifest - Working-tree `package.json`.
  * @param {string} repositoryRoot - Repository root.
- * @returns {Promise<import("./npm.js").NpmLookup>} Published versions, or a failed lookup when the registry is invalid.
+ * @returns {Promise<import("./npm.js").NpmLookup>} Published versions, or a failed lookup when the registry is invalid
+ *   or npm cannot report it.
  */
 async function lookupNpmOnPublishRegistry(lookupNpm, manifest, repositoryRoot) {
   /** @type {string} */
   let registryUrl;
   try {
-    registryUrl = resolvePublishRegistry(manifest);
+    registryUrl = await resolvePublishRegistry(manifest, repositoryRoot);
   } catch (error) {
     return { status: NPM_LOOKUP_STATUS.failed, publishedVersions: [], reason: error instanceof Error ? error.message : String(error) };
   }

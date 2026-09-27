@@ -22,13 +22,6 @@ export const CREATE_VERSION_CONFIG_FILE = "beez-rp.config.js";
  */
 export const CREATE_VERSION_CONFIG_FILES = Object.freeze(["beez-rp.config.mjs", CREATE_VERSION_CONFIG_FILE]);
 
-/**
- * Query parameter that makes Node evaluate the configuration again: the ES module cache is keyed
- * by URL, so importing `beez-rp.config.js?reload=<commit>` runs the file the checkout holds now
- * instead of returning the module imported before `main` was synchronized.
- */
-export const CONFIG_RELOAD_QUERY_PARAMETER = "reload";
-
 /** Manifest whose `version` is released; shared with the build gate. */
 export { PACKAGE_MANIFEST_FILE } from "./build-gate.js";
 
@@ -268,8 +261,11 @@ export const PUBLISHED_DEPENDENCY_FIELDS = Object.freeze(["dependencies", "peerD
  */
 export const PNPM_PACK_REWRITTEN_SPECIFIER_PATTERN = /^(?:workspace|catalog|jsr):|\|\|\s*workspace:/u;
 
-/** Registry `npm publish` uses when `publishConfig` sets neither `@scope:registry` nor `registry`. */
+/** Public npm registry: npm's default, used when no config sets `@scope:registry` nor `registry`. */
 export const DEFAULT_NPM_REGISTRY_URL = "https://registry.npmjs.org/";
+
+/** Prefix of a package page on npmjs.com, linked in the summary of a release published to {@link DEFAULT_NPM_REGISTRY_URL}. */
+export const NPMJS_PACKAGE_PAGE_URL = "https://www.npmjs.com/package/";
 
 /** `publishConfig` key of the registry for every package, used when no scope-specific registry applies. */
 export const PUBLISH_CONFIG_REGISTRY_KEY = "registry";
@@ -285,6 +281,15 @@ export const SHELL_SAFE_REGISTRY_URL_PATTERN = /^https?:\/\/[\w.~:/@+-]+$/u;
 
 /** npm option that selects the registry `npm view` queries. */
 export const NPM_REGISTRY_OPTION = "--registry";
+
+/** npm option that replaces the user config (`~/.npmrc`) with the temporary one. */
+export const NPM_USER_CONFIG_OPTION = "--userconfig";
+
+/** npm subcommand that prints the effective value of a config key. */
+export const NPM_CONFIG_GET_ARGUMENTS = Object.freeze(["config", "get"]);
+
+/** What `npm config get` prints for a key no config source sets, such as an unused `@scope:registry`. */
+export const NPM_UNSET_CONFIG_VALUE = "undefined";
 
 /** Protocols a publish registry URL may use. */
 export const NPM_REGISTRY_PROTOCOLS = Object.freeze(["http:", "https:"]);
@@ -303,6 +308,12 @@ export const UNSAFE_QUOTED_PATH_PATTERN = /["%]/u;
 
 /** Placeholder replaced by the released version in `summary` lines. */
 export const SUMMARY_VERSION_PLACEHOLDER = "{version}";
+
+/**
+ * Shown when syncing `main` brought new commits: the run ends (exit code 0, it is not a failure)
+ * so the next one loads the updated configuration and diagnoses again.
+ */
+export const MAIN_SYNCED_RESTART_MESSAGE = `${MAIN_BRANCH} se actualizó desde origin: volvé a correr pnpm create-version para diagnosticar con el código y la configuración nuevos.`;
 
 /** Exit code of a release stopped by a failed step, invalid arguments or configuration. */
 export const FAILURE_EXIT_CODE = 1;

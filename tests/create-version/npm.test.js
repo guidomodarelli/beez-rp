@@ -1,13 +1,16 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 
-import { NPM_DIST_TAG } from "../../src/constants/create-version.js";
+import { NPM_DIST_TAG, NPM_LOOKUP_STATUS } from "../../src/constants/create-version.js";
 import {
   buildNpmAuthConfigLine,
   buildNpmPublishArguments,
   buildNpmViewArguments,
+  describePublishedRelease,
+  lookupPublishedVersions,
   resolvePublishRegistry,
   withNpmAuthConfig,
 } from "../../src/create-version/npm.js";
@@ -18,14 +21,48 @@ const PUBLISH_OPTIONS = ["--access", "public", "--tag", NPM_DIST_TAG];
 /** Credential line of the public npm registry. */
 const DEFAULT_REGISTRY_AUTH_LINE = "//registry.npmjs.org/:_authToken=${NPM_TOKEN}\n";
 
+/** Real npm processes can exceed the default timeout on Windows. */
+const NPM_PROCESS_TEST_TIMEOUT_MS = 60_000;
+
+/**
+ * Variables of the test runner that would override the registry or the token the fixtures set:
+ * they are removed while each test runs, so the fixtures decide what npm resolves.
+ */
+const ISOLATED_VARIABLE_PATTERN = /^(?:npm_config_(?:@[^:]+:)?registry|npm_token)$/iu;
+
 /** @type {string[]} */
 const temporaryDirectories = [];
 
+/** @type {Record<string, string | undefined>} */
+let isolatedVariables = {};
+
+beforeEach(() => {
+  isolatedVariables = Object.fromEntries(Object.entries(process.env).filter(([variableName]) => ISOLATED_VARIABLE_PATTERN.test(variableName)));
+  for (const variableName of Object.keys(isolatedVariables)) delete process.env[variableName];
+});
+
 afterEach(() => {
+  for (const variableName of Object.keys(process.env).filter((name) => ISOLATED_VARIABLE_PATTERN.test(name))) delete process.env[variableName];
+  Object.assign(process.env, isolatedVariables);
   for (const directory of temporaryDirectories.splice(0)) {
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+/**
+ * Creates a package root where npm reads its project config.
+ *
+ * @param {Record<string, unknown>} manifest - `package.json` content.
+ * @param {string} [projectNpmrc] - Project `.npmrc` content; omitted for none.
+ * @returns {string} Package root.
+ */
+function createPackageRoot(manifest, projectNpmrc) {
+  const packageRoot = mkdtempSync(path.join(os.tmpdir(), "beez-rp-npm-registry-"));
+  temporaryDirectories.push(packageRoot);
+  writeFileSync(path.join(packageRoot, "package.json"), JSON.stringify(manifest));
+  if (projectNpmrc !== undefined) writeFileSync(path.join(packageRoot, ".npmrc"), projectNpmrc);
+  return packageRoot;
+}
 
 describe("buildNpmPublishArguments", () => {
   it("publishes the working tree when there is no prepared artifact", () => {
@@ -50,49 +87,86 @@ describe("buildNpmPublishArguments", () => {
   });
 });
 
-describe("publish registry credentials", () => {
-  it("binds the token to the public npm registry when publishConfig.registry is not set", () => {
-    const registryUrl = resolvePublishRegistry({ name: "pkg", publishConfig: { access: "public" } });
+describe("publish registry resolution", () => {
+  it(
+    "binds the token to the public npm registry when neither publishConfig nor npm's config set a registry",
+    async () => {
+      const registryUrl = await resolvePublishRegistry({ name: "pkg", publishConfig: { access: "public" } }, createPackageRoot({ name: "pkg" }));
 
-    expect(registryUrl).toBe("https://registry.npmjs.org/");
-    expect(buildNpmAuthConfigLine(registryUrl)).toBe(DEFAULT_REGISTRY_AUTH_LINE);
-  });
+      expect(registryUrl).toBe("https://registry.npmjs.org/");
+      expect(buildNpmAuthConfigLine(registryUrl)).toBe(DEFAULT_REGISTRY_AUTH_LINE);
+    },
+    NPM_PROCESS_TEST_TIMEOUT_MS
+  );
 
-  it("binds the token to the registry publishConfig declares, keeping its path and port", () => {
-    expect(buildNpmAuthConfigLine(resolvePublishRegistry({ publishConfig: { registry: "https://npm.example.test/api/npm/team" } }))).toBe(
+  it("binds the token to the registry publishConfig declares, keeping its path and port", async () => {
+    const manifest = { name: "pkg", publishConfig: { registry: "https://npm.example.test/api/npm/team" } };
+
+    expect(buildNpmAuthConfigLine(await resolvePublishRegistry(manifest, createPackageRoot(manifest)))).toBe(
       "//npm.example.test/api/npm/team/:_authToken=${NPM_TOKEN}\n"
     );
     expect(buildNpmAuthConfigLine("http://localhost:4873/")).toBe("//localhost:4873/:_authToken=${NPM_TOKEN}\n");
   });
 
-  it("binds the token to the scope-specific registry of a scoped package, as npm publish resolves it", () => {
-    const registryUrl = resolvePublishRegistry({
-      name: "@team/pkg",
-      publishConfig: { "@team:registry": "https://npm.example.test/team/", registry: "https://fallback.example.test/" },
-    });
+  it("binds the token to the scope-specific registry of a scoped package, as npm publish resolves it", async () => {
+    const manifest = { name: "@team/pkg", publishConfig: { "@team:registry": "https://npm.example.test/team/", registry: "https://fallback.example.test/" } };
+    const registryUrl = await resolvePublishRegistry(manifest, createPackageRoot(manifest));
 
     expect(registryUrl).toBe("https://npm.example.test/team/");
     expect(buildNpmAuthConfigLine(registryUrl)).toBe("//npm.example.test/team/:_authToken=${NPM_TOKEN}\n");
-    expect(resolvePublishRegistry({ name: "@team/pkg", publishConfig: { "@team:registry": "https://npm.example.test/team/" } })).toBe(
-      "https://npm.example.test/team/"
-    );
   });
 
-  it("ignores the registry of another scope and falls back to publishConfig.registry or npm's default", () => {
-    const otherScope = { "@other:registry": "https://other.example.test/" };
+  it(
+    "ignores the publishConfig registry of another scope and falls back to publishConfig.registry or npm's config",
+    async () => {
+      const otherScope = { "@other:registry": "https://other.example.test/" };
+      const packageRoot = createPackageRoot({ name: "@team/pkg" });
 
-    expect(resolvePublishRegistry({ name: "@team/pkg", publishConfig: otherScope })).toBe("https://registry.npmjs.org/");
-    expect(resolvePublishRegistry({ name: "@team/pkg", publishConfig: { ...otherScope, registry: "https://fallback.example.test/" } })).toBe(
-      "https://fallback.example.test/"
+      expect(await resolvePublishRegistry({ name: "@team/pkg", publishConfig: otherScope }, packageRoot)).toBe("https://registry.npmjs.org/");
+      expect(
+        await resolvePublishRegistry({ name: "@team/pkg", publishConfig: { ...otherScope, registry: "https://fallback.example.test/" } }, packageRoot)
+      ).toBe("https://fallback.example.test/");
+      expect(await resolvePublishRegistry({ name: "pkg", publishConfig: { "@team:registry": "https://npm.example.test/team/" } }, packageRoot)).toBe(
+        "https://registry.npmjs.org/"
+      );
+    },
+    NPM_PROCESS_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "resolves the registry a project .npmrc selects, plain or for the package scope, as npm publish does",
+    async () => {
+      const plainRoot = createPackageRoot({ name: "pkg" }, "registry=https://npm.example.test/plain/\n");
+      expect(await resolvePublishRegistry({ name: "pkg" }, plainRoot)).toBe("https://npm.example.test/plain/");
+
+      const scopedRoot = createPackageRoot({ name: "@team/pkg" }, "@team:registry=https://npm.example.test/team/\nregistry=https://npm.example.test/plain/\n");
+      expect(await resolvePublishRegistry({ name: "@team/pkg" }, scopedRoot)).toBe("https://npm.example.test/team/");
+      expect(await resolvePublishRegistry({ name: "@other/pkg" }, scopedRoot)).toBe("https://npm.example.test/plain/");
+    },
+    NPM_PROCESS_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "prefers publishConfig over the project .npmrc and validates the registry npm's config resolves",
+    async () => {
+      const packageRoot = createPackageRoot({ name: "@team/pkg" }, "@team:registry=https://npm.example.test/team/\n");
+      expect(await resolvePublishRegistry({ name: "@team/pkg", publishConfig: { registry: "https://declared.example.test/" } }, packageRoot)).toBe(
+        "https://declared.example.test/"
+      );
+
+      const invalidRoot = createPackageRoot({ name: "pkg" }, "registry=ftp://npm.example.test/\n");
+      await expect(resolvePublishRegistry({ name: "pkg" }, invalidRoot)).rejects.toThrow("http(s)");
+    },
+    NPM_PROCESS_TEST_TIMEOUT_MS
+  );
+
+  it("rejects an invalid publishConfig registry, scoped or not", async () => {
+    const packageRoot = createPackageRoot({ name: "pkg" });
+
+    await expect(resolvePublishRegistry({ name: "@team/pkg", publishConfig: { "@team:registry": "npm.example.test" } }, packageRoot)).rejects.toThrow(
+      "no es una URL válida"
     );
-    expect(resolvePublishRegistry({ name: "pkg", publishConfig: { "@team:registry": "https://npm.example.test/team/" } })).toBe("https://registry.npmjs.org/");
-    expect(resolvePublishRegistry({ name: "pkg", publishConfig: { registry: "https://plain.example.test/" } })).toBe("https://plain.example.test/");
-    expect(resolvePublishRegistry({ name: "pkg" })).toBe("https://registry.npmjs.org/");
-  });
-
-  it("rejects an invalid registry while resolving it, scoped or not", () => {
-    expect(() => resolvePublishRegistry({ name: "@team/pkg", publishConfig: { "@team:registry": "npm.example.test" } })).toThrow("no es una URL válida");
-    expect(() => resolvePublishRegistry({ name: "pkg", publishConfig: { registry: "ftp://registry.example.test/" } })).toThrow("http(s)");
+    await expect(resolvePublishRegistry({ name: "pkg", publishConfig: { registry: "ftp://registry.example.test/" } }, packageRoot)).rejects.toThrow("http(s)");
   });
 
   it("rejects registries that are not plain http(s) URLs", () => {
@@ -136,16 +210,27 @@ describe("publish registry credentials", () => {
 
 describe("npm view arguments", () => {
   it("queries the registry the package is published to, because npm view ignores publishConfig", () => {
-    const registryUrl = resolvePublishRegistry({ name: "@team/pkg", publishConfig: { "@team:registry": "https://npm.example.test/team/" } });
+    expect(buildNpmViewArguments("@team/pkg", "https://npm.example.test/team/")).toEqual([
+      "view",
+      "@team/pkg",
+      "versions",
+      "--json",
+      "--registry",
+      "https://npm.example.test/team/",
+    ]);
+    expect(buildNpmViewArguments("pkg", "https://registry.npmjs.org/")).toEqual(["view", "pkg", "versions", "--json", "--registry", "https://registry.npmjs.org/"]);
+  });
 
-    expect(buildNpmViewArguments("@team/pkg", registryUrl)).toEqual(["view", "@team/pkg", "versions", "--json", "--registry", "https://npm.example.test/team/"]);
-    expect(buildNpmViewArguments("pkg", resolvePublishRegistry({ name: "pkg" }))).toEqual([
+  it("adds the temporary authenticated user config when there is one", () => {
+    expect(buildNpmViewArguments("pkg", "https://npm.example.test/", "/tmp/beez-rp-npm-auth-fixture/npmrc")).toEqual([
       "view",
       "pkg",
       "versions",
       "--json",
       "--registry",
-      "https://registry.npmjs.org/",
+      "https://npm.example.test/",
+      "--userconfig",
+      "/tmp/beez-rp-npm-auth-fixture/npmrc",
     ]);
   });
 
@@ -153,5 +238,67 @@ describe("npm view arguments", () => {
     expect(() => buildNpmViewArguments("pkg", "not a url")).toThrow("no es una URL válida");
     expect(() => buildNpmViewArguments("pkg", "https://npm.example.test/a&b/")).toThrow("caracteres no permitidos");
     expect(() => buildNpmViewArguments("pkg", "https://npm.example.test/a%20b/")).toThrow("caracteres no permitidos");
+  });
+});
+
+describe("published versions lookup", () => {
+  /** Token the fixture registry accepts; not a real credential. */
+  const FIXTURE_TOKEN = "fixture-registry-token";
+
+  /** Private package served by the fixture registry. */
+  const PRIVATE_PACKAGE_NAME = "fixture-private";
+
+  /**
+   * Serves a private package that answers only requests carrying {@link FIXTURE_TOKEN}.
+   *
+   * @returns {Promise<{ registryUrl: string, close: () => Promise<void> }>} Local registry.
+   */
+  async function startPrivateRegistry() {
+    const server = createServer((request, response) => {
+      if (request.headers.authorization !== `Bearer ${FIXTURE_TOKEN}`) {
+        response.writeHead(401, { "content-type": "application/json" }).end(JSON.stringify({ error: "authentication required" }));
+        return;
+      }
+
+      const versions = Object.fromEntries(["1.0.0", "1.1.0"].map((version) => [version, { name: PRIVATE_PACKAGE_NAME, version }]));
+      response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ name: PRIVATE_PACKAGE_NAME, "dist-tags": { latest: "1.1.0" }, versions }));
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(undefined)));
+    const { port } = /** @type {import("node:net").AddressInfo} */ (server.address());
+    return { registryUrl: `http://127.0.0.1:${port}/`, close: () => new Promise((resolve) => server.close(() => resolve(undefined))) };
+  }
+
+  it(
+    "authenticates npm view with NPM_TOKEN from .env so a private package can be diagnosed",
+    async () => {
+      const registry = await startPrivateRegistry();
+
+      try {
+        const packageRoot = createPackageRoot({ name: PRIVATE_PACKAGE_NAME });
+        const anonymous = await lookupPublishedVersions(PRIVATE_PACKAGE_NAME, packageRoot, registry.registryUrl);
+        expect(anonymous.status).toBe(NPM_LOOKUP_STATUS.failed);
+
+        writeFileSync(path.join(packageRoot, ".env"), `NPM_TOKEN=${FIXTURE_TOKEN}\n`);
+        const authenticated = await lookupPublishedVersions(PRIVATE_PACKAGE_NAME, packageRoot, registry.registryUrl);
+        expect(authenticated).toEqual({ status: NPM_LOOKUP_STATUS.ok, publishedVersions: ["1.0.0", "1.1.0"], reason: null });
+      } finally {
+        await registry.close();
+      }
+    },
+    NPM_PROCESS_TEST_TIMEOUT_MS
+  );
+});
+
+describe("published release summary", () => {
+  it("links the npmjs.com page only for the public npm registry", () => {
+    expect(describePublishedRelease({ registryUrl: "https://registry.npmjs.org/", packageName: "@team/pkg", version: "1.2.0" })).toBe(
+      "https://www.npmjs.com/package/@team/pkg/v/1.2.0"
+    );
+    expect(describePublishedRelease({ registryUrl: "https://registry.npmjs.org", packageName: "pkg", version: "1.2.0" })).toBe(
+      "https://www.npmjs.com/package/pkg/v/1.2.0"
+    );
+    expect(describePublishedRelease({ registryUrl: "https://npm.example.test/team/", packageName: "@team/pkg", version: "1.2.0" })).toBe(
+      "Registro: https://npm.example.test/team/ · @team/pkg@1.2.0"
+    );
   });
 });

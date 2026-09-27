@@ -14,8 +14,9 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y e
 
 ### Changed
 
-- `publish: "npm"` usa una config de npm temporal que solo referencia `${NPM_TOKEN}`, asociada al registry donde se publica (`publishConfig["@scope:registry"]` de un paquete con scope, `publishConfig.registry` o `https://registry.npmjs.org/`): los proyectos ya no necesitan `.npmrc` y pnpm deja de advertir por credenciales en el repositorio. La confirmación 2FA de npm sigue siendo interactiva.
-- El diagnóstico y la comprobación posterior a publicar consultan las versiones con `npm view --registry` en ese mismo registry, así que un paquete publicado en un registry propio ya no se vuelve a preparar y publicar.
+- `publish: "npm"` usa una config de npm temporal que solo referencia `${NPM_TOKEN}`, asociada al registry donde se publica (`publishConfig["@scope:registry"]` de un paquete con scope, `publishConfig.registry` o, si no hay, el registry que resuelve la config de npm en el repo: `.npmrc` del proyecto, variables de entorno o config global): los proyectos ya no necesitan `.npmrc` y pnpm deja de advertir por credenciales en el repositorio. La confirmación 2FA de npm sigue siendo interactiva.
+- El diagnóstico y la comprobación posterior a publicar consultan las versiones con `npm view --registry` en ese mismo registry, así que un paquete publicado en un registry propio ya no se vuelve a preparar y publicar. Con `NPM_TOKEN` (entorno o `.env`) esa consulta se autentica con la misma config temporal, así que también funciona con paquetes privados.
+- El resumen final enlaza a npmjs.com solo cuando se publicó en `https://registry.npmjs.org/`; en otro registry muestra `Registro: <url>` con el paquete y la versión.
 
 ### Removed
 
@@ -23,7 +24,7 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y e
 
 ### Fixed
 
-- Después de actualizar `main` desde `origin/main`, `create-version` vuelve a cargar `beez-rp.config.(m)js` y usa esa configuración en los pasos siguientes (por ejemplo, un `artifact` o una preparación nuevos). Si cambia qué pasos corresponden, el registry o las migraciones, corta antes de tocar la versión y pide volver a correr `pnpm create-version`.
+- Si `main` estaba atrás de `origin/main`, `create-version` lo actualiza y termina sin tocar la versión ni los tags (código de salida 0), pidiendo volver a correr `pnpm create-version`: así el diagnóstico, el plan, las migraciones y `beez-rp.config.(m)js` con sus módulos importados salen del código actualizado y no del `main` anterior.
 
 ## [0.2.0] - 2026-09-26
 
