@@ -446,6 +446,58 @@ describe("beez-rp create-version command", () => {
     GIT_FIXTURE_TEST_TIMEOUT_MS
   );
 
+  it(
+    "should require --bump or --set-version without an interactive terminal, since the version prompt has no default",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      const checkLog = path.join(path.dirname(repositoryRoot), "checks.log");
+      writeFileSync(path.join(repositoryRoot, "check.mjs"), `import { appendFileSync } from "node:fs";\nappendFileSync(${JSON.stringify(checkLog)}, "checked");\n`);
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', '  checks: ["node check.mjs"],', "};"]);
+
+      const release = runCli(repositoryRoot, []);
+
+      expect(release.status).toBe(1);
+      expect(flattenOutput(release.output)).toContain("Sin terminal interactiva no se puede elegir la versión");
+      expect(existsSync(checkLog)).toBe(false);
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+      expect(runCli(repositoryRoot, ["--dry-run"]).status).toBe(0);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should release with --ignore-local-changes without shipping them, and restore them afterwards",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      const checkLog = path.join(path.dirname(repositoryRoot), "checks.log");
+      // The check records whether it saw the untracked file: set-aside changes must not reach it.
+      writeFileSync(
+        path.join(repositoryRoot, "check-notes.mjs"),
+        `import { appendFileSync, existsSync } from "node:fs";\nappendFileSync(${JSON.stringify(checkLog)}, String(existsSync("notes.txt")));\n`
+      );
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', '  checks: ["node check-notes.mjs"],', "};"]);
+      writeFileSync(path.join(repositoryRoot, "staged.txt"), "staged\n");
+      runGit(["add", "staged.txt"], repositoryRoot);
+      writeFileSync(path.join(repositoryRoot, "notes.txt"), "untracked\n");
+      writeFileSync(path.join(repositoryRoot, "CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Algo nuevo.\n- Algo más.\n");
+
+      const blocked = runCli(repositoryRoot, ["--bump", "minor"]);
+      expect(flattenOutput(blocked.output)).toContain("--ignore-local-changes");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+
+      const release = runCli(repositoryRoot, ["--bump", "minor", "--ignore-local-changes"]);
+
+      expect(release.status, release.output).toBe(0);
+      expect(readFileSync(checkLog, "utf8")).toBe("false");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("v0.2.0");
+      expect(runGit(["show", "--name-only", "--format=", "main"], remoteRoot).split("\n").toSorted()).toEqual(["CHANGELOG.md", "package.json"]);
+      expect(runGit(["show", "main:CHANGELOG.md"], remoteRoot)).toContain("- Algo más.");
+      expect(runGit(["status", "--porcelain"], repositoryRoot).split("\n").toSorted()).toEqual(["?? notes.txt", "A  staged.txt"]);
+      expect(runGit(["stash", "list"], repositoryRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
   /**
    * Configures `publish: "npm"` with an `artifact` that `prepare` packs with the real `npm pack`.
    *

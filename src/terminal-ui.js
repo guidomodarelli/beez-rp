@@ -429,23 +429,54 @@ export function resolveNumberKey(text, optionCount) {
 }
 
 /**
- * Asks the user to choose one option: its number picks it right away, or the
- * arrow keys move the selection and Enter confirms it.
+ * Moves the selection of a prompt for a navigation key. Up and `k` go to the previous option;
+ * down, `j` and Tab to the next one, wrapping around. With nothing selected yet, the
+ * first "next" selects the first option and the first "previous" the last one.
  *
- * @param {{ message: string, options: SelectOption[], defaultIndex?: number }} prompt - Prompt; `description` renders on its own line below the option.
+ * @param {number | null} selectedIndex - Selected option, or `null` when none is.
+ * @param {{ name?: string }} key - Parsed key.
+ * @param {number} optionCount - Number of options in the prompt.
+ * @returns {number | null} New selection; the same one when the key does not navigate.
+ */
+export function moveSelection(selectedIndex, key, optionCount) {
+  const keyName = key.name ?? "";
+
+  if (PROMPT_KEY.previous.includes(keyName)) {
+    return ((selectedIndex ?? 0) - 1 + optionCount) % optionCount;
+  }
+
+  if (PROMPT_KEY.next.includes(keyName)) {
+    return selectedIndex === null ? 0 : (selectedIndex + 1) % optionCount;
+  }
+
+  return selectedIndex;
+}
+
+/**
+ * Asks the user to choose one option: its number picks it right away, or the
+ * arrow keys move the selection and Enter confirms it. With `defaultIndex: null`
+ * nothing starts selected, so Enter does nothing until an option is picked.
+ *
+ * @param {{ message: string, options: SelectOption[], defaultIndex?: number | null }} prompt - Prompt; `description` renders on its own line below the option.
  * @returns {Promise<string>} Selected value (the default one when stdin is not a TTY).
+ * @throws {Error} When stdin is not a TTY and there is no default option to answer with.
  */
 export function select({ message, options, defaultIndex = 0 }) {
   const input = process.stdin;
   const question = `${paint(["bold", "cyan"], "?")} ${paint("bold", message)}`;
 
   if (!input.isTTY) {
+    if (defaultIndex === null) {
+      return Promise.reject(new Error(`beez-rp:select "${message}" needs an explicit choice and stdin is not an interactive terminal`));
+    }
+
     print(`${question} ${paint("gray", `→ ${options[defaultIndex].label} (sin terminal interactiva)`)}`);
     return Promise.resolve(options[defaultIndex].value);
   }
 
   return new Promise((resolve) => {
     const promptStartedAt = Date.now();
+    /** @type {number | null} */
     let selectedIndex = defaultIndex;
     let renderedLineCount = 0;
 
@@ -469,11 +500,12 @@ export function select({ message, options, defaultIndex = 0 }) {
       renderedLineCount = countTerminalRows(lines, process.stdout.columns || FALLBACK_TERMINAL_WIDTH);
     };
 
-    const finish = () => {
+    /** @param {number} chosenIndex - Option confirmed by the user. */
+    const finish = (chosenIndex) => {
       input.off("keypress", onKeypress);
       input.setRawMode(false);
       input.pause();
-      const chosen = options[selectedIndex];
+      const chosen = options[chosenIndex];
       process.stdout.write(`${cursorUp(renderedLineCount)}\r${ANSI_SEQUENCE.clearBelow}${ANSI_SEQUENCE.showCursor}`);
       print(`${question} ${paint("magentaBright", chosen.label)}`);
       promptWaitMs += Date.now() - promptStartedAt;
@@ -487,21 +519,18 @@ export function select({ message, options, defaultIndex = 0 }) {
     const onKeypress = (text, key = {}) => {
       const numberedIndex = resolveNumberKey(text, options.length);
       const keyName = key.name ?? "";
+      const movedIndex = moveSelection(selectedIndex, key, options.length);
 
       if (key.ctrl && keyName === PROMPT_KEY.interrupt) {
         input.setRawMode(false);
         exitOnInterrupt();
       } else if (numberedIndex !== -1) {
-        selectedIndex = numberedIndex;
-        finish();
-      } else if (PROMPT_KEY.previous.includes(keyName)) {
-        selectedIndex = (selectedIndex - 1 + options.length) % options.length;
+        finish(numberedIndex);
+      } else if (movedIndex !== selectedIndex) {
+        selectedIndex = movedIndex;
         render();
-      } else if (PROMPT_KEY.next.includes(keyName)) {
-        selectedIndex = (selectedIndex + 1) % options.length;
-        render();
-      } else if (PROMPT_KEY.confirm.includes(keyName)) {
-        finish();
+      } else if (PROMPT_KEY.confirm.includes(keyName) && selectedIndex !== null) {
+        finish(selectedIndex);
       }
     };
 

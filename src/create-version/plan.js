@@ -76,10 +76,11 @@ import { describeNpmAuthProblem, describeNpmFirstPublicationWarning } from "./np
  * @typedef {{ id: string, title: string, detail?: string }} ReleasePlanStep
  * @typedef {{ title: string, details: string[] }} ReleaseBlocker
  * @typedef {{ mode: string, steps: ReleasePlanStep[], blockers: ReleaseBlocker[], warnings: string[], pendingVersion: string | null }} ReleasePlan
- * @typedef {{ bump: "patch" | "minor" | "major" | null, setVersion: string | null, dryRun: boolean, skipUnpublished: boolean, help: boolean }} ReleaseOptions
+ * @typedef {{ bump: "patch" | "minor" | "major" | null, setVersion: string | null, dryRun: boolean, skipUnpublished: boolean, ignoreLocalChanges: boolean, help: boolean }} ReleaseOptions
  * @typedef {{ version: string, latestPublished: string | null, resumable: boolean }} UnpublishedRelease
- * @typedef {{ skipUnpublished?: boolean }} PlanOptions
+ * @typedef {{ skipUnpublished?: boolean, ignoreLocalChanges?: boolean }} PlanOptions
  *   `skipUnpublished` plans a new release even when the last release is missing from npm.
+ *   `ignoreLocalChanges` plans the release despite uncommitted changes, which the run sets aside.
  */
 
 /** Capabilities of a project without checks, preparation or publication. */
@@ -93,6 +94,7 @@ export const RELEASE_USAGE = [
   "  --set-version X.Y.Z        Fija la versión exacta (solo el siguiente patch, minor o major).",
   "  --dry-run                  Diagnostica y muestra el plan sin cambiar nada.",
   "  --skip-unpublished         Crea un release nuevo aunque el último release no esté en npm (lo saltea).",
+  "  --ignore-local-changes     Publica aunque haya cambios sin commitear: se apartan (git stash) y se restauran al final.",
   "  --help                     Muestra esta ayuda.",
 ].join("\n");
 
@@ -114,6 +116,7 @@ export function parseReleaseArguments(argv) {
         [CREATE_VERSION_FLAG.setVersion]: { type: "string" },
         [CREATE_VERSION_FLAG.dryRun]: { type: "boolean", default: false },
         [CREATE_VERSION_FLAG.skipUnpublished]: { type: "boolean", default: false },
+        [CREATE_VERSION_FLAG.ignoreLocalChanges]: { type: "boolean", default: false },
         [CREATE_VERSION_FLAG.help]: { type: "boolean", short: CREATE_VERSION_FLAG.helpShort, default: false },
       },
     }));
@@ -139,6 +142,7 @@ export function parseReleaseArguments(argv) {
     setVersion: setVersion === undefined ? null : setVersion.replace(VERSION_PREFIX_PATTERN, ""),
     dryRun: Boolean(values[CREATE_VERSION_FLAG.dryRun]),
     skipUnpublished: Boolean(values[CREATE_VERSION_FLAG.skipUnpublished]),
+    ignoreLocalChanges: Boolean(values[CREATE_VERSION_FLAG.ignoreLocalChanges]),
     help: Boolean(values[CREATE_VERSION_FLAG.help]),
   };
 }
@@ -206,9 +210,10 @@ function describeRejectedNpmCredential(npmAuth) {
  * Lists the blockers that must be fixed before any release step runs.
  *
  * @param {ReleaseState} state - Snapshot.
+ * @param {boolean} ignoreLocalChanges - Whether uncommitted changes are set aside instead of blocking.
  * @returns {ReleaseBlocker[]} Blockers, most urgent first.
  */
-function findBlockers(state) {
+function findBlockers(state, ignoreLocalChanges) {
   if (!state.currentBranch && !findDetachedReleaseVersion(state)) {
     return [
       {
@@ -237,10 +242,13 @@ function findBlockers(state) {
   // existing release commit re-checks it with requireCleanChangelog.
   const blockingChanges = state.workingTreeChanges.filter((line) => !isChangelogChange(line));
 
-  if (blockingChanges.length > 0) {
+  if (blockingChanges.length > 0 && !ignoreLocalChanges) {
     blockers.push({
       title: `Hay ${blockingChanges.length} archivo(s) sin commitear`,
-      details: [...blockingChanges.slice(0, MAX_LISTED_ITEMS), "Commitealos en una rama (o git stash) y volvé a correr pnpm create-version."],
+      details: [
+        ...blockingChanges.slice(0, MAX_LISTED_ITEMS),
+        `Commitealos en una rama (o git stash) y volvé a correr pnpm create-version, o corré pnpm create-version --${CREATE_VERSION_FLAG.ignoreLocalChanges} para apartarlos durante el release.`,
+      ],
     });
   }
 
@@ -264,6 +272,42 @@ function findBlockers(state) {
  */
 function isChangelogChange(line) {
   return line.slice(PORCELAIN_STATUS_WIDTH) === CHANGELOG_FILE;
+}
+
+/**
+ * Lists the uncommitted changes a run with `--ignore-local-changes` sets aside: every change,
+ * except `CHANGELOG.md` in a new release, whose bump commits it.
+ *
+ * @param {ReleaseState} state - Snapshot.
+ * @param {string} mode - Planned {@link RELEASE_MODE}.
+ * @returns {string[]} `git status --porcelain` lines to set aside.
+ */
+export function listLocalChangesToSetAside(state, mode) {
+  return mode === RELEASE_MODE.newRelease ? state.workingTreeChanges.filter((line) => !isChangelogChange(line)) : state.workingTreeChanges;
+}
+
+/**
+ * Warns that a runnable plan sets uncommitted changes aside, so the user knows where they go.
+ *
+ * @param {ReleasePlan} plan - Plan.
+ * @param {ReleaseState} state - Snapshot.
+ * @param {boolean} ignoreLocalChanges - Whether `--ignore-local-changes` was chosen.
+ * @returns {ReleasePlan} The same plan, with a warning when changes will be set aside.
+ */
+function warnAboutSetAsideChanges(plan, state, ignoreLocalChanges) {
+  const setAside = listLocalChangesToSetAside(state, plan.mode);
+
+  if (!ignoreLocalChanges || plan.steps.length === 0 || setAside.length === 0) {
+    return plan;
+  }
+
+  return {
+    ...plan,
+    warnings: [
+      ...plan.warnings,
+      `Se ignoran ${setAside.length} cambio(s) sin commitear: se apartan con git stash durante el release y se restauran al final (si el proceso se corta, recuperalos con git stash pop).`,
+    ],
+  };
 }
 
 /**
@@ -607,7 +651,7 @@ const MISSING_CHECKS_BLOCKER = Object.freeze({
  * @returns {ReleasePlan} Ordered plan.
  */
 export function buildReleasePlan(state, capabilities = DEFAULT_CAPABILITIES, planOptions = {}) {
-  return applyNpmAuth(planRelease(state, capabilities, planOptions), state.npmAuth);
+  return warnAboutSetAsideChanges(applyNpmAuth(planRelease(state, capabilities, planOptions), state.npmAuth), state, planOptions.ignoreLocalChanges ?? false);
 }
 
 /**
@@ -618,8 +662,8 @@ export function buildReleasePlan(state, capabilities = DEFAULT_CAPABILITIES, pla
  * @param {PlanOptions} planOptions - Options chosen on the command line.
  * @returns {ReleasePlan} Ordered plan.
  */
-function planRelease(state, capabilities, { skipUnpublished = false }) {
-  const blockers = findBlockers(state);
+function planRelease(state, capabilities, { skipUnpublished = false, ignoreLocalChanges = false }) {
+  const blockers = findBlockers(state, ignoreLocalChanges);
 
   if (blockers.length > 0) {
     return { mode: RELEASE_MODE.blocked, steps: [], blockers, warnings: [], pendingVersion: null };
@@ -628,13 +672,15 @@ function planRelease(state, capabilities, { skipUnpublished = false }) {
   const detachedVersion = findDetachedReleaseVersion(state);
 
   if (detachedVersion) {
-    return requireCleanChangelog(planDetachedResume(detachedVersion, capabilities, state), state);
+    const detachedPlan = planDetachedResume(detachedVersion, capabilities, state);
+    return ignoreLocalChanges ? detachedPlan : requireCleanChangelog(detachedPlan, state);
   }
 
   const resume = planResume(state, capabilities);
 
   if (resume) {
-    return requireCleanChangelog(checkUnpublishedBeforeResume(resume, state, skipUnpublished), state);
+    const resumePlan = checkUnpublishedBeforeResume(resume, state, skipUnpublished);
+    return ignoreLocalChanges ? resumePlan : requireCleanChangelog(resumePlan, state);
   }
 
   if (state.main.aheadCommits.length > 0) {

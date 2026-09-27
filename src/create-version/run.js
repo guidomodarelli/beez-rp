@@ -25,6 +25,7 @@ import { buildChangelogPrompt, runCodex } from "../changelog-ai.js";
 import { CHANGE_TYPES, CHANGELOG_FILE, UNRELEASED_HEADING } from "../constants/changelog.js";
 import { CODEX_NOT_FOUND_EXIT_CODE } from "../constants/changelog-ai.js";
 import {
+  CREATE_VERSION_FLAG,
   FAILURE_EXIT_CODE,
   GITHUB_REPOSITORY_PATTERN,
   MAIN_BRANCH,
@@ -86,7 +87,8 @@ import {
   resolvePublishRegistry,
 } from "./npm.js";
 import { describeNpmPublishFailure, describeNpmTokenSource } from "./npm-auth.js";
-import { RELEASE_USAGE, buildReleasePlan, parseReleaseArguments } from "./plan.js";
+import { restoreLocalChanges, setAsideLocalChanges } from "./local-changes.js";
+import { RELEASE_USAGE, buildReleasePlan, listLocalChangesToSetAside, parseReleaseArguments } from "./plan.js";
 import { createGitReader, listCommits, runCommandLine, runInherited } from "./process.js";
 import { collectReleaseState } from "./state.js";
 
@@ -564,7 +566,8 @@ async function bumpVersionStep(context) {
         description: context.config.releaseTypeDescriptions[candidate.releaseType],
         value: candidate.version,
       })),
-      defaultIndex: nextVersions.findIndex((candidate) => candidate.releaseType === suggestion.releaseType),
+      // Nothing is preselected so a stray Enter never ships a version: the suggestion is only a hint.
+      defaultIndex: null,
     });
     nextRelease = nextVersions.find((candidate) => candidate.version === chosenVersion) ?? null;
   }
@@ -1014,7 +1017,7 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   const remoteUrl = (await reader.tryGit(["remote", "get-url", RELEASE_REMOTE])) ?? "";
   const { migrations } = config;
   const capabilities = describeReleaseCapabilities(config);
-  const planOptions = { skipUnpublished: options.skipUnpublished };
+  const planOptions = { skipUnpublished: options.skipUnpublished, ignoreLocalChanges: options.ignoreLocalChanges };
   const spinner = startSpinner("Diagnosticando el repositorio");
   let state;
 
@@ -1079,9 +1082,54 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
     return 0;
   }
 
+  // The version prompt has no default, so it cannot answer itself without a terminal: fail before
+  // any step runs instead of after the checks.
+  if (plan.steps.some((planStep) => planStep.id === RELEASE_STEP.bumpVersion) && !options.bump && !options.setVersion && !process.stdin.isTTY) {
+    print(`${ICON.failure} ${paint("red", `Sin terminal interactiva no se puede elegir la versión: usá --${CREATE_VERSION_FLAG.bump} patch|minor|major o --${CREATE_VERSION_FLAG.setVersion} X.Y.Z.`)}`);
+    return FAILURE_EXIT_CODE;
+  }
+
   /** @type {ReleaseContext} */
   const context = { repositoryRoot, config, state, options, reader, version: plan.pendingVersion, pushed: false, published: false, commitCount: null, packageName: state.packageName, registryUrl: null };
+  const changesToSetAside = options.ignoreLocalChanges ? listLocalChangesToSetAside(state, plan.mode) : [];
+  let setAside = null;
 
+  if (changesToSetAside.length > 0) {
+    try {
+      setAside = await setAsideLocalChanges(reader, { keepChangelog: plan.mode === RELEASE_MODE.newRelease });
+    } catch (error) {
+      const hint = error instanceof ReleaseStepError ? ` ${error.hint}` : "";
+      print(`${ICON.failure} ${paint("red", `${error instanceof Error ? error.message : String(error)}${hint}`)}`);
+      return FAILURE_EXIT_CODE;
+    }
+
+    print(`${ICON.info} ${changesToSetAside.length} cambio(s) sin commitear apartados con git stash; se restauran al terminar.`);
+  }
+
+  try {
+    return await runPlanSteps(context, plan, remoteUrl, startedAt);
+  } finally {
+    if (setAside) {
+      const restore = await restoreLocalChanges(reader, setAside);
+      print(
+        restore.restored
+          ? `${ICON.success} Cambios sin commitear restaurados.`
+          : `${ICON.warning} ${paint("yellow", `No se pudieron restaurar los cambios sin commitear (${restore.reason}): recuperalos con git stash list y git stash pop.`)}`
+      );
+    }
+  }
+}
+
+/**
+ * Runs the plan steps in order and prints the outcome.
+ *
+ * @param {ReleaseContext} context - Release context.
+ * @param {import("./plan.js").ReleasePlan} plan - Runnable plan.
+ * @param {string} remoteUrl - URL of the release remote, for the summary.
+ * @param {number} startedAt - Start time of the command, in milliseconds.
+ * @returns {Promise<number>} Process exit code.
+ */
+async function runPlanSteps(context, plan, remoteUrl, startedAt) {
   for (const [index, planStep] of plan.steps.entries()) {
     print(renderStepHeader(index + 1, plan.steps.length, planStep.title));
 

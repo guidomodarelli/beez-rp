@@ -70,7 +70,12 @@ pnpm cv --bump patch|minor|major
 pnpm cv --set-version X.Y.Z    # solo la siguiente patch, minor o major
 pnpm cv --dry-run              # diagnóstico y plan, sin cambiar nada
 pnpm cv --skip-unpublished     # release nuevo aunque el último no esté en npm (lo saltea)
+pnpm cv --ignore-local-changes # publica aunque haya cambios sin commitear (se apartan y se restauran)
 ```
+
+Sin `--bump` ni `--set-version`, el comando pregunta la versión sin ninguna opción preseleccionada: se elige con su número, o con `↑`/`k` y `↓`/`j`/`Tab` más Enter (Enter no hace nada hasta marcar una). La opción que sugieren los commits lleva una estrella, pero no se elige sola. Sin terminal interactiva (CI) hay que pasar `--bump` o `--set-version`.
+
+Con `--ignore-local-changes`, los cambios sin commitear (staged, sin stagear y archivos nuevos) se apartan con `git stash` antes del primer paso y se restauran al terminar, también si un paso falla: ni los checks, ni la preparación, ni la publicación los ven, y el commit de versión solo lleva `package.json` y `CHANGELOG.md`. En un release nuevo, `CHANGELOG.md` queda en el working tree porque el bump lo commitea. Si el proceso se corta o la restauración tiene conflictos, se recuperan con `git stash list` y `git stash pop`.
 
 El comando sale solo desde `main`, limpio y al día con origin (solo `CHANGELOG.md` puede quedar sin commitear en un release nuevo, porque el bump lo commitea; para retomar un release ya commiteado, también tiene que estar limpio). En una rama feature explica qué falta: pushear, abrir o mergear el PR (con `gh`). La única excepción es publicar un release que falta en npm desde su tag (ver [Versiones sin publicar](#versiones-sin-publicar)).
 

@@ -6,6 +6,14 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y e
 
 ## [Unreleased]
 
+### Added
+
+- `create-version --ignore-local-changes` publica aunque haya cambios sin commitear: los aparta con `git stash` (staged, sin stagear y archivos nuevos) mientras corre el release, así no llegan a los checks, la preparación, la publicación ni al commit de versión, y los restaura al terminar, también si un paso falla. Sin el flag, el bloqueo por cambios sin commitear lo sugiere.
+
+### Changed
+
+- El prompt de versión ya no preselecciona ninguna opción: hay que elegir una con su número o con las flechas, y Enter no hace nada hasta entonces. La versión sugerida sigue marcada con una estrella. Sin terminal interactiva, un release nuevo exige `--bump` o `--set-version` y corta antes de correr cualquier paso.
+
 ## [0.4.0] - 2026-09-27
 
 ### Changed

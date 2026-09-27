@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { stripVTControlCharacters } from "node:util";
 
-import { countTerminalRows, formatDuration, renderBox, renderRow, resolveNumberKey, visibleWidth } from "../src/terminal-ui.js";
+import { countTerminalRows, formatDuration, moveSelection, renderBox, renderRow, resolveNumberKey, visibleWidth } from "../src/terminal-ui.js";
 
 describe("terminal boxes", () => {
   it("should wrap long lines by words, never truncate them, and keep every line aligned", () => {
@@ -49,6 +49,22 @@ describe("numbered prompt options", () => {
     expect(resolveNumberKey("0", 3)).toBe(-1);
     expect(resolveNumberKey("a", 3)).toBe(-1);
     expect(resolveNumberKey(undefined, 3)).toBe(-1);
+  });
+});
+
+describe("prompt navigation", () => {
+  it("should select the first option going down and the last one going up when nothing is selected yet", () => {
+    expect(moveSelection(null, { name: "down" }, 3)).toBe(0);
+    expect(moveSelection(null, { name: "tab" }, 3)).toBe(0);
+    expect(moveSelection(null, { name: "up" }, 3)).toBe(2);
+    expect(moveSelection(null, { name: "return" }, 3)).toBeNull();
+  });
+
+  it("should move with up/k and down/j/Tab, wrapping around the options", () => {
+    expect(moveSelection(1, { name: "k" }, 3)).toBe(0);
+    expect(moveSelection(0, { name: "up" }, 3)).toBe(2);
+    expect(moveSelection(2, { name: "tab" }, 3)).toBe(0);
+    expect(moveSelection(1, { name: "j" }, 3)).toBe(2);
   });
 });
 

@@ -214,10 +214,14 @@ export const CREATE_VERSION_FLAG = Object.freeze({
   setVersion: "set-version",
   dryRun: "dry-run",
   skipUnpublished: "skip-unpublished",
+  ignoreLocalChanges: "ignore-local-changes",
   help: "help",
   helpShort: "h",
   endOfOptions: "--",
 });
+
+/** Message of the `git stash` entry holding the changes `--ignore-local-changes` sets aside. */
+export const LOCAL_CHANGES_STASH_MESSAGE = "beez-rp create-version: cambios locales apartados durante el release";
 
 /** Optional `v` prefix accepted in hand-typed versions. */
 export const VERSION_PREFIX_PATTERN = /^v/u;

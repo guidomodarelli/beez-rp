@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { MIGRATION_STATUS, NPM_AUTH_STATUS, NPM_LOOKUP_STATUS, NPM_TOKEN_SOURCE, PULL_REQUEST_STATE, RELEASE_MODE, RELEASE_STEP } from "../../src/constants/create-version.js";
-import { buildReleasePlan, parseReleaseArguments } from "../../src/create-version/plan.js";
+import { buildReleasePlan, listLocalChangesToSetAside, parseReleaseArguments } from "../../src/create-version/plan.js";
 import { resolveRequestedVersion } from "../../src/versions.js";
 import { ALLOWED_NEXT_VERSIONS, CURRENT_STABLE_VERSION, REJECTED_VERSION_BUMP_CASES } from "../../src/testing.js";
 
@@ -76,8 +76,9 @@ describe("create-version arguments", () => {
   );
 
   it("should parse spaced and inline flags and reject invalid combinations", () => {
-    expect(parseReleaseArguments(["--bump", "minor", "--dry-run", "--"])).toEqual({ bump: "minor", setVersion: null, dryRun: true, skipUnpublished: false, help: false });
+    expect(parseReleaseArguments(["--bump", "minor", "--dry-run", "--"])).toEqual({ bump: "minor", setVersion: null, dryRun: true, skipUnpublished: false, ignoreLocalChanges: false, help: false });
     expect(parseReleaseArguments(["--skip-unpublished"]).skipUnpublished).toBe(true);
+    expect(parseReleaseArguments(["--ignore-local-changes"]).ignoreLocalChanges).toBe(true);
     expect(parseReleaseArguments(["-h"]).help).toBe(true);
     expect(() => parseReleaseArguments(["--bump", "huge"])).toThrow(/--bump espera/);
     expect(() => parseReleaseArguments(["--bump", "patch", "--set-version", "0.1.1"])).toThrow(/no los dos a la vez/);
@@ -192,6 +193,32 @@ describe("create-version plan", () => {
 
     const foreign = buildReleasePlan(createMainState({ main: { aheadCommits: [{ subject: "fix: local hack" }], behindCount: 0 } }), DEPLOYED_APP);
     expect(foreign.blockers[0].title).toContain("no están en origin");
+  });
+
+  it("should point uncommitted changes to --ignore-local-changes and plan the release, with a warning, when it is chosen", () => {
+    const dirty = createMainState({ workingTreeChanges: [" M src/index.js", "?? notes.txt", " M CHANGELOG.md"] });
+
+    expect(buildReleasePlan(dirty, DEPLOYED_APP).blockers[0].details.at(-1)).toContain("--ignore-local-changes");
+
+    const plan = buildReleasePlan(dirty, DEPLOYED_APP, { ignoreLocalChanges: true });
+    expect(plan.mode).toBe(RELEASE_MODE.newRelease);
+    expect(plan.steps.map((planStep) => planStep.id)).toEqual([RELEASE_STEP.bumpVersion, RELEASE_STEP.pushRelease]);
+    expect(plan.warnings).toEqual([expect.stringContaining("Se ignoran 2 cambio(s) sin commitear")]);
+    expect(listLocalChangesToSetAside(dirty, plan.mode)).toEqual([" M src/index.js", "?? notes.txt"]);
+  });
+
+  it("should resume a release commit with --ignore-local-changes even when CHANGELOG.md is dirty, setting it aside too", () => {
+    const npm = { status: NPM_LOOKUP_STATUS.ok, publishedVersions: ["0.1.0"], reason: null };
+    const state = createMainState({ headVersion: "0.2.0", headSubject: "0.2.0", npm, workingTreeChanges: [" M CHANGELOG.md"] });
+    const plan = buildReleasePlan(state, NPM_PACKAGE, { ignoreLocalChanges: true });
+
+    expect(plan.mode).toBe(RELEASE_MODE.resume);
+    expect(plan.steps.map((planStep) => planStep.id)).toEqual([RELEASE_STEP.prepareRelease, RELEASE_STEP.publishRelease]);
+    expect(listLocalChangesToSetAside(state, plan.mode)).toEqual([" M CHANGELOG.md"]);
+  });
+
+  it("should not warn about local changes when --ignore-local-changes has nothing to set aside", () => {
+    expect(buildReleasePlan(createMainState({ workingTreeChanges: [" M CHANGELOG.md"] }), DEPLOYED_APP, { ignoreLocalChanges: true }).warnings).toEqual([]);
   });
 
   it("should block unknown [Unreleased] sections and an unreachable npm", () => {
