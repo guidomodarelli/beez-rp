@@ -6,6 +6,8 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y e
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-27
+
 ### Added
 
 - Con `publish: "npm"`, el diagnóstico verifica las credenciales antes de tocar nada cuando el plan publicaría: falta `NPM_TOKEN`, token inválido o vencido (`npm whoami` con 401/403) o usuario que no es dueño del paquete (`npm owner ls`) cortan con un bloqueo que dice qué hacer; un paquete que `npm owner ls` no encuentra (E404) solo es la primera publicación si `npm view` tampoco lista versiones: si las lista, el token no tiene acceso y bloquea; si ninguno lo muestra, sigue con una advertencia porque también podría ser un paquete privado sin acceso. La fila `npm auth` muestra el usuario y de dónde salió el token, nunca el valor, y aclara que el permiso de escritura del token no se puede verificar antes de publicar (un token read-only o granular sin escritura pasa la verificación).
