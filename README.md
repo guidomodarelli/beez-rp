@@ -72,7 +72,7 @@ pnpm cv --dry-run              # diagnóstico y plan, sin cambiar nada
 pnpm cv --skip-unpublished     # release nuevo aunque el último no esté en npm (lo saltea)
 ```
 
-El comando sale solo desde `main`, limpio y al día con origin (solo `CHANGELOG.md` puede quedar sin commitear). En una rama feature explica qué falta: pushear, abrir o mergear el PR (con `gh`). La única excepción es publicar un release que falta en npm desde su tag (ver [Versiones sin publicar](#versiones-sin-publicar)).
+El comando sale solo desde `main`, limpio y al día con origin (solo `CHANGELOG.md` puede quedar sin commitear en un release nuevo, porque el bump lo commitea; para retomar un release ya commiteado, también tiene que estar limpio). En una rama feature explica qué falta: pushear, abrir o mergear el PR (con `gh`). La única excepción es publicar un release que falta en npm desde su tag (ver [Versiones sin publicar](#versiones-sin-publicar)).
 
 1. Si `main` está atrás de origin, lo actualiza en fast-forward y termina (código de salida 0) sin tocar la versión ni los tags: hay que volver a correr `pnpm create-version`, que en un proceso nuevo carga `beez-rp.config.(m)js`, sus módulos y el diagnóstico desde el código actualizado.
 2. Aplica migraciones pendientes, si el proyecto tiene adaptador, después de pedir confirmación.

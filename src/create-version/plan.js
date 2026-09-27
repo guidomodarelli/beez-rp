@@ -207,8 +207,9 @@ function findBlockers(state) {
     });
   }
 
-  // CHANGELOG.md may be uncommitted: it travels in the release commit.
-  const blockingChanges = state.workingTreeChanges.filter((line) => line.slice(PORCELAIN_STATUS_WIDTH) !== CHANGELOG_FILE);
+  // CHANGELOG.md may be uncommitted only for a new release, whose bump commits it: resuming an
+  // existing release commit re-checks it with requireCleanChangelog.
+  const blockingChanges = state.workingTreeChanges.filter((line) => !isChangelogChange(line));
 
   if (blockingChanges.length > 0) {
     blockers.push({
@@ -225,6 +226,49 @@ function findBlockers(state) {
   }
 
   return blockers;
+}
+
+/**
+ * Tells whether a `git status --porcelain` line is a change of `CHANGELOG.md`.
+ *
+ * @param {string} line - Porcelain line.
+ * @returns {boolean} `true` when the line reports `CHANGELOG.md`.
+ */
+function isChangelogChange(line) {
+  return line.slice(PORCELAIN_STATUS_WIDTH) === CHANGELOG_FILE;
+}
+
+/**
+ * Blocks a resume plan while `CHANGELOG.md` has uncommitted changes: only a new release commits
+ * that file (in its bump), so resuming would prepare or publish content that is not in the
+ * release commit.
+ *
+ * @param {ReleasePlan} plan - Resume plan (from `main` or from a detached release tag).
+ * @param {ReleaseState} state - Snapshot.
+ * @returns {ReleasePlan} The same plan, or a blocked plan when `CHANGELOG.md` is dirty.
+ */
+function requireCleanChangelog(plan, state) {
+  const changelogChanges = state.workingTreeChanges.filter(isChangelogChange);
+
+  if (plan.mode !== RELEASE_MODE.resume || changelogChanges.length === 0) {
+    return plan;
+  }
+
+  return {
+    mode: RELEASE_MODE.blocked,
+    steps: [],
+    blockers: [
+      {
+        title: `${CHANGELOG_FILE} tiene cambios sin commitear y el release ${plan.pendingVersion} ya está commiteado`,
+        details: [
+          ...changelogChanges,
+          `Retomar un release usa el ${CHANGELOG_FILE} de su commit: descartá los cambios (git restore ${CHANGELOG_FILE}) o guardalos (git stash) y volvé a correr pnpm create-version.`,
+        ],
+      },
+    ],
+    warnings: [],
+    pendingVersion: null,
+  };
 }
 
 /**
@@ -455,13 +499,13 @@ function planRelease(state, capabilities, { skipUnpublished = false }) {
   const detachedVersion = findDetachedReleaseVersion(state);
 
   if (detachedVersion) {
-    return planDetachedResume(detachedVersion, capabilities);
+    return requireCleanChangelog(planDetachedResume(detachedVersion, capabilities), state);
   }
 
   const resume = planResume(state, capabilities);
 
   if (resume) {
-    return resume;
+    return requireCleanChangelog(resume, state);
   }
 
   if (state.main.aheadCommits.length > 0) {

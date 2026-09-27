@@ -147,6 +147,17 @@ describe("create-version plan", () => {
     expect(stepIds(pushed, NPM_PACKAGE)).toEqual([RELEASE_STEP.prepareRelease, RELEASE_STEP.publishRelease]);
   });
 
+  it("should require a clean CHANGELOG.md to resume a release commit, because only a new release commits it", () => {
+    const npm = { status: NPM_LOOKUP_STATUS.ok, publishedVersions: ["0.1.0"], reason: null };
+    const plan = buildReleasePlan(createMainState({ headVersion: "0.2.0", headSubject: "0.2.0", npm, workingTreeChanges: [" M CHANGELOG.md"] }), NPM_PACKAGE);
+
+    expect(plan.mode).toBe(RELEASE_MODE.blocked);
+    expect(plan.steps).toEqual([]);
+    expect(plan.blockers).toHaveLength(1);
+    expect(plan.blockers[0].title).toContain("CHANGELOG.md tiene cambios sin commitear");
+    expect(plan.blockers[0].details).toContain(" M CHANGELOG.md");
+  });
+
   it("should consider a pushed and published release commit up to date", () => {
     const state = createMainState({
       headVersion: "0.2.0",
@@ -320,6 +331,15 @@ describe("create-version plan from a detached release tag", () => {
     expect(plan.mode).toBe(RELEASE_MODE.resume);
     expect(plan.pendingVersion).toBe("0.2.0");
     expect(plan.steps.map((planStep) => planStep.id)).toEqual([RELEASE_STEP.prepareRelease, RELEASE_STEP.publishRelease]);
+  });
+
+  it("should refuse to publish from the tag while CHANGELOG.md has uncommitted changes", () => {
+    const plan = buildReleasePlan(createMainState({ ...DETACHED_ON_TAG, workingTreeChanges: [" M CHANGELOG.md"] }), NPM_PACKAGE);
+
+    expect(plan.mode).toBe(RELEASE_MODE.blocked);
+    expect(plan.steps).toEqual([]);
+    expect(plan.blockers[0].title).toContain("CHANGELOG.md tiene cambios sin commitear");
+    expect(plan.blockers[0].details.at(-1)).toContain("git restore CHANGELOG.md");
   });
 
   it("should block a detached HEAD that is not an unpublished tagged release", () => {
