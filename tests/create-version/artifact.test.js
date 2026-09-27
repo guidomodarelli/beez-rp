@@ -284,8 +284,50 @@ describe("pnpm-only pack rewrites", () => {
     ]);
   });
 
-  it("should reject publishConfig fields that only pnpm hoists into the packed manifest", () => {
-    expect(findPnpmPackRewrites({ ...MANIFEST, publishConfig: { access: "public", exports: "./dist/index.js", main: "./dist/index.js" } })).toEqual([
+  it("should accept any npm configuration key in publishConfig", () => {
+    expect(
+      findPnpmPackRewrites({
+        ...MANIFEST,
+        publishConfig: {
+          otp: "123456",
+          "ignore-scripts": true,
+          "@scope:registry": "https://scope.example.test/",
+          "//registry.example.test/:always-auth": true,
+          "dry-run": false,
+          workspaces: false,
+        },
+      })
+    ).toEqual([]);
+  });
+
+  it.each([
+    "name",
+    "bin",
+    "engines",
+    "type",
+    "imports",
+    "main",
+    "module",
+    "typings",
+    "types",
+    "exports",
+    "browser",
+    "esnext",
+    "es2015",
+    "unpkg",
+    "umd:main",
+    "os",
+    "cpu",
+    "libc",
+    "typesVersions",
+  ])("should reject publishConfig.%s because only pnpm hoists it into the packed manifest", (hoistedKey) => {
+    expect(findPnpmPackRewrites({ ...MANIFEST, publishConfig: { access: "public", [hoistedKey]: "./dist/index.js" } })).toEqual([
+      `publishConfig.${hoistedKey} no es configuración de npm (solo pnpm lo aplica al empaquetar)`,
+    ]);
+  });
+
+  it("should list every hoisted publishConfig field and keep accepting npm configuration next to them", () => {
+    expect(findPnpmPackRewrites({ ...MANIFEST, publishConfig: { tag: "next", exports: "./dist/index.js", main: "./dist/index.js" } })).toEqual([
       expect.stringContaining("publishConfig.exports no es configuración de npm"),
       expect.stringContaining("publishConfig.main no es configuración de npm"),
     ]);

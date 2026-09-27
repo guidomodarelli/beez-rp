@@ -611,7 +611,7 @@ async function resolvePublishedArtifact(context, version, workingManifest) {
   if (pnpmRewrites.length > 0) {
     throw new ReleaseStepError(
       `Este paquete depende de reescrituras de pnpm al empaquetar y beez-rp publica con npm: ${pnpmRewrites.slice(0, MAX_LISTED_ITEMS).join("; ")}.`,
-      "No se publicó nada. Reemplazá los especificadores workspace:/catalog: por rangos de versión y dejá en publishConfig solo configuración de npm (registry, access, tag, provenance)."
+      "No se publicó nada. Reemplazá los especificadores workspace:/catalog: por rangos de versión y sacá de publishConfig los campos del manifest que solo pnpm aplica al empaquetar (exports, main, bin, types...): declaralos en la raíz de package.json."
     );
   }
 

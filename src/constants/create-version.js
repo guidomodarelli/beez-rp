@@ -197,13 +197,40 @@ export const NPM_INTEGRITY_PATTERN = /^sha512-[A-Za-z0-9+/]+={0,2}$/u;
 export const PUBLISH_CONFIG_FIELD = "publishConfig";
 
 /**
- * `publishConfig` keys npm uses as publish configuration. pnpm additionally hoists manifest
- * fields (`exports`, `main`, `bin`...) from `publishConfig` when packing, which npm never does.
+ * `publishConfig` keys pnpm hoists onto the packed manifest root. npm treats every
+ * `publishConfig` key as npm configuration and never rewrites manifest fields with it, so a
+ * package that declares any of these would be published differently by npm than by `pnpm pack`.
+ * Any other key (`registry`, `access`, `tag`, `provenance`, `@scope:registry`, `otp`...) is npm
+ * configuration and is accepted.
+ *
+ * Source: `PUBLISH_CONFIG_WHITELIST` in pnpm v12.6.0
+ * (`pnpm/crates/exportable-manifest/src/create.rs`; same list as
+ * `releasing/exportable-manifest/src/overridePublishConfig.ts` in pnpm 11).
+ *
+ * @see https://github.com/pnpm/pnpm/blob/v12.6.0/pnpm/crates/exportable-manifest/src/create.rs
+ * @see https://docs.npmjs.com/cli/v11/configuring-npm/package-json#publishconfig
  */
-export const NPM_PUBLISH_CONFIG_KEYS = Object.freeze(["registry", "access", "tag", "provenance"]);
-
-/** Scoped registry key of `publishConfig`, such as `@scope:registry`, also npm configuration. */
-export const NPM_SCOPED_REGISTRY_KEY_PATTERN = /^@[^/:]+:registry$/u;
+export const PNPM_HOISTED_PUBLISH_CONFIG_KEYS = Object.freeze([
+  "name",
+  "bin",
+  "engines",
+  "type",
+  "imports",
+  "main",
+  "module",
+  "typings",
+  "types",
+  "exports",
+  "browser",
+  "esnext",
+  "es2015",
+  "unpkg",
+  "umd:main",
+  "os",
+  "cpu",
+  "libc",
+  "typesVersions",
+]);
 
 /** Dependency maps npm publishes as they are written in `package.json`. */
 export const PUBLISHED_DEPENDENCY_FIELDS = Object.freeze(["dependencies", "peerDependencies", "optionalDependencies"]);

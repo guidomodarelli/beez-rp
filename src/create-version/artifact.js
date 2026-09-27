@@ -29,10 +29,9 @@ import {
   ARTIFACT_SHA256_PLACEHOLDER,
   ARTIFACT_VERSION_PLACEHOLDER,
   NPM_INTEGRITY_ALGORITHM,
-  NPM_PUBLISH_CONFIG_KEYS,
-  NPM_SCOPED_REGISTRY_KEY_PATTERN,
   PACKAGE_SCOPE_PATTERN,
   PACKED_SCOPE_REPLACEMENT,
+  PNPM_HOISTED_PUBLISH_CONFIG_KEYS,
   PNPM_PACK_REWRITTEN_SPECIFIER_PATTERN,
   PUBLISH_CONFIG_FIELD,
   PUBLISHED_DEPENDENCY_FIELDS,
@@ -194,8 +193,9 @@ function isRecord(value) {
 
 /**
  * Lists what a manifest needs from `pnpm pack` and npm would publish as it is: `workspace:` or
- * `catalog:` specifiers in published dependency maps, and `publishConfig` keys that are not npm
- * configuration (pnpm hoists fields such as `exports`, `main` or `bin`; npm ignores them).
+ * `catalog:` specifiers in published dependency maps, and `publishConfig` keys pnpm hoists onto the
+ * manifest (such as `exports`, `main` or `bin`; npm only reads `publishConfig` as configuration).
+ * Every other `publishConfig` key is npm configuration and is accepted.
  *
  * @param {PackageManifest} manifest - `package.json` of the release checkout.
  * @returns {string[]} Problems in Spanish; empty when npm packs the package as pnpm would.
@@ -217,7 +217,7 @@ export function findPnpmPackRewrites(manifest) {
   const publishConfig = manifest[PUBLISH_CONFIG_FIELD];
   if (isRecord(publishConfig)) {
     for (const key of Object.keys(publishConfig)) {
-      if (!NPM_PUBLISH_CONFIG_KEYS.includes(key) && !NPM_SCOPED_REGISTRY_KEY_PATTERN.test(key)) {
+      if (PNPM_HOISTED_PUBLISH_CONFIG_KEYS.includes(key)) {
         problems.push(`${PUBLISH_CONFIG_FIELD}.${key} no es configuración de npm (solo pnpm lo aplica al empaquetar)`);
       }
     }

@@ -9,7 +9,7 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y e
 ### Added
 
 - `artifact` en `beez-rp.config.js`: con `publish: "npm"`, publica exactamente el tarball que dejó el paso `prepare` (por ejemplo `releases/{version}-{sha256}/{name}-{version}.tgz`) en vez de reempaquetar el working tree. Los proyectos lo empaquetan con `npm pack --ignore-scripts`.
-- Antes de publicar ese tarball exige que `prepare` no haya modificado archivos versionados, rechaza paquetes que dependen de reescrituras de pnpm al empaquetar (`workspace:`/`catalog:` o campos de `publishConfig` que no son configuración de npm), verifica el SHA-256 de su ruta cuando el patrón usa `{sha256}` y compara su SHA-512 con el `integrity` de `npm pack --dry-run --json --ignore-scripts` del commit de release.
+- Antes de publicar ese tarball exige que `prepare` no haya modificado archivos versionados, rechaza paquetes que dependen de reescrituras de pnpm al empaquetar (`workspace:`/`catalog:` o campos del manifest en `publishConfig` que solo pnpm sube a la raíz, como `exports`, `main`, `bin` o `types`; cualquier otra clave de `publishConfig` se acepta como configuración de npm), verifica el SHA-256 de su ruta cuando el patrón usa `{sha256}` y compara su SHA-512 con el `integrity` de `npm pack --dry-run --json --ignore-scripts` del commit de release.
 
 ### Changed
 
