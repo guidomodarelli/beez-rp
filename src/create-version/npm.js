@@ -20,6 +20,7 @@ import {
   DEFAULT_NPM_REGISTRY_URL,
   LOCAL_ENVIRONMENT_FILE,
   LOCAL_PATH_PREFIX,
+  NPM_CREDENTIAL_CONFIG_FIELDS,
   NPM_AUTH_DIRECTORY_PREFIX,
   NPM_AUTH_STATUS,
   NPM_AUTH_TOKEN_REFERENCE,
@@ -32,6 +33,7 @@ import {
   NPM_OWNER_LIST_ARGUMENTS,
   NPM_PACK_DRY_RUN_ARGUMENTS,
   NPM_PACKAGE_NAME_PATTERN,
+  NPM_REGISTRY_BOUND_KEY_PREFIX,
   NPM_REGISTRY_OPTION,
   NPM_REGISTRY_PROTOCOLS,
   NPM_REJECTED_CREDENTIAL_PATTERN,
@@ -42,6 +44,7 @@ import {
   NPM_WHOAMI_ARGUMENTS,
   NPMJS_PACKAGE_PAGE_URL,
   PACKAGE_SCOPE_PATTERN,
+  PROJECT_NPM_CONFIG_FILE,
   PUBLISH_CONFIG_FIELD,
   PUBLISH_CONFIG_REGISTRY_KEY,
   SCOPED_REGISTRY_KEY_SUFFIX,
@@ -157,17 +160,36 @@ export function buildNpmOwnerListArguments(packageName, registryUrl, userConfigP
 }
 
 /**
+ * Reads a text file that npm credentials are looked up in, naming the file (never its content)
+ * when it exists but cannot be read, such as a directory or a file without read permission.
+ *
+ * @param {string} filePath - File to read.
+ * @param {string} purpose - What the file is read for, as the error explains it.
+ * @returns {string | null} Content, or `null` when the file does not exist.
+ * @throws {Error} When the file exists but cannot be read; the original error is its `cause`.
+ */
+function readCredentialFile(filePath, purpose) {
+  if (!existsSync(filePath)) {
+    return null;
+  }
+
+  try {
+    return readFileSync(filePath, "utf8");
+  } catch (error) {
+    throw new Error(`beez-rp create-version: no se pudo leer ${filePath} para ${purpose}`, { cause: error });
+  }
+}
+
+/**
  * Reads `NPM_TOKEN` from an environment file without loading anything into the process.
  *
  * @param {string} environmentFilePath - `.env` file.
  * @returns {string | null} Non-empty token, or `null` when the file is missing or does not define it.
+ * @throws {Error} When the file exists but cannot be read.
  */
 function readTokenFromEnvironmentFile(environmentFilePath) {
-  if (!existsSync(environmentFilePath)) {
-    return null;
-  }
-
-  return parseEnv(readFileSync(environmentFilePath, "utf8"))[NPM_TOKEN_VARIABLE] || null;
+  const content = readCredentialFile(environmentFilePath, `buscar ${NPM_TOKEN_VARIABLE}`);
+  return content === null ? null : parseEnv(content)[NPM_TOKEN_VARIABLE] || null;
 }
 
 /**
@@ -179,6 +201,7 @@ function readTokenFromEnvironmentFile(environmentFilePath) {
  * @param {string} repositoryRoot - Repository root holding the optional `.env`.
  * @param {NpmTokenLookup} [lookup] - Environment and home directory to read.
  * @returns {NpmTokenResolution} Token and its source.
+ * @throws {Error} When a `.env` that has to be read exists but cannot be read.
  */
 export function resolveNpmToken(repositoryRoot, { environment = process.env, homeDirectory = homedir() } = {}) {
   const candidates = [
@@ -251,25 +274,36 @@ function describeNpmFailure(result, commandName) {
  * @param {string} packageName - npm package name.
  * @param {string} repositoryRoot - Repository root, where npm reads its project config.
  * @param {string} registryUrl - Registry from {@link resolvePublishRegistry}.
+ * A project `.npmrc` with credentials for the registry blocks as `projectCredentials` without
+ * querying it, because npm would authenticate with them instead of `NPM_TOKEN`; an unreadable
+ * `.env` or `.npmrc` leaves the check `unknown` with the file it could not read.
+ *
  * @param {NpmTokenLookup} [lookup] - Token lookup of {@link resolveNpmToken}.
  * @returns {Promise<NpmAuthCheck>} Check result; never rejects.
  */
 export async function checkNpmPublishAccess(packageName, repositoryRoot, registryUrl, lookup = {}) {
-  const { token, source } = resolveNpmToken(repositoryRoot, lookup);
   /** @type {NpmAuthCheck} */
-  const check = { status: NPM_AUTH_STATUS.unknown, user: null, source, registryUrl, packageName, owners: [], firstPublication: false, reason: null };
-
-  if (!token) {
-    return { ...check, status: NPM_AUTH_STATUS.missingToken };
-  }
-
-  if (!NPM_PACKAGE_NAME_PATTERN.test(packageName)) {
-    return { ...check, reason: `nombre de paquete inválido: ${packageName}` };
-  }
-
-  const environment = buildNpmTokenEnvironment(token, lookup.environment);
+  let check = { status: NPM_AUTH_STATUS.unknown, user: null, source: null, registryUrl, packageName, owners: [], firstPublication: false, reason: null };
 
   try {
+    const { token, source } = resolveNpmToken(repositoryRoot, lookup);
+    check = { ...check, source };
+
+    if (!token) {
+      return { ...check, status: NPM_AUTH_STATUS.missingToken };
+    }
+
+    if (!NPM_PACKAGE_NAME_PATTERN.test(packageName)) {
+      return { ...check, reason: `nombre de paquete inválido: ${packageName}` };
+    }
+
+    const projectCredentialKey = findProjectNpmCredentialKey(repositoryRoot, registryUrl);
+    if (projectCredentialKey) {
+      return { ...check, status: NPM_AUTH_STATUS.projectCredentials, reason: `${PROJECT_NPM_CONFIG_FILE} del proyecto define ${projectCredentialKey}` };
+    }
+
+    const environment = buildNpmTokenEnvironment(token, lookup.environment);
+
     return await withNpmAuthConfig(buildNpmAuthConfigLine(registryUrl), async (userConfigPath) => {
       const whoami = await runNpmCaptured(buildNpmWhoamiArguments(registryUrl, userConfigPath), repositoryRoot, environment);
 
@@ -312,20 +346,20 @@ export async function checkNpmPublishAccess(packageName, repositoryRoot, registr
  * @param {string} repositoryRoot - Directory whose `.npmrc` npm reads.
  * @param {string} [registryUrl] - Registry the package is published to, from {@link resolvePublishRegistry};
  *   defaults to npm's default registry.
- * @returns {Promise<NpmLookup>} Published versions; a never-published package has none.
+ * @returns {Promise<NpmLookup>} Published versions; a never-published package has none. An unreadable
+ *   `.env` fails the lookup with the file it could not read instead of rejecting.
  */
 export async function lookupPublishedVersions(packageName, repositoryRoot, registryUrl = DEFAULT_NPM_REGISTRY_URL) {
   if (!NPM_PACKAGE_NAME_PATTERN.test(packageName)) {
     return { status: NPM_LOOKUP_STATUS.failed, publishedVersions: [], reason: `nombre de paquete inválido: ${packageName}` };
   }
 
-  const { token } = resolveNpmToken(repositoryRoot);
-  const environment = token ? buildNpmTokenEnvironment(token) : process.env;
-  /** @param {string | null} userConfigPath - Temporary authenticated config, or `null`. */
-  const view = (userConfigPath) => runNpmCaptured(buildNpmViewArguments(packageName, registryUrl, userConfigPath), repositoryRoot, environment);
-
   let result;
   try {
+    const { token } = resolveNpmToken(repositoryRoot);
+    const environment = token ? buildNpmTokenEnvironment(token) : process.env;
+    /** @param {string | null} userConfigPath - Temporary authenticated config, or `null`. */
+    const view = (userConfigPath) => runNpmCaptured(buildNpmViewArguments(packageName, registryUrl, userConfigPath), repositoryRoot, environment);
     result = token ? await withNpmAuthConfig(buildNpmAuthConfigLine(registryUrl), view) : await view(null);
   } catch (error) {
     return { status: NPM_LOOKUP_STATUS.failed, publishedVersions: [], reason: error instanceof Error ? error.message : String(error) };
@@ -524,9 +558,65 @@ export function describePublishedRelease({ registryUrl, packageName, version }) 
  * @throws {Error} When the registry is not a plain http(s) URL (credentials, query and fragment are rejected).
  */
 export function buildNpmAuthConfigLine(registryUrl) {
+  return `${buildNpmRegistryKey(registryUrl)}:_authToken=${NPM_AUTH_TOKEN_REFERENCE}\n`;
+}
+
+/**
+ * Builds the key npm binds credentials of a registry to: `//<host>[:port]<path>/`.
+ *
+ * @param {string} registryUrl - Registry URL.
+ * @returns {string} Registry key, without protocol and with a trailing `/`.
+ * @throws {Error} When the registry is not a plain http(s) URL.
+ */
+function buildNpmRegistryKey(registryUrl) {
   const registry = parseRegistryUrl(registryUrl);
   const registryPath = registry.pathname.endsWith("/") ? registry.pathname : `${registry.pathname}/`;
-  return `//${registry.host}${registryPath}:_authToken=${NPM_AUTH_TOKEN_REFERENCE}\n`;
+  return `${NPM_REGISTRY_BOUND_KEY_PREFIX}${registry.host}${registryPath}`;
+}
+
+/**
+ * Tells whether an npm config key authenticates a registry: an unbound credential field
+ * (`_authToken`) or one bound to the registry or to a parent path of it, as npm matches them
+ * (`//host/:_authToken` also covers `//host/team/`).
+ *
+ * @param {string} configKey - Key of a `key=value` line of the project `.npmrc`.
+ * @param {string} registryKey - Key from {@link buildNpmRegistryKey}.
+ * @returns {boolean} Whether npm would use it to authenticate against the registry.
+ */
+function isNpmCredentialKeyFor(configKey, registryKey) {
+  if (!configKey.startsWith(NPM_REGISTRY_BOUND_KEY_PREFIX)) {
+    return NPM_CREDENTIAL_CONFIG_FIELDS.includes(configKey);
+  }
+
+  const fieldSeparatorIndex = configKey.lastIndexOf(":");
+  const boundRegistry = configKey.slice(0, fieldSeparatorIndex);
+  const boundRegistryKey = boundRegistry.endsWith("/") ? boundRegistry : `${boundRegistry}/`;
+  return NPM_CREDENTIAL_CONFIG_FIELDS.includes(configKey.slice(fieldSeparatorIndex + 1)) && registryKey.startsWith(boundRegistryKey);
+}
+
+/**
+ * Finds a credential for the registry in the project `.npmrc` (repository root). npm prefers the
+ * project config over the temporary `--userconfig` that binds `NPM_TOKEN`, so such a credential
+ * would authenticate every command instead of the token. Only keys are read, never values.
+ *
+ * @param {string} repositoryRoot - Repository root holding the optional `.npmrc`.
+ * @param {string} registryUrl - Registry the package is published to.
+ * @returns {string | null} First credential key for the registry, or `null` when there is none.
+ * @throws {Error} When the `.npmrc` exists but cannot be read, or the registry is not a plain http(s) URL.
+ */
+function findProjectNpmCredentialKey(repositoryRoot, registryUrl) {
+  const content = readCredentialFile(path.join(repositoryRoot, PROJECT_NPM_CONFIG_FILE), "buscar credenciales de npm");
+  if (content === null) {
+    return null;
+  }
+
+  const registryKey = buildNpmRegistryKey(registryUrl);
+  return (
+    content
+      .split(/\r?\n/u)
+      .map((line) => line.split("=", 1)[0].trim())
+      .find((configKey) => isNpmCredentialKeyFor(configKey, registryKey)) ?? null
+  );
 }
 
 /**

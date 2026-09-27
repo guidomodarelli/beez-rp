@@ -17,6 +17,7 @@ import {
   NPM_TOKEN_LOCATIONS,
   NPM_TOKEN_SOURCE_LABEL,
   NPM_TOKEN_VARIABLE,
+  PROJECT_NPM_CONFIG_FILE,
 } from "../constants/create-version.js";
 
 /**
@@ -68,6 +69,12 @@ function describeCredentialProblem(npmAuth, nextAction) {
         title: `El token autentica como ${npmAuth.user}, que no puede publicar ${npmAuth.packageName} (dueños: ${describeOwners(npmAuth)})`,
         reason: `${npmAuth.reason ? `${npmAuth.reason} ` : ""}Origen del token: ${sourceLabel}.`,
         fix: `Usá el token de un dueño o pedí que te agreguen (npm owner add ${npmAuth.user} ${npmAuth.packageName}) y ${nextAction}.`,
+      };
+    case NPM_AUTH_STATUS.projectCredentials:
+      return {
+        title: `El ${PROJECT_NPM_CONFIG_FILE} del proyecto define credenciales para ${npmAuth.registryUrl} que tienen prioridad sobre ${NPM_TOKEN_VARIABLE}`,
+        reason: `${npmAuth.reason ?? `${PROJECT_NPM_CONFIG_FILE} del proyecto con credenciales`}.`,
+        fix: `Sacalas: beez-rp usa ${NPM_TOKEN_VARIABLE} con una config temporal. Después ${nextAction}.`,
       };
     default:
       return null;

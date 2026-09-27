@@ -366,10 +366,11 @@ describe("NPM_TOKEN resolution", () => {
 
 describe("npm credential commands", () => {
   it("builds whoami and owner ls against the publish registry with the temporary config", () => {
-    expect(buildNpmWhoamiArguments("https://npm.example.test/team/", "/tmp/npmrc")).toEqual(["whoami", "--registry", "https://npm.example.test/team/", "--userconfig", "/tmp/npmrc"]);
+    expect(buildNpmWhoamiArguments("https://npm.example.test/team/", "/tmp/npmrc")).toEqual(["whoami", "--json=false", "--registry", "https://npm.example.test/team/", "--userconfig", "/tmp/npmrc"]);
     expect(buildNpmOwnerListArguments("@team/pkg", "https://registry.npmjs.org/", "/tmp/npmrc")).toEqual([
       "owner",
       "ls",
+      "--json=false",
       "@team/pkg",
       "--registry",
       "https://registry.npmjs.org/",
@@ -490,6 +491,70 @@ describe("npm publish access check", () => {
     },
     NPM_PROCESS_TEST_TIMEOUT_MS
   );
+
+  it(
+    "recognizes the owner when the project config enables npm's global JSON output",
+    async () => {
+      const registry = await startRegistry();
+
+      try {
+        const packageRoot = createPackageRoot({ name: PACKAGE_NAME }, "json=true\n");
+        process.env.NPM_TOKEN = OWNER_TOKEN;
+
+        expect(await checkNpmPublishAccess(PACKAGE_NAME, packageRoot, registry.registryUrl)).toMatchObject({
+          status: NPM_AUTH_STATUS.ok,
+          user: "fixture-owner",
+          owners: ["fixture-owner"],
+        });
+      } finally {
+        await registry.close();
+      }
+    },
+    NPM_PROCESS_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "blocks project .npmrc credentials for the registry, which npm would use instead of NPM_TOKEN, without showing them",
+    async () => {
+      const registry = await startRegistry();
+
+      try {
+        const registryKey = registry.registryUrl.replace(/^http:/u, "");
+        const packageRoot = createPackageRoot({ name: PACKAGE_NAME }, `${registryKey}:_authToken=${STRANGER_TOKEN}\n`);
+        process.env.NPM_TOKEN = OWNER_TOKEN;
+
+        const check = await checkNpmPublishAccess(PACKAGE_NAME, packageRoot, registry.registryUrl);
+        const problem = describeNpmAuthProblem(check);
+
+        expect(check).toMatchObject({ status: NPM_AUTH_STATUS.projectCredentials, user: null, source: NPM_TOKEN_SOURCE.environment });
+        expect(problem?.title).toBe(`El .npmrc del proyecto define credenciales para ${registry.registryUrl} que tienen prioridad sobre NPM_TOKEN`);
+        expect(problem?.details.join(" ")).toContain("Sacalas: beez-rp usa NPM_TOKEN con una config temporal.");
+        expect(JSON.stringify(problem)).not.toContain(STRANGER_TOKEN);
+
+        writeFileSync(path.join(packageRoot, ".npmrc"), `//npm.example.test/:_authToken=${STRANGER_TOKEN}\n`);
+        expect(await checkNpmPublishAccess(PACKAGE_NAME, packageRoot, registry.registryUrl)).toMatchObject({ status: NPM_AUTH_STATUS.ok, user: "fixture-owner" });
+      } finally {
+        await registry.close();
+      }
+    },
+    NPM_PROCESS_TEST_TIMEOUT_MS
+  );
+
+  it("fails the lookup and leaves the access check unverified, naming the .env it could not read", async () => {
+    const packageRoot = createPackageRoot({ name: PACKAGE_NAME });
+    const environmentFilePath = path.join(packageRoot, ".env");
+    mkdirSync(environmentFilePath);
+
+    expect(await lookupPublishedVersions(PACKAGE_NAME, packageRoot, "https://registry.npmjs.org/")).toEqual({
+      status: NPM_LOOKUP_STATUS.failed,
+      publishedVersions: [],
+      reason: expect.stringContaining(`no se pudo leer ${environmentFilePath}`),
+    });
+    expect(await checkNpmPublishAccess(PACKAGE_NAME, packageRoot, "https://registry.npmjs.org/")).toMatchObject({
+      status: NPM_AUTH_STATUS.unknown,
+      reason: expect.stringContaining(`no se pudo leer ${environmentFilePath}`),
+    });
+  });
 
   it("reports a missing token with every place where it can be defined", async () => {
     const check = await checkNpmPublishAccess(PACKAGE_NAME, createPackageRoot({ name: PACKAGE_NAME }), "https://registry.npmjs.org/");

@@ -64,6 +64,8 @@ export const NPM_TOKEN_SOURCE_LABEL = Object.freeze({
  * - `missingToken`: no source defines `NPM_TOKEN`;
  * - `invalidToken`: the registry rejects the token (`npm whoami` answers 401/403);
  * - `notOwner`: the token authenticates as a user that is not an owner of the package;
+ * - `projectCredentials`: the project `.npmrc` defines credentials for the publish registry, which
+ *   npm prefers over the temporary config that binds `NPM_TOKEN`;
  * - `unknown`: the check could not finish (network, a registry without `npm owner ls`, an
  *   organization package whose access may come from a team); it warns but does not block.
  */
@@ -72,6 +74,7 @@ export const NPM_AUTH_STATUS = Object.freeze({
   missingToken: "missing-token",
   invalidToken: "invalid-token",
   notOwner: "not-owner",
+  projectCredentials: "project-credentials",
   unknown: "unknown",
 });
 
@@ -97,11 +100,29 @@ export const NPM_AUTH_RERUN_ACTION = "volvé a correr pnpm create-version";
 /** Next action after fixing the npm credentials once `npm publish` failed. */
 export const NPM_PUBLISH_RETRY_ACTION = "corré pnpm create-version para reintentar solo la publicación";
 
+/**
+ * Option that keeps the plain text output of `npm whoami` and `npm owner ls` even when the project
+ * config or the environment enables npm's global JSON output (`json=true`, `npm_config_json=true`).
+ */
+export const NPM_PLAIN_OUTPUT_OPTION = "--json=false";
+
 /** Arguments of the npm command that prints the user a token authenticates as. */
-export const NPM_WHOAMI_ARGUMENTS = Object.freeze(["whoami"]);
+export const NPM_WHOAMI_ARGUMENTS = Object.freeze(["whoami", NPM_PLAIN_OUTPUT_OPTION]);
 
 /** Arguments of the npm command that lists the owners of a package, followed by the package name. */
-export const NPM_OWNER_LIST_ARGUMENTS = Object.freeze(["owner", "ls"]);
+export const NPM_OWNER_LIST_ARGUMENTS = Object.freeze(["owner", "ls", NPM_PLAIN_OUTPUT_OPTION]);
+
+/** Project npm config, read from the repository root; npm prefers it over the temporary `--userconfig`. */
+export const PROJECT_NPM_CONFIG_FILE = ".npmrc";
+
+/**
+ * npm config fields that authenticate a registry, either bound to it (`//host/path/:_authToken`)
+ * or unbound (`_authToken`); any of them in the project `.npmrc` overrides `NPM_TOKEN`.
+ */
+export const NPM_CREDENTIAL_CONFIG_FIELDS = Object.freeze(["_authToken", "_auth", "_password", "username", "certfile", "keyfile"]);
+
+/** Prefix of an npm config key bound to a registry: `//host[:port]/path/:field`. */
+export const NPM_REGISTRY_BOUND_KEY_PREFIX = "//";
 
 /** One line of `npm owner ls`: `<user> <<email>>`; the `user` group keeps the npm user name. */
 export const NPM_OWNER_LINE_PATTERN = /^(?<user>[^\s<]+)(?:\s+<[^>]*>)?$/u;

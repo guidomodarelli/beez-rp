@@ -749,6 +749,28 @@ describe("beez-rp create-version command", () => {
   );
 
   it(
+    "should report the npm blocker, instead of aborting the diagnosis, when the repository .env cannot be read",
+    async () => {
+      const registry = await startOwnedRegistry({ publishedVersions: ["0.1.0"] });
+      const { repositoryRoot, remoteRoot } = createReleasedRepository("0.1.0", publishTo(registry.registryUrl));
+      const hookLog = path.join(path.dirname(repositoryRoot), "hooks.log");
+      pushConfiguration(repositoryRoot, npmReleaseConfiguration(hookLog));
+      mkdirSync(path.join(repositoryRoot, ".env"));
+
+      const release = await runCliAsync(repositoryRoot, ["--bump", "minor"]);
+      const output = flattenOutput(release.output);
+
+      expect(release.status, release.output).toBe(0);
+      expect(output).toContain("No se pudo consultar npm");
+      expect(output).toMatch(/no se pudo leer .*\.env para buscar NPM_TOKEN/u);
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+      expect(existsSync(hookLog)).toBe(false);
+      expect(registry.publications).toEqual([]);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
     "should say that only the tag is on origin when a resumed release fails before pushing main",
     async () => {
       const registry = await startOwnedRegistry({ publishedVersions: ["0.1.0"] });

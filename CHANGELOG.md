@@ -21,6 +21,9 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y e
 ### Fixed
 
 - Las variables de entorno que se pasan a los comandos con salida capturada (como `npm config get`) ahora llegan al proceso hijo.
+- La verificación de credenciales reconoce al dueño aunque el proyecto active la salida JSON global de npm (`json=true`): `npm whoami` y `npm owner ls` corren con `--json=false`.
+- Un `.env` (del repo o compartido) que existe pero no se puede leer ya no aborta el diagnóstico: la consulta de npm falla con el bloqueo habitual y nombra el archivo, sin mostrar su contenido.
+- Si el `.npmrc` del proyecto define credenciales para el registry de publicación, el diagnóstico bloquea antes de publicar: npm las prioriza sobre `NPM_TOKEN` y la verificación habría autenticado con ellas.
 
 ## [0.3.0] - 2026-09-27
 

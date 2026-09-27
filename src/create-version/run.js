@@ -41,6 +41,7 @@ import {
   PACKAGE_MANIFEST_FILE,
   PACKAGE_VERSION_FIELD_PATTERN,
   PINNED_NODE_VERSION_FILE,
+  PROJECT_NPM_CONFIG_FILE,
   RELEASE_MODE,
   RELEASE_REGISTRY,
   RELEASE_REMOTE,
@@ -289,6 +290,8 @@ function renderNpmAuthRow(npmAuth) {
       return renderRow(ICON.failure, "npm auth", paint("red", `token inválido o vencido (${source})`));
     case NPM_AUTH_STATUS.notOwner:
       return renderRow(ICON.failure, "npm auth", paint("red", `${npmAuth.user} no puede publicar ${npmAuth.packageName} (${source})`));
+    case NPM_AUTH_STATUS.projectCredentials:
+      return renderRow(ICON.failure, "npm auth", paint("red", `el ${PROJECT_NPM_CONFIG_FILE} del proyecto define credenciales que pisan ${NPM_TOKEN_VARIABLE}`));
     default:
       return renderRow(ICON.warning, "npm auth", paint("yellow", `no se pudo verificar (${source})`));
   }

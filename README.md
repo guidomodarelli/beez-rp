@@ -143,9 +143,12 @@ El token nunca se escribe en disco ni en la línea de comandos, ni se carga en e
 Cuando el plan incluiría la publicación con `publish: "npm"` (release nuevo o retomado), el diagnóstico verifica las credenciales antes de tocar nada, con la misma config temporal y el mismo registry que `npm publish`, y las muestra en la fila `npm auth` (por ejemplo `guidomodarelli (.env del repo), dueño de <paquete>; permiso de escritura del token no verificable antes de publicar`):
 
 - Sin token: bloquea y explica dónde definir `NPM_TOKEN`.
+- `.npmrc` del proyecto con credenciales para ese registry (`//host/path/:_authToken`, `_auth`, `_password`, etc.): bloquea, porque npm las prioriza sobre la config temporal y autenticaría con ellas en vez de `NPM_TOKEN`. Solo se leen las claves, nunca los valores.
 - `npm whoami --registry <registry>` responde 401/403: bloquea porque el token (de la fuente que corresponda) es inválido o venció.
 - `npm owner ls <paquete> --registry <registry>`: si el paquete no existe (E404) es la primera publicación y sigue; si existe y el usuario no está entre los dueños, bloquea con el usuario y los dueños. En un paquete con scope de organización solo advierte, porque el acceso puede venir de un equipo.
-- Si la verificación no puede decidir (red, registry sin `npm owner ls`), advierte y publica igual.
+- Si la verificación no puede decidir (red, registry sin `npm owner ls`, un `.env` o `.npmrc` que existe pero no se puede leer), advierte y publica igual. Un `.env` ilegible también hace fallar la consulta de `npm view`, que bloquea el diagnóstico nombrando el archivo.
+
+`npm whoami` y `npm owner ls` corren con `--json=false`, así que su salida sigue siendo texto aunque el proyecto active `json=true` (o `npm_config_json=true`).
 
 Límite: que el usuario sea dueño del paquete no prueba que el token pueda escribir. Un token read-only o granular sin permiso de escritura sobre el paquete pasa `npm whoami` y `npm owner ls`, y npm no ofrece una forma sin efectos de verificarlo antes de publicar (`npm publish --dry-run` no autentica). Por eso la fila lo aclara sin bloquear, y ese caso recién falla en `npm publish`, después de pushear el commit y el tag.
 
