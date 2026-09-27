@@ -6,6 +6,8 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y e
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-27
+
 ### Added
 
 - `artifact` en `beez-rp.config.js`: con `publish: "npm"`, publica exactamente el tarball que dejó el paso `prepare` (por ejemplo `releases/{version}-{sha256}/{name}-{version}.tgz`) en vez de reempaquetar el working tree. Los proyectos lo empaquetan con `npm pack --ignore-scripts`.
