@@ -23,16 +23,23 @@ export { defineCreateVersionConfig, loadCreateVersionConfig, resolveCreateVersio
 export { ReleaseStepError } from "./errors.js";
 export {
   buildNpmAuthConfigLine,
+  buildNpmOwnerListArguments,
   buildNpmPublishArguments,
   buildNpmPublishEnvironment,
+  buildNpmTokenEnvironment,
   buildNpmViewArguments,
+  buildNpmWhoamiArguments,
+  checkNpmPublishAccess,
   lookupPublishedVersions,
+  parseNpmOwnerList,
   parseNpmPackDryRunOutput,
   publishToNpm,
   readNpmPackIntegrity,
+  resolveNpmToken,
   resolvePublishRegistry,
   withNpmAuthConfig,
 } from "./npm.js";
+export { describeNpmAuthProblem, describeNpmPublishFailure, describeNpmTokenSource } from "./npm-auth.js";
 export { DEFAULT_CAPABILITIES, RELEASE_USAGE, buildReleasePlan, describeFeatureBranchGaps, parseReleaseArguments } from "./plan.js";
 export { createGitReader, listCommits, parseCommitLog, readPackageManifestAt, readPackageVersionAt, runCaptured, runCommandLine, runInherited } from "./process.js";
 export { createHookContext, runCreateVersion } from "./run.js";

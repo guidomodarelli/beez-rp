@@ -33,6 +33,7 @@ export function runCaptured(command, commandArguments, options = {}) {
   return new Promise((resolve) => {
     const child = spawn(command, commandArguments, {
       cwd: options.cwd,
+      env: options.env,
       shell: options.shell ?? false,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,

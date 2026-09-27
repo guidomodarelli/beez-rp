@@ -1,11 +1,14 @@
 /**
  * Gathers the snapshot consumed by `plan.js`: current branch, uncommitted
  * changes, `main` compared with `origin/main`, the version and subject of
- * `HEAD`, the last release, the commits waiting to be released, the pull
- * request of a feature branch, the published versions and pending migrations.
+ * `HEAD`, the commit of a detached release tag on `origin`, the last release,
+ * the commits waiting to be released, the pull request of a feature branch,
+ * the published versions, the npm credentials (when the plan would publish to
+ * npm) and pending migrations.
  *
  * Every reader is read-only; the only network operations are `git fetch`,
- * `gh pr view`, `npm view` and whatever the project migrations adapter reads.
+ * `git ls-remote`, `gh pr view`, `npm view`, `npm whoami`, `npm owner ls` and
+ * whatever the project migrations adapter reads.
  *
  * @module create-version/state
  */
@@ -18,7 +21,9 @@ import { CHANGELOG_FILE } from "../constants/changelog.js";
 import {
   MAIN_BRANCH,
   MIGRATION_STATUS,
+  NPM_AUTH_STATUS,
   NPM_LOOKUP_STATUS,
+  NPM_NOT_FOUND_CODE,
   NO_PULL_REQUEST_MESSAGE_PATTERN,
   PACKAGE_MANIFEST_FILE,
   PULL_REQUEST_JSON_FIELDS,
@@ -26,7 +31,8 @@ import {
   REMOTE_MAIN_REF,
   VERSION_FIELD_CHANGE_PATTERN,
 } from "../constants/create-version.js";
-import { lookupPublishedVersions, resolvePublishRegistry } from "./npm.js";
+import { toReleaseTag } from "../versions.js";
+import { checkNpmPublishAccess, lookupPublishedVersions, resolvePublishRegistry } from "./npm.js";
 import { createGitReader, listCommits, readPackageVersionAt, runCaptured } from "./process.js";
 
 /**
@@ -34,8 +40,51 @@ import { createGitReader, listCommits, readPackageVersionAt, runCaptured } from 
  * @typedef {import("./plan.js").ReleaseState} ReleaseState
  * @typedef {import("./plan.js").PullRequestSnapshot} PullRequestSnapshot
  * @typedef {import("./config.js").MigrationCheck} MigrationCheck
- * @typedef {ReleaseState & { packageName: string, releasedVersion: string | null, lastRelease: { sha: string, version: string | null } | null }} ReleaseSnapshot
+ * @typedef {import("./plan.js").LastReleaseSnapshot} LastReleaseSnapshot
+ * @typedef {ReleaseState & { packageName: string, releasedVersion: string | null, lastRelease: LastReleaseSnapshot | null }} ReleaseSnapshot
  */
+
+/**
+ * Returns the release tag of a version when it points exactly at a commit.
+ *
+ * @param {GitReader} reader - Git reader.
+ * @param {string | null} version - Version whose `vX.Y.Z` tag is looked up.
+ * @param {string} sha - Commit the tag must point at.
+ * @returns {Promise<string | null>} Tag name, or `null` when it is missing or points elsewhere.
+ */
+async function findReleaseTagAt(reader, version, sha) {
+  if (!version) {
+    return null;
+  }
+
+  const tag = toReleaseTag(version);
+  const taggedSha = await reader.tryGit(["rev-parse", "--verify", "--quiet", `refs/tags/${tag}^{commit}`]);
+  return taggedSha === sha ? tag : null;
+}
+
+/**
+ * Reads the commit a release tag points at on `origin`, so a detached publication can prove that
+ * its commit and tag already reached the remote. An annotated tag is resolved through its peeled
+ * `^{}` entry; a lightweight tag points at the commit directly.
+ *
+ * @param {GitReader} reader - Git reader.
+ * @param {string} tag - Release tag such as `v1.2.0`.
+ * @returns {Promise<string | null>} Commit of the tag on `origin`, or `null` when it is missing or
+ *   `origin` cannot be read.
+ */
+async function readRemoteReleaseTagCommit(reader, tag) {
+  const tagRef = `refs/tags/${tag}`;
+  const peeledRef = `${tagRef}^{}`;
+  const output = await reader.tryGit(["ls-remote", RELEASE_REMOTE, tagRef, peeledRef]);
+  const shaByRef = new Map(
+    (output ?? "")
+      .split("\n")
+      .map((line) => line.trim().split(/\s+/u))
+      .filter((fields) => fields.length === 2)
+      .map(([sha, ref]) => [ref, sha])
+  );
+  return shaByRef.get(peeledRef) ?? shaByRef.get(tagRef) ?? null;
+}
 
 /**
  * Finds the last release on a revision: the newest commit that changed the
@@ -44,12 +93,19 @@ import { createGitReader, listCommits, readPackageVersionAt, runCaptured } from 
  *
  * @param {GitReader} reader - Git reader.
  * @param {string} revision - Revision such as `origin/main`.
- * @returns {Promise<{ sha: string, version: string | null } | null>} Last release, or `null` without history.
+ * @returns {Promise<LastReleaseSnapshot | null>} Last release with its subject and whether its
+ *   `vX.Y.Z` tag points at it, or `null` without history.
  */
 export async function findLastRelease(reader, revision) {
   const sha = await reader.tryGit(["log", "-1", "--format=%H", `-G${VERSION_FIELD_CHANGE_PATTERN}`, revision, "--", PACKAGE_MANIFEST_FILE]);
 
-  return sha ? { sha, version: await readPackageVersionAt(reader, sha) } : null;
+  if (!sha) {
+    return null;
+  }
+
+  const version = await readPackageVersionAt(reader, sha);
+  const subject = await reader.tryGit(["log", "-1", "--format=%s", sha]);
+  return { sha, version, subject, tagged: (await findReleaseTagAt(reader, version, sha)) !== null };
 }
 
 /**
@@ -144,15 +200,67 @@ async function readMigrations(checkMigrations) {
  *   or npm cannot report it.
  */
 async function lookupNpmOnPublishRegistry(lookupNpm, manifest, repositoryRoot) {
-  /** @type {string} */
-  let registryUrl;
+  const registry = await resolveRegistrySafely(manifest, repositoryRoot);
+
+  return registry.registryUrl === null
+    ? { status: NPM_LOOKUP_STATUS.failed, publishedVersions: [], reason: registry.reason }
+    : lookupNpm(String(manifest.name), repositoryRoot, registry.registryUrl);
+}
+
+/**
+ * Resolves the publish registry without throwing.
+ *
+ * @param {Record<string, unknown>} manifest - Working-tree `package.json`.
+ * @param {string} repositoryRoot - Repository root.
+ * @returns {Promise<{ registryUrl: string | null, reason: string | null }>} Registry, or why it cannot be resolved.
+ */
+async function resolveRegistrySafely(manifest, repositoryRoot) {
   try {
-    registryUrl = await resolvePublishRegistry(manifest, repositoryRoot);
+    return { registryUrl: await resolvePublishRegistry(manifest, repositoryRoot), reason: null };
   } catch (error) {
-    return { status: NPM_LOOKUP_STATUS.failed, publishedVersions: [], reason: error instanceof Error ? error.message : String(error) };
+    return { registryUrl: null, reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/**
+ * Checks the npm credentials on the registry the working-tree manifest publishes to.
+ *
+ * @param {typeof checkNpmPublishAccess} checkAccess - npm credential check adapter.
+ * @param {Record<string, unknown>} manifest - Working-tree `package.json`.
+ * @param {string} repositoryRoot - Repository root.
+ * @returns {Promise<import("./npm.js").NpmAuthCheck>} Check result; an `unknown` one when the registry cannot be resolved.
+ */
+async function checkNpmAuthOnPublishRegistry(checkAccess, manifest, repositoryRoot) {
+  const registry = await resolveRegistrySafely(manifest, repositoryRoot);
+
+  return registry.registryUrl === null
+    ? { status: NPM_AUTH_STATUS.unknown, user: null, source: null, registryUrl: "", packageName: String(manifest.name), owners: [], firstPublication: false, reason: registry.reason }
+    : checkAccess(String(manifest.name), repositoryRoot, registry.registryUrl);
+}
+
+/**
+ * Confirms a first publication (`npm owner ls` answered E404) against the versions `npm view`
+ * listed with the same token. Registries hide a private package from users without access, so an
+ * owner E404 only means "new package" when `npm view` does not list versions either: when it does,
+ * the package exists and the token cannot manage it, which blocks like a user that is not an owner.
+ *
+ * @param {import("./npm.js").NpmAuthCheck} npmAuth - Credential check.
+ * @param {import("./npm.js").NpmLookup | null} npm - Published versions, or `null` when npm is not tracked.
+ * @returns {import("./npm.js").NpmAuthCheck} The same check, or a `notOwner` one when the package already has versions.
+ */
+function confirmFirstPublication(npmAuth, npm) {
+  const publishedCount = npm?.publishedVersions.length ?? 0;
+
+  if (!npmAuth.firstPublication || publishedCount === 0) {
+    return npmAuth;
   }
 
-  return lookupNpm(String(manifest.name), repositoryRoot, registryUrl);
+  return {
+    ...npmAuth,
+    status: NPM_AUTH_STATUS.notOwner,
+    firstPublication: false,
+    reason: `npm view lista versiones publicadas de ${npmAuth.packageName} (${publishedCount}), pero npm owner ls respondió ${NPM_NOT_FOUND_CODE}: el token no tiene acceso al paquete.`,
+  };
 }
 
 /**
@@ -164,8 +272,11 @@ async function lookupNpmOnPublishRegistry(lookupNpm, manifest, repositoryRoot) {
  *   checkMigrations?: (() => Promise<MigrationCheck> | MigrationCheck) | null,
  *   onProgress?: (label: string) => void,
  *   lookupNpm?: typeof lookupPublishedVersions,
+ *   checkNpmAuth?: ((snapshot: ReleaseSnapshot) => boolean) | null,
+ *   checkNpmAccess?: typeof checkNpmPublishAccess,
  *   lookupPullRequestFor?: typeof lookupPullRequest,
- * }} options - Repository, adapters and progress callback.
+ * }} options - Repository, adapters and progress callback. `checkNpmAuth` receives the snapshot
+ *   without credentials and decides whether the npm credentials are checked (when the plan would publish to npm).
  * @returns {Promise<ReleaseSnapshot>} Snapshot accepted by `buildReleasePlan`.
  */
 export async function collectReleaseState({
@@ -174,6 +285,8 @@ export async function collectReleaseState({
   checkMigrations = null,
   onProgress = () => {},
   lookupNpm = lookupPublishedVersions,
+  checkNpmAuth = null,
+  checkNpmAccess = checkNpmPublishAccess,
   lookupPullRequestFor = lookupPullRequest,
 }) {
   const reader = createGitReader(repositoryRoot);
@@ -192,6 +305,15 @@ export async function collectReleaseState({
     localMainExists && remoteMainExists ? Number((await reader.tryGit(["rev-list", "--count", `${MAIN_BRANCH}..${REMOTE_MAIN_REF}`])) ?? 0) : 0;
   const headVersion = await readPackageVersionAt(reader, "HEAD");
   const headSubject = await reader.tryGit(["log", "-1", "--format=%s", "HEAD"]);
+  const headSha = await reader.tryGit(["rev-parse", "HEAD"]);
+  const headReleaseTag = headSha ? await findReleaseTagAt(reader, headVersion, headSha) : null;
+  // Only a detached publication from a tag needs to prove that the tag is on origin.
+  const remoteReleaseTagSha = !currentBranch && headReleaseTag ? await readRemoteReleaseTagCommit(reader, headReleaseTag) : null;
+  // A tag missing from origin can still be pushed from the detached HEAD when origin/main already has its commit.
+  const headOnRemoteMain =
+    !currentBranch && headReleaseTag && !remoteReleaseTagSha && remoteMainExists
+      ? (await reader.tryGit(["merge-base", "--is-ancestor", "HEAD", REMOTE_MAIN_REF])) !== null
+      : false;
   const releasedVersion = remoteMainExists ? await readPackageVersionAt(reader, REMOTE_MAIN_REF) : null;
   const lastRelease = remoteMainExists ? await findLastRelease(reader, REMOTE_MAIN_REF) : null;
   const unreleasedCommits = remoteMainExists ? await listCommits(reader, lastRelease ? `${lastRelease.sha}..${REMOTE_MAIN_REF}` : REMOTE_MAIN_REF) : [];
@@ -219,7 +341,8 @@ export async function collectReleaseState({
   }
   const migrations = await readMigrations(checkMigrations);
 
-  return {
+  /** @type {ReleaseSnapshot} */
+  const snapshot = {
     packageName: manifest.name,
     currentBranch,
     workingTreeChanges,
@@ -229,11 +352,23 @@ export async function collectReleaseState({
     main: { aheadCommits, behindCount },
     headVersion,
     headSubject,
+    headSha,
+    headReleaseTag,
+    remoteReleaseTagSha,
+    headOnRemoteMain,
     releasedVersion,
     lastRelease,
     unreleasedCommits,
     npm,
+    npmAuth: null,
     migrations,
     changelog: readChangelogState(repositoryRoot),
   };
+
+  if (checkNpmAuth?.(snapshot)) {
+    onProgress("Verificando las credenciales de npm");
+    snapshot.npmAuth = confirmFirstPublication(await checkNpmAuthOnPublishRegistry(checkNpmAccess, manifest, repositoryRoot), npm);
+  }
+
+  return snapshot;
 }

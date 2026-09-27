@@ -69,9 +69,10 @@ pnpm create-version            # o pnpm cv
 pnpm cv --bump patch|minor|major
 pnpm cv --set-version X.Y.Z    # solo la siguiente patch, minor o major
 pnpm cv --dry-run              # diagnóstico y plan, sin cambiar nada
+pnpm cv --skip-unpublished     # release nuevo aunque el último no esté en npm (lo saltea)
 ```
 
-El comando sale solo desde `main`, limpio y al día con origin (solo `CHANGELOG.md` puede quedar sin commitear). En una rama feature explica qué falta: pushear, abrir o mergear el PR (con `gh`).
+El comando sale solo desde `main`, limpio y al día con origin (solo `CHANGELOG.md` puede quedar sin commitear en un release nuevo, porque el bump lo commitea; para retomar un release ya commiteado, también tiene que estar limpio). En una rama feature explica qué falta: pushear, abrir o mergear el PR (con `gh`). La única excepción es publicar un release que falta en npm desde su tag (ver [Versiones sin publicar](#versiones-sin-publicar)).
 
 1. Si `main` está atrás de origin, lo actualiza en fast-forward y termina (código de salida 0) sin tocar la versión ni los tags: hay que volver a correr `pnpm create-version`, que en un proceso nuevo carga `beez-rp.config.(m)js`, sus módulos y el diagnóstico desde el código actualizado.
 2. Aplica migraciones pendientes, si el proyecto tiene adaptador, después de pedir confirmación.
@@ -81,6 +82,8 @@ El comando sale solo desde `main`, limpio y al día con origin (solo `CHANGELOG.
 6. Corre `prepare`, sube `main` y el tag con `git push --atomic` y corre `publish`.
 
 El último release es el último commit de `origin/main` que cambió el `version` de `package.json`, así que sirve con commits `X.Y.Z`, con otros asuntos de release y con versiones subidas a mano. Si algo falla después del commit, volver a correr el comando retoma solo lo que falta: el push de un commit de versión local o, con `registry: "npm"`, la preparación y publicación de una versión que npm todavía no tiene. Las versiones publicadas se consultan con `npm view --registry` en el mismo registry donde se publica (ver abajo), porque `npm view` no aplica el `publishConfig` del `package.json`.
+
+Si un paso falla cuando `main` y el tag ya están en origin (recién pusheados o de antes), el recuadro de error lo dice explícitamente, por ejemplo: "`v1.9.1` ya está en GitHub (main + tag); falta publicar en npm. Corré `pnpm create-version` para reintentar solo la publicación."
 
 ### beez-rp.config.js
 
@@ -103,7 +106,7 @@ export default {
 
 Solo `changelog.audience` es obligatorio. Los hooks (`migrations.check`, `migrations.apply`, `prepare`, `publish`) reciben `{ repositoryRoot, version, git, run, print, fail }`: `git` lee Git, `run("pnpm x")` corre un comando visible y devuelve su exit code, y `fail(mensaje, qué hacer)` corta el paso con una explicación. El config no necesita importar `beez-rp`.
 
-`migrations.check` devuelve `{ status: "up-to-date" | "pending" | "unknown", pending, target, reason }`; después de `apply`, el comando vuelve a llamar a `check` y falla si siguen pendientes. `publish: "npm"` toma `NPM_TOKEN` del entorno o de un `.env` ignorado por Git. No hace falta `.npmrc`: el comando escribe una config de npm temporal fuera del repo que asocia `${NPM_TOKEN}` al registry donde realmente se publica, resuelto como npm: `publishConfig["@scope:registry"]` si el paquete tiene ese scope, si no `publishConfig.registry` y, si el `package.json` no declara ninguno, lo que devuelve `npm config get @scope:registry` (paquete con scope) o `npm config get registry` en la raíz del repo, que incluye el `.npmrc` del proyecto, las variables `npm_config_*` y la config global (como la publicación, no lee `~/.npmrc`, que se reemplaza por la config temporal); tiene que ser una URL http(s) válida o no se publica. Con `NPM_TOKEN` disponible, el diagnóstico también consulta `npm view` con esa config temporal, así que funciona con paquetes privados; sin token consulta sin autenticar. El resumen final enlaza a npmjs.com solo si el registry es `https://registry.npmjs.org/`; si no, muestra `Registro: <url>` con el paquete y la versión. Solo guarda esa referencia: npm la expande, el token nunca queda en disco ni en la línea de comandos, y la config se borra al terminar. npm hereda la terminal, así que la confirmación 2FA (navegador o código) funciona igual.
+`migrations.check` devuelve `{ status: "up-to-date" | "pending" | "unknown", pending, target, reason }`; después de `apply`, el comando vuelve a llamar a `check` y falla si siguen pendientes. `publish: "npm"` toma `NPM_TOKEN` de una sola búsqueda, compartida por el diagnóstico, `npm view` y la publicación (ver [Token de npm](#token-de-npm)). No hace falta `.npmrc`: el comando escribe una config de npm temporal fuera del repo que asocia `${NPM_TOKEN}` al registry donde realmente se publica, resuelto como npm: `publishConfig["@scope:registry"]` si el paquete tiene ese scope, si no `publishConfig.registry` y, si el `package.json` no declara ninguno, lo que devuelve `npm config get @scope:registry` (paquete con scope) o `npm config get registry` en la raíz del repo, que incluye el `.npmrc` del proyecto, las variables `npm_config_*` y la config global (como la publicación, no lee `~/.npmrc`, que se reemplaza por la config temporal); tiene que ser una URL http(s) válida o no se publica. Con `NPM_TOKEN` disponible, el diagnóstico también consulta `npm view` con esa config temporal, así que funciona con paquetes privados; sin token consulta sin autenticar. El resumen final enlaza a npmjs.com solo si el registry es `https://registry.npmjs.org/`; si no, muestra `Registro: <url>` con el paquete y la versión. Solo guarda esa referencia: npm la expande, el token nunca queda en disco ni en la línea de comandos, y la config se borra al terminar. npm hereda la terminal, así que la confirmación 2FA (navegador o código) funciona igual.
 
 Sin `artifact`, `publish: "npm"` publica el working tree. Con `artifact` publica exactamente el tarball que dejó `prepare`. Los proyectos empaquetan siempre con npm: `prepare` construye (con pnpm o lo que use el proyecto) y después corre `npm pack --ignore-scripts`. `npm pack` es reproducible (el mismo commit da siempre los mismos bytes), así que la verificación es una comparación de hash. Después de `prepare` y antes de `npm publish`:
 
@@ -116,6 +119,53 @@ Sin `artifact`, `publish: "npm"` publica el working tree. Con `artifact` publica
 Ejemplo de `prepare` que deja `releases/{version}-{sha256}/{name}-{version}.tgz`: `pnpm build`, `npm pack --ignore-scripts --pack-destination releases/<version>-tmp/` y renombrar la carpeta con el SHA-256 del tarball.
 
 Si no hay tarball o la verificación falla, no se publica nada y volver a correr el comando retoma preparación y publicación.
+
+### Token de npm
+
+`NPM_TOKEN` se busca en este orden y se usa el primero que esté definido (no vacío):
+
+1. La variable de entorno `NPM_TOKEN`.
+2. El `.env` del repo (ignorado por Git).
+3. `~/.config/beez-rp/.env` (en Windows, `%USERPROFILE%\.config\beez-rp\.env`), compartido por todos los proyectos.
+
+Para tener un solo token en todos los proyectos, guardalo solo en el archivo compartido y sacá `NPM_TOKEN` de los `.env` de cada repo (que tienen prioridad):
+
+```bash
+mkdir -p ~/.config/beez-rp
+printf 'NPM_TOKEN=%s\n' "<token>" > ~/.config/beez-rp/.env
+chmod 600 ~/.config/beez-rp/.env
+```
+
+El token nunca se escribe en disco ni en la línea de comandos, ni se carga en el `process.env` del comando: solo lo recibe el proceso de npm por su entorno, y la config temporal lo referencia como `${NPM_TOKEN}`. Los mensajes dicen de qué fuente salió, nunca el valor.
+
+### Credenciales antes de publicar
+
+Cuando el plan incluiría la publicación con `publish: "npm"` (release nuevo o retomado), el diagnóstico verifica las credenciales antes de tocar nada, con la misma config temporal y el mismo registry que `npm publish`, y las muestra en la fila `npm auth` (por ejemplo `guidomodarelli (.env del repo), dueño de <paquete>; permiso de escritura del token no verificable antes de publicar`):
+
+- Sin token: bloquea y explica dónde definir `NPM_TOKEN`.
+- `.npmrc` del proyecto con credenciales para ese registry (`//host/path/:_authToken`, `_auth`, `_password`, etc.): bloquea, porque npm las prioriza sobre la config temporal y autenticaría con ellas en vez de `NPM_TOKEN`. Solo se leen las claves, nunca los valores.
+- `npm whoami --registry <registry>` responde 401/403: bloquea porque el token (de la fuente que corresponda) es inválido o venció.
+- `npm owner ls <paquete> --registry <registry>`: si el paquete no existe (E404) es la primera publicación y sigue; si existe y el usuario no está entre los dueños, bloquea con el usuario y los dueños. En un paquete con scope de organización solo advierte, porque el acceso puede venir de un equipo.
+- Si la verificación no puede decidir (red, registry sin `npm owner ls`, un `.env` o `.npmrc` que existe pero no se puede leer), advierte y publica igual. Un `.env` ilegible también hace fallar la consulta de `npm view`, que bloquea el diagnóstico nombrando el archivo.
+
+`npm whoami` y `npm owner ls` corren con `--json=false`, así que su salida sigue siendo texto aunque el proyecto active `json=true` (o `npm_config_json=true`).
+
+Límite: que el usuario sea dueño del paquete no prueba que el token pueda escribir. Un token read-only o granular sin permiso de escritura sobre el paquete pasa `npm whoami` y `npm owner ls`, y npm no ofrece una forma sin efectos de verificarlo antes de publicar (`npm publish --dry-run` no autentica). Por eso la fila lo aclara sin bloquear, y ese caso recién falla en `npm publish`, después de pushear el commit y el tag.
+
+`npm publish` hereda la terminal (para el 2FA), así que su salida no se puede leer. Si termina con error, el comando vuelve a verificar las credenciales y explica el motivo: token inválido, usuario sin permisos sobre el paquete o, si el usuario es dueño, el error genérico, que menciona que el token puede ser read-only o granular sin permiso de escritura. Un `404 Not Found` de npm en el PUT suele significar falta de permisos.
+
+### Versiones sin publicar
+
+Con `registry: "npm"`, si la versión del último release (`package.json` en `origin/main`) es estable, no está en npm y es mayor que la última publicada, el comando no crea un release nuevo ni retoma un commit de versión local de otra versión, porque la saltearía. Si npm no tiene ninguna versión, solo bloquea cuando ese release tiene su tag `vX.Y.Z` (una versión inicial sin tag no es un release). El bloqueo explica cómo publicarla:
+
+```bash
+git switch --detach vX.Y.Z
+pnpm create-version   # prepara (si corresponde) y publica X.Y.Z; no sincroniza ni pushea main
+git switch main
+pnpm create-version   # ahora sí, el release nuevo
+```
+
+Con HEAD desacoplado el comando solo corre cuando HEAD es exactamente el commit del tag `vX.Y.Z`, su asunto es `X.Y.Z` y esa versión falta en npm. Además bloquea si el tag no está en origin o apunta ahí a otro commit (volvé a `main` y corré `pnpm create-version`, que retoma el push) y si la versión no es mayor que la versión estable más alta de npm, porque publicarla con `--tag latest` movería `latest` hacia atrás. Si el release no se puede retomar así (otro asunto o sin tag), hay que publicarlo a mano. `--skip-unpublished` crea el release nuevo igual, a propósito, y lo advierte en el plan.
 
 ## Bloquear publicaciones con pnpm
 

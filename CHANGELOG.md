@@ -6,6 +6,26 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y e
 
 ## [Unreleased]
 
+### Added
+
+- Con `publish: "npm"`, el diagnóstico verifica las credenciales antes de tocar nada cuando el plan publicaría: falta `NPM_TOKEN`, token inválido o vencido (`npm whoami` con 401/403) o usuario que no es dueño del paquete (`npm owner ls`) cortan con un bloqueo que dice qué hacer; un paquete que `npm owner ls` no encuentra (E404) solo es la primera publicación si `npm view` tampoco lista versiones: si las lista, el token no tiene acceso y bloquea; si ninguno lo muestra, sigue con una advertencia porque también podría ser un paquete privado sin acceso. La fila `npm auth` muestra el usuario y de dónde salió el token, nunca el valor, y aclara que el permiso de escritura del token no se puede verificar antes de publicar (un token read-only o granular sin escritura pasa la verificación).
+- `NPM_TOKEN` también se lee de `~/.config/beez-rp/.env`, compartido por todos los proyectos, después de la variable de entorno y del `.env` del repo.
+- Si el último release no está en npm y es mayor que la última versión publicada, `create-version` no crea un release nuevo que lo saltee: explica cómo publicarlo con `git switch --detach vX.Y.Z` y `pnpm create-version`, que con HEAD desacoplado en ese tag solo prepara y publica (sin sincronizar ni pushear `main`). `--skip-unpublished` crea el release nuevo igual, con una advertencia. Lo mismo vale para retomar un commit de versión local de otra versión. Desde el tag desacoplado solo publica si el commit ya está en origin (si el tag existe solo en local y `origin/main` ya tiene su commit, sube únicamente el tag antes de publicar; si en origin apunta a otro commit, bloquea) y si la versión es mayor que la versión estable más alta de npm y que la versión a la que apunta el dist-tag `latest` (aunque sea un prerelease), para no mover `latest` hacia atrás.
+
+### Changed
+
+- Si `npm publish` falla, vuelve a verificar las credenciales y explica si el token es inválido, si el usuario no puede publicar el paquete (un 404 en el PUT suele significar eso) o, si es dueño, el error genérico, que menciona un token read-only o granular sin permiso de escritura como causa posible.
+- Si un paso falla cuando `main` y el tag ya están en origin, el recuadro de error dice que el release ya está en GitHub (o en origin) y que solo falta publicar.
+- El diagnóstico, `npm view` y la publicación resuelven `NPM_TOKEN` con una sola búsqueda y ya no lo cargan en el entorno del proceso: solo lo recibe el proceso de npm.
+
+### Fixed
+
+- Las variables de entorno que se pasan a los comandos con salida capturada (como `npm config get`) ahora llegan al proceso hijo.
+- La verificación de credenciales reconoce al dueño aunque el proyecto active la salida JSON global de npm (`json=true`): `npm whoami` y `npm owner ls` corren con `--json=false`.
+- Un `.env` (del repo o compartido) que existe pero no se puede leer ya no aborta el diagnóstico: la consulta de npm falla con el bloqueo habitual y nombra el archivo, sin mostrar su contenido.
+- Si el `.npmrc` del proyecto define credenciales para el registry de publicación, el diagnóstico bloquea antes de publicar: npm las prioriza sobre `NPM_TOKEN` y la verificación habría autenticado con ellas. Solo cuentan los campos que eligen la credencial HTTP (`_authToken`, `_auth`, `_password`, `username`): un `keyfile` o `certfile` de TLS no bloquea.
+- La verificación de credenciales y la publicación descartan las variables `npm_config_*` heredadas con credenciales de npm (por ejemplo `npm_config_//registry/:_authToken`, en cualquier capitalización), que npm prioriza sobre la config temporal: autentican siempre con el `NPM_TOKEN` elegido.
+
 ## [0.3.0] - 2026-09-27
 
 ### Added
