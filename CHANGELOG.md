@@ -8,7 +8,7 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y e
 
 ### Added
 
-- `create-version --ignore-local-changes` publica aunque haya cambios sin commitear: los aparta con `git stash` (staged, sin stagear y archivos nuevos) mientras corre el release, así no llegan a los checks, la preparación, la publicación ni al commit de versión, y los restaura al terminar, también si un paso falla. Sin el flag, el bloqueo por cambios sin commitear lo sugiere.
+- `create-version --ignore-local-changes` publica aunque haya cambios sin commitear: los aparta con `git stash` (staged, sin stagear y archivos nuevos) mientras corre el release, así no llegan a los checks, la preparación, la publicación ni al commit de versión, y los restaura al terminar, también si un paso falla. Sin el flag, si esos cambios son lo único que frena el release, el comando pregunta si ignorarlos (sin opción preseleccionada); con `--dry-run` o sin terminal interactiva muestra el bloqueo, que sugiere el flag.
 
 ### Changed
 

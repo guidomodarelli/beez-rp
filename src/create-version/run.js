@@ -125,6 +125,36 @@ class MainSyncedRestartError extends Error {}
 /** Answers of the pending-migrations prompt. */
 const MIGRATION_CHOICE = Object.freeze({ apply: "apply", skip: "skip", cancel: "cancel" });
 
+/** Answers of the prompt that offers to ignore uncommitted changes. */
+const LOCAL_CHANGES_CHOICE = Object.freeze({ ignore: "ignore", cancel: "cancel" });
+
+/**
+ * Lists the uncommitted changes and asks whether to set them aside for this release, as
+ * `--ignore-local-changes` does. Nothing is preselected, so a stray Enter never ignores them.
+ *
+ * @param {string[]} changes - `git status --porcelain` lines that would be set aside.
+ * @returns {Promise<boolean>} `true` to set them aside and go on.
+ */
+async function askToIgnoreLocalChanges(changes) {
+  const lines = changes.slice(0, MAX_LISTED_ITEMS).map((line) => `${ICON.bullet} ${line}`);
+  if (changes.length > MAX_LISTED_ITEMS) {
+    lines.push(paint("gray", `… y ${changes.length - MAX_LISTED_ITEMS} más`));
+  }
+  lines.push("", paint("gray", "Si los ignorás, se apartan con git stash durante el release (no se publican) y se restauran al final."));
+  print(renderBox({ title: `Hay ${changes.length} cambio(s) sin commitear`, lines, tone: BOX_TONE.warning }));
+
+  const choice = await select({
+    message: "¿Ignorar los cambios locales y seguir con el release?",
+    options: [
+      { label: "Ignorarlos y seguir", hint: `igual que --${CREATE_VERSION_FLAG.ignoreLocalChanges}`, value: LOCAL_CHANGES_CHOICE.ignore },
+      { label: "Cancelar", hint: "commitealos o guardalos antes de publicar", value: LOCAL_CHANGES_CHOICE.cancel },
+    ],
+    defaultIndex: null,
+  });
+
+  return choice === LOCAL_CHANGES_CHOICE.ignore;
+}
+
 /**
  * Creates the context passed to project hooks.
  *
@@ -1030,7 +1060,10 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
       // failed: an authenticated `npm view` rejected with E401/E403 means the token, not the connection, is wrong.
       checkNpmAuth: (snapshot) =>
         config.publish === NPM_PUBLISHER &&
-        (hasFailedNpmLookup(snapshot) || buildReleasePlan(snapshot, capabilities, planOptions).steps.some((planStep) => planStep.id === RELEASE_STEP.publishRelease)),
+        // Planned as if local changes were ignored: the run may still offer to ignore them, and
+        // that plan must not publish with unchecked credentials.
+        (hasFailedNpmLookup(snapshot) ||
+          buildReleasePlan(snapshot, capabilities, { ...planOptions, ignoreLocalChanges: true }).steps.some((planStep) => planStep.id === RELEASE_STEP.publishRelease)),
       onProgress: (label) => spinner.update(label),
     });
     spinner.succeed("Diagnóstico completo");
@@ -1047,7 +1080,23 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   print(renderBanner({ projectName: config.projectName ?? state.packageName, publishedLabel }));
   print(renderDiagnosis(state, repositoryRoot));
 
-  const plan = buildReleasePlan(state, capabilities, planOptions);
+  let plan = buildReleasePlan(state, capabilities, planOptions);
+
+  // Uncommitted changes are the only blocker when ignoring them unblocks the plan: an interactive
+  // run asks instead of stopping (a dry run, or one without terminal, keeps the blocker and its hint).
+  if (plan.blockers.length > 0 && !options.ignoreLocalChanges && !options.dryRun && process.stdin.isTTY) {
+    const planIgnoringChanges = buildReleasePlan(state, capabilities, { ...planOptions, ignoreLocalChanges: true });
+
+    if (planIgnoringChanges.blockers.length === 0 && planIgnoringChanges.steps.length > 0) {
+      if (!(await askToIgnoreLocalChanges(listLocalChangesToSetAside(state, planIgnoringChanges.mode)))) {
+        print(`${ICON.info} Release cancelado: no se tocó nada. Commiteá o guardá los cambios y volvé a correr pnpm create-version.`);
+        return 0;
+      }
+
+      options = { ...options, ignoreLocalChanges: true };
+      plan = planIgnoringChanges;
+    }
+  }
 
   if (plan.mode === RELEASE_MODE.upToDate) {
     const since = state.lastRelease?.version ? toReleaseTag(state.lastRelease.version) : "el inicio";
