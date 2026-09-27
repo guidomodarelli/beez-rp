@@ -84,6 +84,7 @@ import { collectReleaseState } from "./state.js";
  *   pushed: boolean,
  *   published: boolean,
  *   commitCount: number | null,
+ *   packageName: string,
  * }} ReleaseContext
  */
 
@@ -303,6 +304,16 @@ async function runConfiguredCommands(context, commandLines, hint) {
 function readWorkingUnreleased(repositoryRoot) {
   const changelogPath = path.join(repositoryRoot, CHANGELOG_FILE);
   return existsSync(changelogPath) ? readUnreleased(readFileSync(changelogPath, "utf8")) : { exists: false, entryCount: 0, unknownSections: [], body: "" };
+}
+
+/**
+ * Reads the working tree `package.json`, which syncing `main` may have changed after the diagnosis.
+ *
+ * @param {string} repositoryRoot - Repository root.
+ * @returns {import("./artifact.js").PackageManifest} Current manifest.
+ */
+function readWorkingManifest(repositoryRoot) {
+  return JSON.parse(readFileSync(path.join(repositoryRoot, PACKAGE_MANIFEST_FILE), "utf8"));
 }
 
 /**
@@ -553,16 +564,17 @@ async function pushReleaseStep(context) {
  *
  * @param {ReleaseContext} context - Release context.
  * @param {string} version - Version being published.
+ * @param {import("./artifact.js").PackageManifest} manifest - Current working tree `package.json`, whose name `{name}` expands to.
  * @returns {string | null} Verified archive path relative to the root, or `null` to publish the working tree.
  */
-function resolvePublishedArtifact(context, version) {
+function resolvePublishedArtifact(context, version, manifest) {
   const { artifact } = context.config;
 
   if (!artifact) {
     return null;
   }
 
-  const release = { version, packageName: context.state.packageName };
+  const release = { version, packageName: String(manifest.name) };
   const prepared = findPreparedArtifact(context.repositoryRoot, artifact, release);
 
   if (!prepared) {
@@ -576,7 +588,6 @@ function resolvePublishedArtifact(context, version) {
     throw new ReleaseStepError(`La ruta del artefacto ${prepared.path} tiene caracteres no permitidos.`, "Usá rutas con letras, números, ., -, _, @, + y /.");
   }
 
-  const manifest = JSON.parse(readFileSync(path.join(context.repositoryRoot, PACKAGE_MANIFEST_FILE), "utf8"));
   const problems = verifyPreparedArtifact(context.repositoryRoot, prepared, manifest);
 
   if (problems.length > 0) {
@@ -601,7 +612,11 @@ async function publishReleaseStep(context) {
   const { publish } = context.config;
 
   if (publish === NPM_PUBLISHER) {
-    const artifactPath = resolvePublishedArtifact(context, version);
+    // Syncing main may have renamed the package after the diagnosis: publish under the current name.
+    const manifest = readWorkingManifest(context.repositoryRoot);
+    const packageName = String(manifest.name);
+    context.packageName = packageName;
+    const artifactPath = resolvePublishedArtifact(context, version, manifest);
     if (artifactPath) {
       print(paint("gray", `Publicando ${artifactPath}; npm puede pedir la confirmación 2FA en el navegador o un código.`));
     }
@@ -621,7 +636,7 @@ async function publishReleaseStep(context) {
       );
     }
 
-    const npm = await lookupPublishedVersions(context.state.packageName, context.repositoryRoot);
+    const npm = await lookupPublishedVersions(packageName, context.repositoryRoot);
     if (!npm.publishedVersions.includes(version)) {
       print(`${ICON.warning} ${paint("yellow", `npm todavía no muestra ${version}; puede tardar unos segundos en propagarse.`)}`);
     }
@@ -671,7 +686,7 @@ function renderReleaseSummary(context, remoteUrl, startedAt) {
   }
 
   if (context.published && context.config.registry === RELEASE_REGISTRY.npm) {
-    lines.push(`${ICON.success} ${paint("bold", "npm")}       https://www.npmjs.com/package/${context.state.packageName}/v/${version}`);
+    lines.push(`${ICON.success} ${paint("bold", "npm")}       https://www.npmjs.com/package/${context.packageName}/v/${version}`);
   }
 
   const githubRepository = GITHUB_REPOSITORY_PATTERN.exec(remoteUrl)?.[1];
@@ -789,7 +804,7 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   }
 
   /** @type {ReleaseContext} */
-  const context = { repositoryRoot, config, state, options, reader, version: plan.pendingVersion, pushed: false, published: false, commitCount: null };
+  const context = { repositoryRoot, config, state, options, reader, version: plan.pendingVersion, pushed: false, published: false, commitCount: null, packageName: state.packageName };
 
   for (const [index, planStep] of plan.steps.entries()) {
     print(renderStepHeader(index + 1, plan.steps.length, planStep.title));
