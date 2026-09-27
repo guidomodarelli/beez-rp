@@ -196,6 +196,24 @@ export const FILES_SINGLE_CHARACTER_WILDCARD = "?";
 /** `files` glob character that matches any run of characters other than `/`. */
 export const FILES_ANY_CHARACTERS_WILDCARD = "*";
 
+/** Opening bracket of a `files` character class, such as `[ab]` or `[a-z]`. */
+export const FILES_CHARACTER_CLASS_START = "[";
+
+/** Closing bracket of a `files` character class. */
+export const FILES_CHARACTER_CLASS_END = "]";
+
+/** Leading characters that negate a `files` character class (`[!ab]` or `[^ab]`). */
+export const FILES_CHARACTER_CLASS_NEGATIONS = Object.freeze(["!", "^"]);
+
+/** Opening brace of a `files` alternation, such as `{js,mjs}`. */
+export const FILES_BRACE_START = "{";
+
+/** Closing brace of a `files` alternation. */
+export const FILES_BRACE_END = "}";
+
+/** Separator of the alternatives inside a `files` brace. */
+export const FILES_BRACE_SEPARATOR = ",";
+
 /** Suffix npm widens to `/**`, so `dir/*` also includes nested directories. */
 export const FILES_DIRECTORY_CONTENTS_SUFFIX = "/*";
 
@@ -235,6 +253,21 @@ export const PACK_REWRITTEN_DEPENDENCY_SPECIFIER_PATTERN = /^(?:workspace|catalo
 /** Path segments that must never reach a published archive. */
 export const PRIVATE_PACKED_SEGMENT_PATTERN = /^(\..*|node_modules)$/u;
 
+/** Archive path segments that make an entry name ambiguous: parent, current and empty. */
+export const UNSAFE_PACKED_SEGMENTS = Object.freeze(["..", ".", ""]);
+
+/** Dotfile segments, rejected even inside a bundled dependency. */
+export const DOTFILE_SEGMENT_PATTERN = /^\./u;
+
+/** Directory where `npm pack` places the dependencies a manifest declares as bundled. */
+export const BUNDLED_DEPENDENCIES_DIRECTORY = "node_modules";
+
+/** Prefix of a scope segment, such as `@scope` in `node_modules/@scope/pkg`. */
+export const PACKAGE_SCOPE_PREFIX = "@";
+
+/** Manifest fields listing bundled dependencies: an array of names, or `true` for every `dependencies` entry. */
+export const BUNDLED_DEPENDENCIES_FIELDS = Object.freeze(["bundleDependencies", "bundledDependencies"]);
+
 /** Size of a tar header and data block, in bytes. */
 export const TAR_BLOCK_SIZE = 512;
 
@@ -243,15 +276,34 @@ export const TAR_HEADER_FIELD = Object.freeze({
   name: [0, 100],
   size: [124, 136],
   type: [156, 157],
+  linkName: [157, 257],
   prefix: [345, 500],
 });
 
-/** Tar entry types: regular files (`0` or NUL), and PAX or GNU headers carrying long names. */
+/**
+ * Tar entry types: regular files (`0`, NUL or contiguous `7`), links, directories, and the
+ * PAX or GNU headers that carry long names or link targets for the next entry.
+ */
 export const TAR_ENTRY_TYPE = Object.freeze({
   file: "0",
   legacyFile: "\0",
+  contiguousFile: "7",
+  hardLink: "1",
+  symbolicLink: "2",
+  directory: "5",
   paxHeader: "x",
+  paxGlobalHeader: "g",
   gnuLongName: "L",
+  gnuLongLinkName: "K",
+});
+
+/** Kinds of archive entries reported by the tar reader; only files and directories are publishable. */
+export const ARCHIVE_ENTRY_KIND = Object.freeze({
+  file: "file",
+  directory: "directory",
+  hardLink: "hard-link",
+  symbolicLink: "symbolic-link",
+  unsupported: "unsupported",
 });
 
 /** Trailing NUL padding of a GNU long-name record. */
@@ -259,6 +311,15 @@ export const TRAILING_NUL_PATTERN = /\0+$/u;
 
 /** PAX record key holding an entry path longer than the header allows. */
 export const PAX_PATH_KEY = "path";
+
+/** PAX record key holding a link target longer than the header allows. */
+export const PAX_LINK_PATH_KEY = "linkpath";
+
+/** Separator between the byte length and the `key=value` text of a PAX record. */
+export const PAX_LENGTH_SEPARATOR = " ";
+
+/** Newline that terminates every PAX record. */
+export const PAX_RECORD_TERMINATOR_PATTERN = /\n$/u;
 
 /** npm registry credential line; npm expands `${NPM_TOKEN}` from the environment, so the token never reaches the disk. */
 export const NPM_AUTH_CONFIG_LINE = "//registry.npmjs.org/:_authToken=${NPM_TOKEN}\n";

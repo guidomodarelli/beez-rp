@@ -12,11 +12,13 @@
  * declare the same digest.
  *
  * Before publishing, the archive is read without external tools: every entry
- * must stay under `package/`, private paths (dotfiles, `node_modules`) are
- * rejected, files outside the manifest `files` globs are rejected (except the
- * files npm always packs, such as `main` and `bin`), the packed `package.json`
- * must keep the repository name, version and publish-critical fields, and every
- * public entrypoint of the packed manifest must be present.
+ * must stay under `package/` and appear once, only regular files and directories
+ * are accepted (links and other entry types are rejected), private paths
+ * (dotfiles, `node_modules` except declared bundled dependencies) are rejected,
+ * files outside the manifest `files` globs are rejected (except the files npm
+ * always packs, such as `main` and `bin`), the packed `package.json` must keep
+ * the repository name, version and publish-critical fields, and every public
+ * entrypoint of the packed manifest (including `module`) must be present.
  *
  * @module create-version/artifact
  */
@@ -28,11 +30,21 @@ import { gunzipSync } from "node:zlib";
 
 import {
   ALWAYS_PACKED_FILE_PATTERN,
+  ARCHIVE_ENTRY_KIND,
   ARTIFACT_NAME_PLACEHOLDER,
   ARTIFACT_SEGMENT_WILDCARD,
   ARTIFACT_SHA256_PLACEHOLDER,
   ARTIFACT_VERSION_PLACEHOLDER,
+  BUNDLED_DEPENDENCIES_DIRECTORY,
+  BUNDLED_DEPENDENCIES_FIELDS,
+  DOTFILE_SEGMENT_PATTERN,
   FILES_ANY_CHARACTERS_WILDCARD,
+  FILES_BRACE_END,
+  FILES_BRACE_SEPARATOR,
+  FILES_BRACE_START,
+  FILES_CHARACTER_CLASS_END,
+  FILES_CHARACTER_CLASS_NEGATIONS,
+  FILES_CHARACTER_CLASS_START,
   FILES_DIRECTORY_CONTENTS_SUFFIX,
   FILES_GLOBSTAR,
   FILES_NEGATION_PREFIX,
@@ -43,8 +55,12 @@ import {
   PACKAGE_ROOT_PREFIX_PATTERN,
   PACKAGE_SCOPE_PATTERN,
   PACKED_ROOT_DIRECTORY,
+  PACKAGE_SCOPE_PREFIX,
   PACKED_SCOPE_REPLACEMENT,
+  PAX_LENGTH_SEPARATOR,
+  PAX_LINK_PATH_KEY,
   PAX_PATH_KEY,
+  PAX_RECORD_TERMINATOR_PATTERN,
   PRIVATE_PACKED_SEGMENT_PATTERN,
   PUBLISH_CRITICAL_DEPENDENCY_FIELDS,
   PUBLISH_CRITICAL_MANIFEST_FIELDS,
@@ -55,17 +71,23 @@ import {
   TAR_HEADER_FIELD,
   TRAILING_NUL_PATTERN,
   TRAILING_SLASH_PATTERN,
+  UNSAFE_PACKED_SEGMENTS,
 } from "../constants/create-version.js";
 
 /**
  * @typedef {{ path: string, expectedSha256: string | null }} PreparedArtifact
- * @typedef {{ name: string, content: Buffer }} ArchiveEntry
+ * @typedef {{ name: string, kind: string, type: string, linkTarget: string | null, content: Buffer }} ArchiveEntry
+ *   Archive entry: `kind` is one of `ARCHIVE_ENTRY_KIND`, `type` the raw tar type flag, `linkTarget`
+ *   the target of a link entry and `content` the data of a regular file (empty otherwise).
  * @typedef {Record<string, unknown>} PackageManifest
  * @typedef {{ negated: boolean, matcher: RegExp }} FilesRule
  */
 
 /** Characters with regular-expression meaning, escaped in literal segment text. */
 const REGEXP_SPECIAL_CHARACTERS_PATTERN = /[.+?^${}()|[\]\\]/gu;
+
+/** Characters escaped inside a compiled character class, so the class body keeps only literals and ranges. */
+const CHARACTER_CLASS_SPECIAL_CHARACTERS_PATTERN = /[\\[\]^]/gu;
 
 /** Expression source of any run of characters inside one path segment. */
 const SEGMENT_CHARACTERS_SOURCE = "[^/]*";
@@ -212,25 +234,50 @@ function readHeaderField(header, [start, end]) {
 }
 
 /**
- * Extracts the `path` record of a PAX extended header.
+ * Parses the records of a PAX extended header.
  *
- * @param {Buffer} content - PAX header data (`<length> <key>=<value>\n` records).
- * @returns {string | null} Long entry path, when declared.
+ * @param {Buffer} content - PAX header data (`<length> <key>=<value>\n` records, lengths in bytes).
+ * @returns {Map<string, string>} Record values by key; a later record overrides an earlier one.
  */
-function readPaxPath(content) {
-  for (const record of content.toString("utf8").split("\n")) {
-    const separator = record.indexOf(" ");
-    const [key, ...value] = record.slice(separator + 1).split("=");
-    if (key === PAX_PATH_KEY) return value.join("=");
+function readPaxRecords(content) {
+  /** @type {Map<string, string>} */
+  const records = new Map();
+  for (let offset = 0; offset < content.length; ) {
+    const lengthSeparator = content.indexOf(PAX_LENGTH_SEPARATOR, offset);
+    const recordLength = Number.parseInt(content.subarray(offset, lengthSeparator).toString("utf8"), 10);
+    if (lengthSeparator === -1 || !Number.isInteger(recordLength) || recordLength <= 0) break;
+
+    const record = content.subarray(lengthSeparator + 1, offset + recordLength).toString("utf8").replace(PAX_RECORD_TERMINATOR_PATTERN, "");
+    const keySeparator = record.indexOf("=");
+    if (keySeparator !== -1) records.set(record.slice(0, keySeparator), record.slice(keySeparator + 1));
+    offset += recordLength;
   }
-  return null;
+  return records;
 }
 
 /**
- * Lists the regular files of a `.tgz` archive with their contents, without external tools.
+ * Classifies a tar entry type; only regular files and directories can be published.
+ *
+ * @param {string} type - Tar type flag.
+ * @returns {string} One of {@link ARCHIVE_ENTRY_KIND}.
+ */
+function toArchiveEntryKind(type) {
+  if (type === TAR_ENTRY_TYPE.file || type === TAR_ENTRY_TYPE.legacyFile || type === TAR_ENTRY_TYPE.contiguousFile) return ARCHIVE_ENTRY_KIND.file;
+  if (type === TAR_ENTRY_TYPE.directory) return ARCHIVE_ENTRY_KIND.directory;
+  if (type === TAR_ENTRY_TYPE.hardLink) return ARCHIVE_ENTRY_KIND.hardLink;
+  if (type === TAR_ENTRY_TYPE.symbolicLink) return ARCHIVE_ENTRY_KIND.symbolicLink;
+  return ARCHIVE_ENTRY_KIND.unsupported;
+}
+
+/**
+ * Lists every entry of a `.tgz` archive, without external tools: regular files with their
+ * contents, and directories, links and any other entry type with their names (and link
+ * targets), so the verifier can reject what npm would publish but the checks could not see.
+ * PAX and GNU long names and link targets are applied to the entry they precede; a PAX global
+ * header that renames entries is reported as an unsupported entry.
  *
  * @param {Buffer} archive - Gzipped tar archive.
- * @returns {ArchiveEntry[]} Files in archive order.
+ * @returns {ArchiveEntry[]} Entries in archive order; only files carry content.
  * @throws {Error} When the archive is not a readable gzip tar.
  */
 export function readTarballEntries(archive) {
@@ -239,6 +286,8 @@ export function readTarballEntries(archive) {
   const entries = [];
   /** @type {string | null} */
   let pendingLongName = null;
+  /** @type {string | null} */
+  let pendingLongLinkTarget = null;
 
   for (let offset = 0; offset + TAR_BLOCK_SIZE <= tar.length; ) {
     const header = tar.subarray(offset, offset + TAR_BLOCK_SIZE);
@@ -249,16 +298,39 @@ export function readTarballEntries(archive) {
     const content = tar.subarray(offset + TAR_BLOCK_SIZE, offset + TAR_BLOCK_SIZE + size);
     const prefix = readHeaderField(header, TAR_HEADER_FIELD.prefix);
     const shortName = readHeaderField(header, TAR_HEADER_FIELD.name);
+    const headerName = prefix ? `${prefix}/${shortName}` : shortName;
 
     if (type === TAR_ENTRY_TYPE.paxHeader) {
-      pendingLongName = readPaxPath(content);
+      const records = readPaxRecords(content);
+      pendingLongName = records.get(PAX_PATH_KEY) ?? pendingLongName;
+      pendingLongLinkTarget = records.get(PAX_LINK_PATH_KEY) ?? pendingLongLinkTarget;
+    } else if (type === TAR_ENTRY_TYPE.paxGlobalHeader) {
+      const records = readPaxRecords(content);
+      if (records.has(PAX_PATH_KEY) || records.has(PAX_LINK_PATH_KEY)) {
+        entries.push({
+          name: records.get(PAX_PATH_KEY) ?? headerName,
+          kind: ARCHIVE_ENTRY_KIND.unsupported,
+          type,
+          linkTarget: records.get(PAX_LINK_PATH_KEY) ?? null,
+          content: Buffer.alloc(0),
+        });
+      }
     } else if (type === TAR_ENTRY_TYPE.gnuLongName) {
       pendingLongName = content.toString("utf8").replace(TRAILING_NUL_PATTERN, "");
+    } else if (type === TAR_ENTRY_TYPE.gnuLongLinkName) {
+      pendingLongLinkTarget = content.toString("utf8").replace(TRAILING_NUL_PATTERN, "");
     } else {
-      if (type === TAR_ENTRY_TYPE.file || type === TAR_ENTRY_TYPE.legacyFile) {
-        entries.push({ name: pendingLongName ?? (prefix ? `${prefix}/${shortName}` : shortName), content: Buffer.from(content) });
-      }
+      const kind = toArchiveEntryKind(type);
+      const isLink = kind === ARCHIVE_ENTRY_KIND.hardLink || kind === ARCHIVE_ENTRY_KIND.symbolicLink;
+      entries.push({
+        name: pendingLongName ?? headerName,
+        kind,
+        type,
+        linkTarget: isLink ? (pendingLongLinkTarget ?? readHeaderField(header, TAR_HEADER_FIELD.linkName)) : null,
+        content: kind === ARCHIVE_ENTRY_KIND.file ? Buffer.from(content) : Buffer.alloc(0),
+      });
       pendingLongName = null;
+      pendingLongLinkTarget = null;
     }
 
     offset += TAR_BLOCK_SIZE + Math.ceil(size / TAR_BLOCK_SIZE) * TAR_BLOCK_SIZE;
@@ -302,33 +374,116 @@ function collectMandatoryFiles(manifest) {
 }
 
 /**
- * Compiles one `files` glob, anchored at the package root: `*` and `?` stay inside a segment and `**` spans directories.
+ * Expands the brace alternations of a `files` glob like minimatch: `dist/*.{js,mjs}` becomes
+ * `dist/*.js` and `dist/*.mjs`. Braces without a top-level `,` or without a closing brace stay literal.
+ *
+ * @param {string} pattern - `files` entry without its negation prefix.
+ * @returns {string[]} Patterns without alternations, in expansion order.
+ */
+function expandFilesBraces(pattern) {
+  for (let start = pattern.indexOf(FILES_BRACE_START); start !== -1; start = pattern.indexOf(FILES_BRACE_START, start + 1)) {
+    let depth = 0;
+    /** @type {number[]} */
+    const separators = [];
+
+    for (let index = start; index < pattern.length; index++) {
+      const character = pattern[index];
+      if (character === FILES_BRACE_START) depth++;
+      else if (character === FILES_BRACE_SEPARATOR && depth === 1) separators.push(index);
+      else if (character === FILES_BRACE_END && --depth === 0) {
+        if (separators.length === 0) break;
+        const boundaries = [start, ...separators, index];
+        const alternatives = boundaries.slice(1).map((boundary, alternativeIndex) => pattern.slice(boundaries[alternativeIndex] + 1, boundary));
+        return alternatives.flatMap((alternative) => expandFilesBraces(`${pattern.slice(0, start)}${alternative}${pattern.slice(index + 1)}`));
+      }
+    }
+  }
+  return [pattern];
+}
+
+/**
+ * Reads a character class (`[ab]`, `[a-z]`, `[!ab]` or `[^ab]`) that starts at `startIndex`.
+ * A leading `]` is literal, like in minimatch; a class never matches `/`.
+ *
+ * @param {string} segment - Glob segment, without `/`.
+ * @param {number} startIndex - Index of the opening `[`.
+ * @returns {{ source: string, endIndex: number } | null} Expression source and index of the closing `]`,
+ *   or `null` when the bracket does not open a valid class and must be matched literally.
+ */
+function readCharacterClass(segment, startIndex) {
+  let bodyStart = startIndex + 1;
+  const isNegated = FILES_CHARACTER_CLASS_NEGATIONS.includes(segment[bodyStart]);
+  if (isNegated) bodyStart++;
+
+  const endIndex = segment.indexOf(FILES_CHARACTER_CLASS_END, segment[bodyStart] === FILES_CHARACTER_CLASS_END ? bodyStart + 1 : bodyStart);
+  if (endIndex === -1) return null;
+
+  const body = segment.slice(bodyStart, endIndex).replace(CHARACTER_CLASS_SPECIAL_CHARACTERS_PATTERN, "\\$&");
+  const source = isNegated ? `[^/${body}]` : `[${body}]`;
+  try {
+    new RegExp(source, "u");
+  } catch {
+    // An invalid range such as `[z-a]` matches nothing in minimatch; keep it literal instead of failing the whole verification.
+    return null;
+  }
+  return { source, endIndex };
+}
+
+/**
+ * Compiles one glob segment: `*` and `?` stay inside the segment and `[...]` is a character class.
+ *
+ * @param {string} segment - Glob segment, without `/`.
+ * @returns {string} Expression source.
+ */
+function compileFilesSegment(segment) {
+  let source = "";
+  for (let index = 0; index < segment.length; index++) {
+    const character = segment[index];
+    const characterClass = character === FILES_CHARACTER_CLASS_START ? readCharacterClass(segment, index) : null;
+    if (characterClass) {
+      source += characterClass.source;
+      index = characterClass.endIndex;
+    } else if (character === FILES_ANY_CHARACTERS_WILDCARD) {
+      source += SEGMENT_CHARACTERS_SOURCE;
+    } else if (character === FILES_SINGLE_CHARACTER_WILDCARD) {
+      source += SEGMENT_CHARACTER_SOURCE;
+    } else {
+      source += character.replace(REGEXP_SPECIAL_CHARACTERS_PATTERN, "\\$&");
+    }
+  }
+  return source;
+}
+
+/**
+ * Compiles one brace-free `files` glob, anchored at the package root: `**` spans directories.
+ *
+ * @param {string} pattern - Brace-free `files` pattern.
+ * @returns {string} Expression source, without anchors.
+ */
+function compileFilesPatternSource(pattern) {
+  let normalized = toPackedPath(pattern);
+  if (normalized.endsWith(FILES_DIRECTORY_CONTENTS_SUFFIX)) normalized += ARTIFACT_SEGMENT_WILDCARD;
+  const segments = normalized.replace(TRAILING_SLASH_PATTERN, "").split("/");
+
+  return segments
+    .map((segment, index) => {
+      const isLast = index === segments.length - 1;
+      if (segment === FILES_GLOBSTAR) return isLast ? DIRECTORY_CONTENTS_SOURCE : DIRECTORIES_SOURCE;
+      const segmentSource = compileFilesSegment(segment);
+      return isLast ? segmentSource : `${segmentSource}/`;
+    })
+    .join("");
+}
+
+/**
+ * Compiles one `files` glob with the syntax npm accepts: `*`, `?`, `**`, character classes and brace alternations.
  *
  * @param {string} pattern - `files` entry without its negation prefix.
  * @returns {RegExp} Expression matched against packed paths and their parent directories.
  */
 function compileFilesPattern(pattern) {
-  let normalized = toPackedPath(pattern);
-  if (normalized.endsWith(FILES_DIRECTORY_CONTENTS_SUFFIX)) normalized += ARTIFACT_SEGMENT_WILDCARD;
-  const segments = normalized.replace(TRAILING_SLASH_PATTERN, "").split("/");
-
-  const source = segments
-    .map((segment, index) => {
-      const isLast = index === segments.length - 1;
-      if (segment === FILES_GLOBSTAR) return isLast ? DIRECTORY_CONTENTS_SOURCE : DIRECTORIES_SOURCE;
-
-      const segmentSource = [...segment]
-        .map((character) => {
-          if (character === FILES_ANY_CHARACTERS_WILDCARD) return SEGMENT_CHARACTERS_SOURCE;
-          if (character === FILES_SINGLE_CHARACTER_WILDCARD) return SEGMENT_CHARACTER_SOURCE;
-          return character.replace(REGEXP_SPECIAL_CHARACTERS_PATTERN, "\\$&");
-        })
-        .join("");
-      return isLast ? segmentSource : `${segmentSource}/`;
-    })
-    .join("");
-
-  return new RegExp(`^${source}$`, "u");
+  const alternatives = expandFilesBraces(pattern).map(compileFilesPatternSource);
+  return new RegExp(`^(?:${alternatives.join("|")})$`, "u");
 }
 
 /**
@@ -470,13 +625,64 @@ function findManifestDrift(packed, manifest) {
 }
 
 /**
- * Parses the `package.json` packed in the archive.
+ * Checks that an archive entry name stays under `package/` without ambiguous segments.
  *
- * @param {ArchiveEntry[]} entries - Archive files.
+ * @param {string} entryName - Entry name without trailing `/`.
+ * @returns {boolean} Whether the name has no `\`, `..`, `.` or empty segment.
+ */
+function isSafePackedEntryName(entryName) {
+  if (!entryName.startsWith(PACKED_ROOT_DIRECTORY) || entryName.includes("\\")) return false;
+  return entryName.split("/").every((segment) => !UNSAFE_PACKED_SEGMENTS.includes(segment));
+}
+
+/**
+ * Collects the dependencies a manifest declares as bundled, which `npm pack` places under `node_modules`.
+ *
+ * @param {PackageManifest} manifest - Manifest being published.
+ * @returns {Set<string>} Bundled dependency names; `true` bundles every `dependencies` entry.
+ */
+function collectBundledDependencies(manifest) {
+  /** @type {Set<string>} */
+  const names = new Set();
+  const dependencies = manifest.dependencies;
+
+  for (const field of BUNDLED_DEPENDENCIES_FIELDS) {
+    const declared = manifest[field];
+    if (declared === true && dependencies && typeof dependencies === "object") {
+      for (const dependencyName of Object.keys(dependencies)) names.add(dependencyName);
+    } else if (Array.isArray(declared)) {
+      for (const dependencyName of declared) if (typeof dependencyName === "string") names.add(dependencyName);
+    }
+  }
+  return names;
+}
+
+/**
+ * Tells whether a packed file belongs to a bundled dependency: `node_modules/<name>/...`
+ * or `node_modules/@scope/<name>/...`, with `<name>` declared as bundled.
+ *
+ * @param {string[]} segments - Segments of the path relative to `package/`.
+ * @param {Set<string>} bundledDependencies - Names from {@link collectBundledDependencies}.
+ * @returns {boolean} Whether npm packs it as part of a bundled dependency.
+ */
+function isBundledDependencyPath(segments, bundledDependencies) {
+  if (segments[0] !== BUNDLED_DEPENDENCIES_DIRECTORY) return false;
+  const nameSegmentCount = segments[1]?.startsWith(PACKAGE_SCOPE_PREFIX) ? 2 : 1;
+  const dependencyName = segments.slice(1, 1 + nameSegmentCount).join("/");
+  return segments.length > 1 + nameSegmentCount && bundledDependencies.has(dependencyName);
+}
+
+/**
+ * Parses the `package.json` packed in the archive. When the archive repeats it (rejected
+ * separately), the last one is read, because it is the one npm keeps.
+ *
+ * @param {ArchiveEntry[]} entries - Archive entries.
  * @returns {{ packed: PackageManifest | null, problem: string | null }} Parsed manifest, or the reason it is unusable.
  */
 function readPackedManifest(entries) {
-  const packedManifestEntry = entries.find((entry) => entry.name === `${PACKED_ROOT_DIRECTORY}${PACKAGE_MANIFEST_FILE}`);
+  const packedManifestEntry = entries.findLast(
+    (entry) => entry.kind === ARCHIVE_ENTRY_KIND.file && entry.name === `${PACKED_ROOT_DIRECTORY}${PACKAGE_MANIFEST_FILE}`
+  );
   if (!packedManifestEntry) return { packed: null, problem: `falta ${PACKAGE_MANIFEST_FILE} en el tarball` };
 
   try {
@@ -514,27 +720,53 @@ export function findArchiveProblems(entries, manifest) {
   const files = Array.isArray(publishedManifest.files) ? publishedManifest.files.filter((file) => typeof file === "string") : null;
   const filesRules = files ? compileFilesRules(files) : null;
   const mandatoryFiles = collectMandatoryFiles(publishedManifest);
+  const bundledDependencies = collectBundledDependencies(publishedManifest);
   const packedPaths = new Set();
+  /** @type {Set<string>} */
+  const seenNames = new Set();
 
-  for (const { name } of entries) {
-    if (!name.startsWith(PACKED_ROOT_DIRECTORY) || name.includes("\\") || name.split("/").includes("..")) {
+  for (const { name, kind, type, linkTarget } of entries) {
+    const normalizedName = name.replace(TRAILING_SLASH_PATTERN, "");
+    // npm keeps the last entry of a repeated path, so every earlier copy would escape these checks.
+    if (seenNames.has(normalizedName)) {
+      problems.push(`ruta repetida en el tarball: ${name}`);
+      continue;
+    }
+    seenNames.add(normalizedName);
+
+    if (kind === ARCHIVE_ENTRY_KIND.directory && normalizedName === PACKED_ROOT_DIRECTORY.replace(TRAILING_SLASH_PATTERN, "")) continue;
+    if (!isSafePackedEntryName(normalizedName)) {
       problems.push(`ruta inválida en el tarball: ${name}`);
       continue;
     }
+    if (kind === ARCHIVE_ENTRY_KIND.directory) continue;
+    if (kind !== ARCHIVE_ENTRY_KIND.file) {
+      problems.push(`entrada no soportada en el tarball (${kind}, tipo ${JSON.stringify(type)}): ${name}${linkTarget === null ? "" : ` -> ${linkTarget}`}`);
+      continue;
+    }
 
-    const packedPath = name.slice(PACKED_ROOT_DIRECTORY.length);
+    const packedPath = normalizedName.slice(PACKED_ROOT_DIRECTORY.length);
+    const segments = packedPath.split("/");
     packedPaths.add(packedPath);
 
-    if (packedPath.split("/").some((segment) => PRIVATE_PACKED_SEGMENT_PATTERN.test(segment))) {
+    if (isBundledDependencyPath(segments, bundledDependencies)) {
+      // npm packs bundled dependencies whatever the root `files` says, so only their dotfiles are rejected.
+      if (segments.some((segment) => DOTFILE_SEGMENT_PATTERN.test(segment))) problems.push(`archivo privado en el tarball: ${packedPath}`);
+    } else if (segments.some((segment) => PRIVATE_PACKED_SEGMENT_PATTERN.test(segment))) {
       problems.push(`archivo privado en el tarball: ${packedPath}`);
     } else if (filesRules && !isDeclaredFile(packedPath, filesRules, mandatoryFiles)) {
       problems.push(`archivo fuera de "files" en el tarball: ${packedPath}`);
     }
   }
 
-  const entrypoints = [publishedManifest.exports, publishedManifest.main, publishedManifest.types, publishedManifest.typings, publishedManifest.bin].flatMap(
-    collectEntrypoints
-  );
+  const entrypoints = [
+    publishedManifest.exports,
+    publishedManifest.main,
+    publishedManifest.module,
+    publishedManifest.types,
+    publishedManifest.typings,
+    publishedManifest.bin,
+  ].flatMap(collectEntrypoints);
   for (const entrypoint of new Set(entrypoints)) {
     if (!packedPaths.has(entrypoint)) problems.push(`falta el entrypoint público ${entrypoint} en el tarball`);
   }

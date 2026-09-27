@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { gzipSync } from "node:zlib";
 
 import {
   computeSha256,
@@ -67,6 +68,79 @@ function storeWithChecksum(root, archive, version = MANIFEST.version) {
   const stored = `${relativeDirectory}/${MANIFEST.name}-${version}.tgz`;
   renameSync(path.join(root, archive), path.join(root, stored));
   return stored;
+}
+
+/**
+ * @typedef {{ name: string, type?: string, content?: string, linkTarget?: string }} TarFixtureEntry
+ */
+
+/**
+ * Builds one 512-byte ustar header with a valid checksum.
+ *
+ * @param {{ name: string, type: string, size: number, linkTarget?: string }} header - Header fields.
+ * @returns {Buffer} Header block.
+ */
+function tarHeader({ name, type, size, linkTarget = "" }) {
+  const block = Buffer.alloc(512);
+  block.write(name, 0, 100, "utf8");
+  block.write("0000644\0", 100, "ascii");
+  block.write("0000000\0", 108, "ascii");
+  block.write("0000000\0", 116, "ascii");
+  block.write(`${size.toString(8).padStart(11, "0")}\0`, 124, "ascii");
+  block.write("00000000000\0", 136, "ascii");
+  block.write("        ", 148, "ascii");
+  block.write(type, 156, "ascii");
+  block.write(linkTarget, 157, 100, "utf8");
+  block.write("ustar\0" + "00", 257, "ascii");
+  const checksum = block.reduce((sum, byte) => sum + byte, 0);
+  block.write(`${checksum.toString(8).padStart(6, "0")}\0 `, 148, "ascii");
+  return block;
+}
+
+/**
+ * Pads data to whole tar blocks.
+ *
+ * @param {Buffer} data - Entry data.
+ * @returns {Buffer} Data followed by NUL padding.
+ */
+function padToBlock(data) {
+  return Buffer.concat([data, Buffer.alloc((512 - (data.length % 512)) % 512)]);
+}
+
+/**
+ * Writes a gzipped tar with exact entries. `tar -czf` cannot produce repeated paths or links to
+ * arbitrary targets portably (Windows has no symlinks without privileges), so the tests that need
+ * them write the ustar format directly: 512-byte headers, data padded to 512 bytes and two empty
+ * blocks at the end, compressed with `node:zlib`.
+ *
+ * @param {TarFixtureEntry[]} entries - Entries in archive order; `type` defaults to a regular file.
+ * @returns {Buffer} Gzipped tar archive.
+ */
+function writeTarFixture(entries) {
+  const blocks = entries.flatMap(({ name, type = "0", content = "", linkTarget }) => {
+    const data = Buffer.from(content, "utf8");
+    return [tarHeader({ name, type, size: data.length, linkTarget }), padToBlock(data)];
+  });
+  return gzipSync(Buffer.concat([...blocks, Buffer.alloc(1024)]));
+}
+
+/**
+ * Builds a PAX extended-header record (`<length> <key>=<value>\n`, length in bytes including itself).
+ *
+ * @param {string} key - Record key.
+ * @param {string} value - Record value.
+ * @returns {string} Record text.
+ */
+function paxRecord(key, value) {
+  const body = ` ${key}=${value}\n`;
+  let length = body.length + 1;
+  while (`${length}${body}`.length !== length) length++;
+  return `${length}${body}`;
+}
+
+/** @returns {TarFixtureEntry[]} The publishable package as exact tar entries. */
+function validTarEntries() {
+  return Object.entries(validPackage()).map(([relativePath, content]) => ({ name: `package/${relativePath}`, content }));
 }
 
 /** @returns {Record<string, string>} A publishable package. */
@@ -154,6 +228,139 @@ describe("prepared artifact verification", () => {
     expect(artifact?.path).toBe(stored);
     return verifyPreparedArtifact(root, /** @type {import("../../src/create-version/artifact.js").PreparedArtifact} */ (artifact), manifest);
   }
+
+  /**
+   * @param {Buffer} archive - Gzipped tar written by {@link writeTarFixture}.
+   * @param {Record<string, unknown>} [manifest] - Repository manifest.
+   * @returns {string[]} Verification problems.
+   */
+  function verifyArchive(archive, manifest = MANIFEST) {
+    const root = createRoot();
+    writeFileSync(path.join(root, "archive.tgz"), archive);
+    storeWithChecksum(root, "archive.tgz");
+    const artifact = findPreparedArtifact(root, CHECKSUM_ARCHIVE_PATTERN, { version: MANIFEST.version, packageName: MANIFEST.name });
+    return verifyPreparedArtifact(root, /** @type {import("../../src/create-version/artifact.js").PreparedArtifact} */ (artifact), manifest);
+  }
+
+  it("should accept an exact tar archive of the valid package, so the fixture writer is sound", () => {
+    expect(verifyArchive(writeTarFixture([{ name: "package/", type: "5" }, ...validTarEntries()]))).toEqual([]);
+  });
+
+  it("should reject repeated archive paths, including a second package.json that npm would publish", () => {
+    const evilManifest = JSON.stringify({ ...MANIFEST, name: "evil-fixture", version: "9.9.9" });
+    const withSecondManifest = writeTarFixture([...validTarEntries(), { name: "package/package.json", content: evilManifest }]);
+    const withRepeatedFile = writeTarFixture([...validTarEntries(), { name: "package/dist/index.js", content: "steal();" }]);
+
+    expect(verifyArchive(withSecondManifest)).toEqual(
+      expect.arrayContaining([expect.stringContaining("ruta repetida en el tarball: package/package.json"), expect.stringContaining("evil-fixture@9.9.9")])
+    );
+    expect(verifyArchive(withRepeatedFile)).toEqual([expect.stringContaining("ruta repetida en el tarball: package/dist/index.js")]);
+  });
+
+  it("should reject hard links, symbolic links and other non-file entries instead of skipping them", () => {
+    const hardLink = { name: "package/secret.js", type: "1", linkTarget: "package/dist/index.js" };
+    const symbolicLink = { name: "package/dist/escape.js", type: "2", linkTarget: "../../../../etc/passwd" };
+    const fifo = { name: "package/dist/pipe", type: "6" };
+
+    expect(verifyArchive(writeTarFixture([...validTarEntries(), hardLink]))).toEqual([
+      expect.stringContaining("entrada no soportada en el tarball (hard-link"),
+    ]);
+    expect(verifyArchive(writeTarFixture([...validTarEntries(), symbolicLink]))).toEqual([
+      expect.stringContaining("package/dist/escape.js -> ../../../../etc/passwd"),
+    ]);
+    expect(verifyArchive(writeTarFixture([...validTarEntries(), fifo]))).toEqual([expect.stringContaining("entrada no soportada en el tarball (unsupported")]);
+    expect(readTarballEntries(writeTarFixture([hardLink])).map(({ name, kind, linkTarget }) => ({ name, kind, linkTarget }))).toEqual([
+      { name: "package/secret.js", kind: "hard-link", linkTarget: "package/dist/index.js" },
+    ]);
+  });
+
+  it("should apply PAX and GNU long names and link targets to link entries, and reject renaming PAX global headers", () => {
+    const longName = `package/${"nested/".repeat(20)}link.js`;
+    const longTarget = `package/${"target/".repeat(20)}index.js`;
+    const paxLink = [
+      { name: "PaxHeader/link", type: "x", content: paxRecord("path", longName) + paxRecord("linkpath", longTarget) },
+      { name: "package/short", type: "2", linkTarget: "short" },
+    ];
+    const gnuLink = [
+      { name: "././@LongLink", type: "L", content: `${longName}\0` },
+      { name: "././@LongLink", type: "K", content: `${longTarget}\0` },
+      { name: "package/short", type: "1", linkTarget: "short" },
+    ];
+    const renamingGlobalHeader = { name: "pax_global_header", type: "g", content: paxRecord("path", "package/renamed.js") };
+
+    for (const linkEntries of [paxLink, gnuLink]) {
+      expect(readTarballEntries(writeTarFixture(linkEntries)).map(({ name, linkTarget }) => ({ name, linkTarget }))).toEqual([{ name: longName, linkTarget: longTarget }]);
+      expect(verifyArchive(writeTarFixture([...validTarEntries(), ...linkEntries]))).toEqual([expect.stringContaining(`${longName} -> ${longTarget}`)]);
+    }
+    expect(verifyArchive(writeTarFixture([renamingGlobalHeader, ...validTarEntries()]))).toEqual([
+      expect.stringContaining("entrada no soportada en el tarball (unsupported"),
+    ]);
+  });
+
+  it("should ignore directory entries but reject unsafe directory names", () => {
+    const withDirectories = [{ name: "package/", type: "5" }, { name: "package/dist/", type: "5" }, ...validTarEntries()];
+
+    expect(verifyArchive(writeTarFixture(withDirectories))).toEqual([]);
+    expect(verifyArchive(writeTarFixture([...withDirectories, { name: "package/../outside/", type: "5" }]))).toEqual([
+      expect.stringContaining("ruta inválida en el tarball: package/../outside/"),
+    ]);
+    expect(verifyArchive(writeTarFixture([...validTarEntries(), { name: "package/./dist/index.js", content: "steal();" }]))).toEqual([
+      expect.stringContaining("ruta inválida en el tarball: package/./dist/index.js"),
+    ]);
+  });
+
+  it("should match files globs with character classes, negated classes, ranges and brace alternations like npm", () => {
+    const globManifest = { ...MANIFEST, files: ["dist/[ab].js", "dist/index.*", "lib/[!xv]*.js", "lib/v[0-9].js", "types/*.{d.ts,d.mts}", "extra/[^.]*"] };
+    const globPackage = {
+      ...validPackage(),
+      "package.json": JSON.stringify(globManifest),
+      "dist/a.js": "export {};",
+      "dist/b.js": "export {};",
+      "lib/main.js": "export {};",
+      "lib/v2.js": "export {};",
+      "types/index.d.ts": "export {};",
+      "types/index.d.mts": "export {};",
+      "extra/notes.txt": "notes",
+    };
+
+    expect(verify(globPackage, globManifest)).toEqual([]);
+    expect(verify({ ...globPackage, "dist/c.js": "export {};" }, globManifest)).toEqual([expect.stringContaining('fuera de "files" en el tarball: dist/c.js')]);
+    expect(verify({ ...globPackage, "lib/x-internal.js": "export {};" }, globManifest)).toEqual([expect.stringContaining("lib/x-internal.js")]);
+    expect(verify({ ...globPackage, "lib/va.js": "export {};" }, globManifest)).toEqual([expect.stringContaining("lib/va.js")]);
+    expect(verify({ ...globPackage, "types/index.d.cts": "export {};" }, globManifest)).toEqual([expect.stringContaining("types/index.d.cts")]);
+  });
+
+  it("should require the module entrypoint of the packed manifest", () => {
+    const moduleManifest = { ...MANIFEST, module: "./dist/index.mjs" };
+    const modulePackage = { ...validPackage(), "package.json": JSON.stringify(moduleManifest) };
+
+    expect(verify(modulePackage, moduleManifest)).toEqual([expect.stringContaining("falta el entrypoint público dist/index.mjs")]);
+    expect(verify({ ...modulePackage, "dist/index.mjs": "export {};" }, moduleManifest)).toEqual([]);
+  });
+
+  it("should accept declared bundled dependencies under node_modules and reject any other node_modules file", () => {
+    const bundledManifest = { ...MANIFEST, dependencies: { foo: "^1.0.0", "@scope/bar": "^2.0.0" }, bundleDependencies: ["foo", "@scope/bar"] };
+    const bundledPackage = {
+      ...validPackage(),
+      "package.json": JSON.stringify(bundledManifest),
+      "node_modules/foo/index.js": "module.exports = {};",
+      "node_modules/foo/node_modules/nested/index.js": "module.exports = {};",
+      "node_modules/@scope/bar/index.js": "module.exports = {};",
+    };
+    const allBundledManifest = { ...MANIFEST, dependencies: { foo: "^1.0.0" }, bundledDependencies: true };
+
+    expect(verify(bundledPackage, bundledManifest)).toEqual([]);
+    expect(verify({ ...bundledPackage, "node_modules/other/index.js": "steal();" }, bundledManifest)).toEqual([
+      expect.stringContaining("archivo privado en el tarball: node_modules/other/index.js"),
+    ]);
+    expect(verify({ ...bundledPackage, "node_modules/foo/.env": "NPM_TOKEN=secret" }, bundledManifest)).toEqual([
+      expect.stringContaining("archivo privado en el tarball: node_modules/foo/.env"),
+    ]);
+    expect(
+      verify({ ...validPackage(), "package.json": JSON.stringify(allBundledManifest), "node_modules/foo/index.js": "module.exports = {};" }, allBundledManifest)
+    ).toEqual([]);
+    expect(verify({ ...validPackage(), "node_modules/foo/index.js": "module.exports = {};" })).toEqual([expect.stringContaining("archivo privado")]);
+  });
 
   it("should accept a package whose checksum, name, version, files and entrypoints match", () => {
     expect(verify(validPackage())).toEqual([]);
