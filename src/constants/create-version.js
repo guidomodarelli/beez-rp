@@ -150,8 +150,57 @@ export const ARTIFACT_NAME_PLACEHOLDER = "{name}";
 /** Wildcard of an `artifact` pattern segment, such as the checksum in `releases/{version}-*`. */
 export const ARTIFACT_SEGMENT_WILDCARD = "*";
 
+/** Checksum placeholder: that segment must be the SHA-256 of the archive, verified before publishing. */
+export const ARTIFACT_SHA256_PLACEHOLDER = "{sha256}";
+
+/** Lowercase hexadecimal SHA-256 digest matched by {@link ARTIFACT_SHA256_PLACEHOLDER}. */
+export const SHA256_HEX_PATTERN_SOURCE = "[0-9a-f]{64}";
+
 /** Characters allowed in an artifact path passed to `npm publish` through the Windows shell. */
 export const SAFE_ARTIFACT_PATH_PATTERN = /^[\w.@+/-]+$/u;
+
+/** Root directory of every entry inside an npm tarball. */
+export const PACKED_ROOT_DIRECTORY = "package/";
+
+/** Files npm always packs regardless of `files`, matched case-insensitively by base name. */
+export const ALWAYS_PACKED_FILE_PATTERN = /^(package\.json|readme(\.[^/]*)?|licen[cs]e(\.[^/]*)?|changelog(\.[^/]*)?|notice(\.[^/]*)?)$/iu;
+
+/** Path segments that must never reach a published archive. */
+export const PRIVATE_PACKED_SEGMENT_PATTERN = /^(\..*|node_modules)$/u;
+
+/** Size of a tar header and data block, in bytes. */
+export const TAR_BLOCK_SIZE = 512;
+
+/** Byte ranges of the tar header fields read by the archive verifier. */
+export const TAR_HEADER_FIELD = Object.freeze({
+  name: [0, 100],
+  size: [124, 136],
+  type: [156, 157],
+  prefix: [345, 500],
+});
+
+/** Tar entry types: regular files (`0` or NUL), and PAX or GNU headers carrying long names. */
+export const TAR_ENTRY_TYPE = Object.freeze({
+  file: "0",
+  legacyFile: "\0",
+  paxHeader: "x",
+  gnuLongName: "L",
+});
+
+/** Trailing NUL padding of a GNU long-name record. */
+export const TRAILING_NUL_PATTERN = /\0+$/u;
+
+/** PAX record key holding an entry path longer than the header allows. */
+export const PAX_PATH_KEY = "path";
+
+/** npm registry credential line; npm expands `${NPM_TOKEN}` from the environment, so the token never reaches the disk. */
+export const NPM_AUTH_CONFIG_LINE = "//registry.npmjs.org/:_authToken=${NPM_TOKEN}\n";
+
+/** Prefix of the temporary directory holding the publish-only npm user config. */
+export const NPM_AUTH_DIRECTORY_PREFIX = "beez-rp-npm-auth-";
+
+/** Characters that could break out of a quoted path on the Windows shell. */
+export const UNSAFE_QUOTED_PATH_PATTERN = /["%]/u;
 
 /** Placeholder replaced by the released version in `summary` lines. */
 export const SUMMARY_VERSION_PLACEHOLDER = "{version}";

@@ -8,7 +8,16 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y e
 
 ### Added
 
-- `artifact` en `beez-rp.config.js`: con `publish: "npm"`, publica exactamente el tarball que dejó el paso `prepare` (por ejemplo `releases/{version}-*/{name}-{version}.tgz`) en vez de reempaquetar el working tree.
+- `artifact` en `beez-rp.config.js`: con `publish: "npm"`, publica exactamente el tarball que dejó el paso `prepare` (por ejemplo `releases/{version}-{sha256}/{name}-{version}.tgz`) en vez de reempaquetar el working tree.
+- Antes de publicar ese tarball verifica su SHA-256 (`{sha256}`) y su contenido: rutas seguras, sin archivos privados ni fuera de `files`, entrypoints públicos presentes y mismo nombre y versión que `package.json`.
+
+### Changed
+
+- `publish: "npm"` usa una config de npm temporal que solo referencia `${NPM_TOKEN}`: los proyectos ya no necesitan `.npmrc` y pnpm deja de advertir por credenciales en el repositorio. La confirmación 2FA de npm sigue siendo interactiva.
+
+### Removed
+
+- `.npmrc` del repositorio de beez-rp.
 
 ## [0.2.0] - 2026-09-26
 

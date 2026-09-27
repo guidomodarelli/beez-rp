@@ -9,10 +9,18 @@
  * @module create-version
  */
 
-export { expandArtifactPattern, findPreparedArtifact, isSafeArtifactPath } from "./artifact.js";
+export {
+  computeSha256,
+  expandArtifactPattern,
+  findArchiveProblems,
+  findPreparedArtifact,
+  isSafeArtifactPath,
+  readTarballEntries,
+  verifyPreparedArtifact,
+} from "./artifact.js";
 export { defineCreateVersionConfig, loadCreateVersionConfig, resolveCreateVersionConfig } from "./config.js";
 export { ReleaseStepError } from "./errors.js";
-export { lookupPublishedVersions, publishToNpm } from "./npm.js";
+export { lookupPublishedVersions, publishToNpm, withNpmAuthConfig } from "./npm.js";
 export { DEFAULT_CAPABILITIES, RELEASE_USAGE, buildReleasePlan, describeFeatureBranchGaps, parseReleaseArguments } from "./plan.js";
 export { createGitReader, listCommits, parseCommitLog, readPackageVersionAt, runCaptured, runCommandLine, runInherited } from "./process.js";
 export { createHookContext, runCreateVersion } from "./run.js";

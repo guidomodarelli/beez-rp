@@ -1,20 +1,24 @@
 /**
  * npm adapter of `beez-rp create-version`: lists the published versions of a
- * package and publishes the working tree with the token referenced by `.npmrc`.
+ * package and publishes the working tree or a prepared archive with `NPM_TOKEN`.
  *
  * @module create-version/npm
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 import {
   LOCAL_ENVIRONMENT_FILE,
+  NPM_AUTH_CONFIG_LINE,
+  NPM_AUTH_DIRECTORY_PREFIX,
   NPM_DIST_TAG,
   NPM_LOOKUP_STATUS,
   NPM_NOT_FOUND_CODE,
   NPM_PACKAGE_NAME_PATTERN,
   NPM_TOKEN_VARIABLE,
+  UNSAFE_QUOTED_PATH_PATTERN,
 } from "../constants/create-version.js";
 import { USES_SHELL_FOR_PACKAGE_MANAGERS, runCaptured, runInherited } from "./process.js";
 
@@ -58,13 +62,39 @@ export async function lookupPublishedVersions(packageName, repositoryRoot) {
 }
 
 /**
+ * Runs an operation with a temporary npm user config outside the repository
+ * that only references `${NPM_TOKEN}`: npm expands it from the environment, so
+ * the token never reaches the disk or a command line, and no repository needs
+ * an `.npmrc` (which pnpm refuses to expand and warns about). The config is
+ * always removed afterwards.
+ *
+ * @template T
+ * @param {(userConfigPath: string) => Promise<T>} operation - Receives the path for `npm --userconfig`.
+ * @param {string} [parentDirectory] - Where the temporary directory is created; defaults to the OS temp directory.
+ * @returns {Promise<T>} The operation result.
+ */
+export async function withNpmAuthConfig(operation, parentDirectory = tmpdir()) {
+  const directory = mkdtempSync(path.join(parentDirectory, NPM_AUTH_DIRECTORY_PREFIX));
+  const userConfigPath = path.join(directory, "npmrc");
+
+  try {
+    writeFileSync(userConfigPath, NPM_AUTH_CONFIG_LINE, { mode: 0o600 });
+    return await operation(userConfigPath);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
  * Publishes the working tree, or a prepared archive, to npm. `NPM_TOKEN` comes
- * from the environment or the ignored `.env`, and only reaches npm through the
- * environment and `.npmrc`.
+ * from the environment or the ignored `.env` and only reaches npm through the
+ * environment and a temporary user config. npm inherits the terminal, so its
+ * interactive browser or one-time-password (2FA) confirmation works.
  *
  * @param {string} repositoryRoot - Package root.
  * @param {string | null} [artifactPath] - Archive relative to the root, already checked with `isSafeArtifactPath`; `null` publishes the working tree.
  * @returns {Promise<{ exitCode: number, missingToken: boolean }>} npm exit code, or a missing-token result without running npm.
+ * @throws {Error} When the temporary config path could break out of its shell quotes.
  */
 export async function publishToNpm(repositoryRoot, artifactPath = null) {
   const environmentFilePath = path.join(repositoryRoot, LOCAL_ENVIRONMENT_FILE);
@@ -77,11 +107,17 @@ export async function publishToNpm(repositoryRoot, artifactPath = null) {
     return { exitCode: 1, missingToken: true };
   }
 
-  // The command line is constant; the token only travels through the environment and `.npmrc`.
-  const publishArguments = ["publish", ...(artifactPath ? [artifactPath] : []), "--access", "public", "--tag", NPM_DIST_TAG];
-  const exitCode = USES_SHELL_FOR_PACKAGE_MANAGERS
-    ? await runInherited(`npm ${publishArguments.join(" ")}`, [], { cwd: repositoryRoot, shell: true })
-    : await runInherited("npm", publishArguments, { cwd: repositoryRoot });
+  const exitCode = await withNpmAuthConfig(async (userConfigPath) => {
+    if (UNSAFE_QUOTED_PATH_PATTERN.test(userConfigPath)) {
+      throw new Error(`beez-rp create-version: unsafe temporary npm config path ${userConfigPath}`);
+    }
+
+    // The command line is constant apart from validated paths; the token only travels through the environment.
+    const publishArguments = ["publish", ...(artifactPath ? [artifactPath] : []), "--access", "public", "--tag", NPM_DIST_TAG];
+    return USES_SHELL_FOR_PACKAGE_MANAGERS
+      ? runInherited(`npm ${publishArguments.join(" ")} --userconfig "${userConfigPath}"`, [], { cwd: repositoryRoot, shell: true })
+      : runInherited("npm", [...publishArguments, "--userconfig", userConfigPath], { cwd: repositoryRoot });
+  });
 
   return { exitCode, missingToken: false };
 }

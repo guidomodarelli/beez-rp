@@ -61,7 +61,7 @@ import {
   startSpinner,
 } from "../terminal-ui.js";
 import { listNextVersions, resolveRequestedVersion, suggestReleaseType, toReleaseTag } from "../versions.js";
-import { expandArtifactPattern, findPreparedArtifact, isSafeArtifactPath } from "./artifact.js";
+import { expandArtifactPattern, findPreparedArtifact, isSafeArtifactPath, verifyPreparedArtifact } from "./artifact.js";
 import { loadCreateVersionConfig } from "./config.js";
 import { ReleaseStepError } from "./errors.js";
 import { lookupPublishedVersions, publishToNpm } from "./npm.js";
@@ -549,11 +549,11 @@ async function pushReleaseStep(context) {
 }
 
 /**
- * Finds the archive prepared for the release when the project configured `artifact`.
+ * Finds and verifies the archive prepared for the release when the project configured `artifact`.
  *
  * @param {ReleaseContext} context - Release context.
  * @param {string} version - Version being published.
- * @returns {string | null} Relative archive path, or `null` to publish the working tree.
+ * @returns {string | null} Verified archive path relative to the root, or `null` to publish the working tree.
  */
 function resolvePublishedArtifact(context, version) {
   const { artifact } = context.config;
@@ -562,20 +562,32 @@ function resolvePublishedArtifact(context, version) {
     return null;
   }
 
-  const artifactPath = findPreparedArtifact(context.repositoryRoot, artifact, { version, packageName: context.state.packageName });
+  const release = { version, packageName: context.state.packageName };
+  const prepared = findPreparedArtifact(context.repositoryRoot, artifact, release);
 
-  if (!artifactPath) {
+  if (!prepared) {
     throw new ReleaseStepError(
-      `No hay un artefacto preparado de ${version} que coincida con ${expandArtifactPattern(artifact, { version, packageName: context.state.packageName })}.`,
+      `No hay un artefacto preparado de ${version} que coincida con ${expandArtifactPattern(artifact, release)}.`,
       "Revisá la salida del paso de preparación y volvé a correr pnpm create-version: retoma la preparación y la publicación."
     );
   }
 
-  if (!isSafeArtifactPath(artifactPath)) {
-    throw new ReleaseStepError(`La ruta del artefacto ${artifactPath} tiene caracteres no permitidos.`, "Usá rutas con letras, números, ., -, _, @, + y /.");
+  if (!isSafeArtifactPath(prepared.path)) {
+    throw new ReleaseStepError(`La ruta del artefacto ${prepared.path} tiene caracteres no permitidos.`, "Usá rutas con letras, números, ., -, _, @, + y /.");
   }
 
-  return artifactPath;
+  const manifest = JSON.parse(readFileSync(path.join(context.repositoryRoot, PACKAGE_MANIFEST_FILE), "utf8"));
+  const problems = verifyPreparedArtifact(context.repositoryRoot, prepared, manifest);
+
+  if (problems.length > 0) {
+    throw new ReleaseStepError(
+      `El artefacto ${prepared.path} no se puede publicar: ${problems.slice(0, MAX_LISTED_ITEMS).join("; ")}.`,
+      "No se publicó nada. Borrá ese tarball y volvé a correr pnpm create-version: vuelve a prepararlo y a verificarlo."
+    );
+  }
+
+  print(`${ICON.success} ${prepared.path} verificado${prepared.expectedSha256 ? " (SHA-256 y contenido)" : " (contenido)"}.`);
+  return prepared.path;
 }
 
 /**
@@ -591,7 +603,7 @@ async function publishReleaseStep(context) {
   if (publish === NPM_PUBLISHER) {
     const artifactPath = resolvePublishedArtifact(context, version);
     if (artifactPath) {
-      print(paint("gray", `Publicando el artefacto verificado ${artifactPath}`));
+      print(paint("gray", `Publicando ${artifactPath}; npm puede pedir la confirmación 2FA en el navegador o un código.`));
     }
     const result = await publishToNpm(context.repositoryRoot, artifactPath);
 
