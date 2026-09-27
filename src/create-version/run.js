@@ -1152,18 +1152,18 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
       return FAILURE_EXIT_CODE;
     }
 
-    print(`${ICON.info} ${changesToSetAside.length} cambio(s) sin commitear apartados con git stash; se restauran al terminar.`);
+    print(`${ICON.info} ${changesToSetAside.length} cambio(s) sin commitear apartados con git stash; al terminar vuelven igual: lo staged staged y el resto sin stagear.`);
   }
 
   try {
     return await runPlanSteps(context, plan, remoteUrl, startedAt);
   } finally {
     if (setAside) {
-      const restore = await restoreLocalChanges(reader, setAside);
+      const restore = await restoreLocalChanges(reader, repositoryRoot, setAside);
       print(
         restore.restored
-          ? `${ICON.success} Cambios sin commitear restaurados.`
-          : `${ICON.warning} ${paint("yellow", `No se pudieron restaurar los cambios sin commitear (${restore.reason}): recuperalos con git stash list y git stash pop.`)}`
+          ? `${ICON.success} Cambios sin commitear restaurados como estaban: lo staged sigue staged y el resto sin stagear.`
+          : `${ICON.warning} ${paint("yellow", `No se pudieron restaurar los cambios sin commitear (${restore.reason}): cuando lo resuelvas, recuperalos con git stash pop --index.`)}`
       );
     }
   }
