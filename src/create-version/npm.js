@@ -11,6 +11,7 @@ import path from "node:path";
 
 import {
   LOCAL_ENVIRONMENT_FILE,
+  LOCAL_PATH_PREFIX,
   NPM_AUTH_CONFIG_LINE,
   NPM_AUTH_DIRECTORY_PREFIX,
   NPM_DIST_TAG,
@@ -86,6 +87,21 @@ export async function withNpmAuthConfig(operation, parentDirectory = tmpdir()) {
 }
 
 /**
+ * Builds the `npm publish` arguments, without the user config. A prepared
+ * archive is prefixed with `./` because npm parses a bare relative operand
+ * such as `releases/1.9.0-abc/pkg-1.9.0.tgz` as a package spec instead of a file.
+ *
+ * @param {string | null} [artifactPath] - Archive relative to the root, already checked with `isSafeArtifactPath`; `null` publishes the working tree.
+ * @returns {string[]} Arguments that follow `npm`.
+ */
+export function buildNpmPublishArguments(artifactPath = null) {
+  const publishTarget = artifactPath
+    ? [artifactPath.startsWith(LOCAL_PATH_PREFIX) ? artifactPath : `${LOCAL_PATH_PREFIX}${artifactPath}`]
+    : [];
+  return ["publish", ...publishTarget, "--access", "public", "--tag", NPM_DIST_TAG];
+}
+
+/**
  * Publishes the working tree, or a prepared archive, to npm. `NPM_TOKEN` comes
  * from the environment or the ignored `.env` and only reaches npm through the
  * environment and a temporary user config. npm inherits the terminal, so its
@@ -113,7 +129,7 @@ export async function publishToNpm(repositoryRoot, artifactPath = null) {
     }
 
     // The command line is constant apart from validated paths; the token only travels through the environment.
-    const publishArguments = ["publish", ...(artifactPath ? [artifactPath] : []), "--access", "public", "--tag", NPM_DIST_TAG];
+    const publishArguments = buildNpmPublishArguments(artifactPath);
     return USES_SHELL_FOR_PACKAGE_MANAGERS
       ? runInherited(`npm ${publishArguments.join(" ")} --userconfig "${userConfigPath}"`, [], { cwd: repositoryRoot, shell: true })
       : runInherited("npm", [...publishArguments, "--userconfig", userConfigPath], { cwd: repositoryRoot });

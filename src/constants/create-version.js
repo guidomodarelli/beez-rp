@@ -169,6 +169,12 @@ export const SHA256_HEX_PATTERN_SOURCE = "[0-9a-f]{64}";
 /** Characters allowed in an artifact path passed to `npm publish` through the Windows shell. */
 export const SAFE_ARTIFACT_PATH_PATTERN = /^[\w.@+/-]+$/u;
 
+/**
+ * Prefix that makes npm read an artifact path as a local file: a bare
+ * `releases/x/pkg.tgz` operand is parsed as a package spec (a GitHub shorthand).
+ */
+export const LOCAL_PATH_PREFIX = "./";
+
 /** Root directory of every entry inside an npm tarball. */
 export const PACKED_ROOT_DIRECTORY = "package/";
 

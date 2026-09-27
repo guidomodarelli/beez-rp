@@ -20,7 +20,7 @@ export {
 } from "./artifact.js";
 export { defineCreateVersionConfig, loadCreateVersionConfig, resolveCreateVersionConfig } from "./config.js";
 export { ReleaseStepError } from "./errors.js";
-export { lookupPublishedVersions, publishToNpm, withNpmAuthConfig } from "./npm.js";
+export { buildNpmPublishArguments, lookupPublishedVersions, publishToNpm, withNpmAuthConfig } from "./npm.js";
 export { DEFAULT_CAPABILITIES, RELEASE_USAGE, buildReleasePlan, describeFeatureBranchGaps, parseReleaseArguments } from "./plan.js";
 export { createGitReader, listCommits, parseCommitLog, readPackageVersionAt, runCaptured, runCommandLine, runInherited } from "./process.js";
 export { createHookContext, runCreateVersion } from "./run.js";
