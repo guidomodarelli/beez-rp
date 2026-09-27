@@ -47,6 +47,10 @@ describe("create-version config", () => {
     expect(config.releaseTypeDescriptions.patch).toBeTypeOf("string");
     expect(config.publish).toBe(publish);
     expect(config.changelog.language).toBe("en");
+    expect(config.artifact).toBeNull();
+
+    const tarball = resolveCreateVersionConfig({ changelog: { audience: "x" }, publish: "npm", artifact: "releases/{version}-*/{name}-{version}.tgz" });
+    expect(tarball).toMatchObject({ registry: "npm", artifact: "releases/{version}-*/{name}-{version}.tgz" });
   });
 
   it.each([
@@ -59,6 +63,8 @@ describe("create-version config", () => {
     [{ changelog: { audience: "x" }, migrations: { check: () => {} } }, /migrations/],
     [{ changelog: { audience: "x" }, releaseTypeDescriptions: { huge: "x" } }, /releaseTypeDescriptions.huge/],
     [{ changelog: { audience: "x" }, registry: "pypi" }, /registry/],
+    [{ changelog: { audience: "x" }, publish: "npm", artifact: "releases/pkg.tgz" }, /artifact/],
+    [{ changelog: { audience: "x" }, artifact: "releases/{version}.tgz" }, /artifact.*publish/],
   ])("should reject %j", (rawConfig, message) => {
     expect(() => resolveCreateVersionConfig(rawConfig)).toThrow(message);
   });

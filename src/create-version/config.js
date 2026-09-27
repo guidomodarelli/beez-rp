@@ -15,6 +15,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import {
+  ARTIFACT_VERSION_PLACEHOLDER,
   CHANGELOG_LANGUAGE,
   CREATE_VERSION_CONFIG_FILE,
   CREATE_VERSION_CONFIG_FILES,
@@ -51,6 +52,7 @@ import { RELEASE_TYPE_ORDER } from "../constants/versions.js";
  *   migrations?: MigrationsAdapter | null,
  *   prepare?: string[] | ReleaseHook | null,
  *   publish?: "npm" | ReleaseHook | null,
+ *   artifact?: string | null,
  *   summary?: string[],
  * }} CreateVersionConfig
  *   `summary` lines replace `{version}` with the released version.
@@ -64,6 +66,7 @@ import { RELEASE_TYPE_ORDER } from "../constants/versions.js";
  *   migrations: MigrationsAdapter | null,
  *   prepare: string[] | ReleaseHook | null,
  *   publish: "npm" | ReleaseHook | null,
+ *   artifact: string | null,
  *   summary: string[],
  * }} ResolvedCreateVersionConfig
  */
@@ -175,6 +178,16 @@ export function resolveCreateVersionConfig(rawConfig) {
     throw invalidField("migrations.targetHint", "a string");
   }
 
+  const artifact = config.artifact ?? null;
+  if (artifact !== null) {
+    if (typeof artifact !== "string" || !artifact.includes(ARTIFACT_VERSION_PLACEHOLDER)) {
+      throw invalidField("artifact", `a path pattern containing ${ARTIFACT_VERSION_PLACEHOLDER}, such as releases/{version}-*/{name}-{version}.tgz`);
+    }
+    if (publish !== NPM_PUBLISHER) {
+      throw invalidField("artifact", `used only with publish: "${NPM_PUBLISHER}"`);
+    }
+  }
+
   const summary = config.summary ?? [];
   if (!isStringList(summary)) {
     throw invalidField("summary", "a list of lines");
@@ -194,6 +207,7 @@ export function resolveCreateVersionConfig(rawConfig) {
     migrations,
     prepare: /** @type {string[] | ReleaseHook | null} */ (prepare),
     publish: /** @type {"npm" | ReleaseHook | null} */ (publish),
+    artifact: /** @type {string | null} */ (artifact),
     summary,
   };
 }

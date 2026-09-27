@@ -9,6 +9,7 @@
  * @module create-version
  */
 
+export { expandArtifactPattern, findPreparedArtifact, isSafeArtifactPath } from "./artifact.js";
 export { defineCreateVersionConfig, loadCreateVersionConfig, resolveCreateVersionConfig } from "./config.js";
 export { ReleaseStepError } from "./errors.js";
 export { lookupPublishedVersions, publishToNpm } from "./npm.js";

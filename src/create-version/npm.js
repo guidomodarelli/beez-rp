@@ -58,13 +58,15 @@ export async function lookupPublishedVersions(packageName, repositoryRoot) {
 }
 
 /**
- * Publishes the working tree to npm. `NPM_TOKEN` comes from the environment or
- * the ignored `.env`, and only reaches npm through the environment and `.npmrc`.
+ * Publishes the working tree, or a prepared archive, to npm. `NPM_TOKEN` comes
+ * from the environment or the ignored `.env`, and only reaches npm through the
+ * environment and `.npmrc`.
  *
  * @param {string} repositoryRoot - Package root.
+ * @param {string | null} [artifactPath] - Archive relative to the root, already checked with `isSafeArtifactPath`; `null` publishes the working tree.
  * @returns {Promise<{ exitCode: number, missingToken: boolean }>} npm exit code, or a missing-token result without running npm.
  */
-export async function publishToNpm(repositoryRoot) {
+export async function publishToNpm(repositoryRoot, artifactPath = null) {
   const environmentFilePath = path.join(repositoryRoot, LOCAL_ENVIRONMENT_FILE);
 
   if (!process.env[NPM_TOKEN_VARIABLE] && existsSync(environmentFilePath)) {
@@ -76,7 +78,7 @@ export async function publishToNpm(repositoryRoot) {
   }
 
   // The command line is constant; the token only travels through the environment and `.npmrc`.
-  const publishArguments = ["publish", "--access", "public", "--tag", NPM_DIST_TAG];
+  const publishArguments = ["publish", ...(artifactPath ? [artifactPath] : []), "--access", "public", "--tag", NPM_DIST_TAG];
   const exitCode = USES_SHELL_FOR_PACKAGE_MANAGERS
     ? await runInherited(`npm ${publishArguments.join(" ")}`, [], { cwd: repositoryRoot, shell: true })
     : await runInherited("npm", publishArguments, { cwd: repositoryRoot });

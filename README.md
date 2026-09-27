@@ -95,13 +95,14 @@ export default {
   migrations: { check, apply, targetHint },     // adaptador de base de datos
   prepare: ["pnpm release:prepare"],            // comandos o función, sobre el commit de versión
   publish: "npm",                               // npm publish con NPM_TOKEN, o una función
+  artifact: "releases/{version}-*/{name}-{version}.tgz", // con "npm": publica ese tarball preparado
   summary: ["Vercel buildea {version}."],       // líneas extra del resumen final
 };
 ```
 
 Solo `changelog.audience` es obligatorio. Los hooks (`migrations.check`, `migrations.apply`, `prepare`, `publish`) reciben `{ repositoryRoot, version, git, run, print, fail }`: `git` lee Git, `run("pnpm x")` corre un comando visible y devuelve su exit code, y `fail(mensaje, qué hacer)` corta el paso con una explicación. El config no necesita importar `beez-rp`.
 
-`migrations.check` devuelve `{ status: "up-to-date" | "pending" | "unknown", pending, target, reason }`; después de `apply`, el comando vuelve a llamar a `check` y falla si siguen pendientes. `publish: "npm"` toma `NPM_TOKEN` del entorno o de un `.env` ignorado por Git, referenciado por el `.npmrc` del repo.
+`migrations.check` devuelve `{ status: "up-to-date" | "pending" | "unknown", pending, target, reason }`; después de `apply`, el comando vuelve a llamar a `check` y falla si siguen pendientes. `publish: "npm"` toma `NPM_TOKEN` del entorno o de un `.env` ignorado por Git, referenciado por el `.npmrc` del repo. Sin `artifact` publica el working tree; con `artifact` publica exactamente el tarball que dejó `prepare`: el patrón es relativo a la raíz, reemplaza `{version}` (obligatorio) y `{name}`, acepta `*` dentro de un segmento y toma el archivo más reciente. Si no hay ninguno, el paso falla y volver a correr el comando retoma preparación y publicación.
 
 ## Publicar beez-rp
 

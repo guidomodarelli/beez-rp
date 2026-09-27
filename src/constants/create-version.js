@@ -143,6 +143,16 @@ export const MAX_LISTED_ITEMS = 5;
 /** Length of the abbreviated commit ids shown to the user. */
 export const SHORT_SHA_LENGTH = 7;
 
+/** Placeholders of the `artifact` pattern: the released version and the npm package name. */
+export const ARTIFACT_VERSION_PLACEHOLDER = "{version}";
+export const ARTIFACT_NAME_PLACEHOLDER = "{name}";
+
+/** Wildcard of an `artifact` pattern segment, such as the checksum in `releases/{version}-*`. */
+export const ARTIFACT_SEGMENT_WILDCARD = "*";
+
+/** Characters allowed in an artifact path passed to `npm publish` through the Windows shell. */
+export const SAFE_ARTIFACT_PATH_PATTERN = /^[\w.@+/-]+$/u;
+
 /** Placeholder replaced by the released version in `summary` lines. */
 export const SUMMARY_VERSION_PLACEHOLDER = "{version}";
 

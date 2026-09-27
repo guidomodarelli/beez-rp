@@ -61,6 +61,7 @@ import {
   startSpinner,
 } from "../terminal-ui.js";
 import { listNextVersions, resolveRequestedVersion, suggestReleaseType, toReleaseTag } from "../versions.js";
+import { expandArtifactPattern, findPreparedArtifact, isSafeArtifactPath } from "./artifact.js";
 import { loadCreateVersionConfig } from "./config.js";
 import { ReleaseStepError } from "./errors.js";
 import { lookupPublishedVersions, publishToNpm } from "./npm.js";
@@ -548,6 +549,36 @@ async function pushReleaseStep(context) {
 }
 
 /**
+ * Finds the archive prepared for the release when the project configured `artifact`.
+ *
+ * @param {ReleaseContext} context - Release context.
+ * @param {string} version - Version being published.
+ * @returns {string | null} Relative archive path, or `null` to publish the working tree.
+ */
+function resolvePublishedArtifact(context, version) {
+  const { artifact } = context.config;
+
+  if (!artifact) {
+    return null;
+  }
+
+  const artifactPath = findPreparedArtifact(context.repositoryRoot, artifact, { version, packageName: context.state.packageName });
+
+  if (!artifactPath) {
+    throw new ReleaseStepError(
+      `No hay un artefacto preparado de ${version} que coincida con ${expandArtifactPattern(artifact, { version, packageName: context.state.packageName })}.`,
+      "Revisá la salida del paso de preparación y volvé a correr pnpm create-version: retoma la preparación y la publicación."
+    );
+  }
+
+  if (!isSafeArtifactPath(artifactPath)) {
+    throw new ReleaseStepError(`La ruta del artefacto ${artifactPath} tiene caracteres no permitidos.`, "Usá rutas con letras, números, ., -, _, @, + y /.");
+  }
+
+  return artifactPath;
+}
+
+/**
  * Publishes the release with npm or the project hook.
  *
  * @param {ReleaseContext} context - Release context.
@@ -558,7 +589,11 @@ async function publishReleaseStep(context) {
   const { publish } = context.config;
 
   if (publish === NPM_PUBLISHER) {
-    const result = await publishToNpm(context.repositoryRoot);
+    const artifactPath = resolvePublishedArtifact(context, version);
+    if (artifactPath) {
+      print(paint("gray", `Publicando el artefacto verificado ${artifactPath}`));
+    }
+    const result = await publishToNpm(context.repositoryRoot, artifactPath);
 
     if (result.missingToken) {
       throw new ReleaseStepError(
