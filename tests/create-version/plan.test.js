@@ -325,6 +325,32 @@ describe("create-version plan with a last release missing from npm", () => {
     expect(buildReleasePlan(initialVersion, NPM_PACKAGE).mode).toBe(RELEASE_MODE.newRelease);
   });
 
+  it("should check it before resuming a newer local release commit, and skip it only with --skip-unpublished", () => {
+    const newerLocalRelease = createMainState({
+      ...UNPUBLISHED_RELEASE,
+      headVersion: "0.3.0",
+      headSubject: "0.3.0",
+      main: { aheadCommits: [{ subject: "0.3.0" }], behindCount: 0 },
+    });
+
+    const blocked = buildReleasePlan(newerLocalRelease, NPM_PACKAGE);
+    expect(blocked.mode).toBe(RELEASE_MODE.blocked);
+    expect(blocked.steps).toEqual([]);
+    expect(blocked.blockers[0].title).toBe("La versión 0.2.0 (último release, tag v0.2.0) no está en npm");
+
+    const skipped = buildReleasePlan(newerLocalRelease, NPM_PACKAGE, { skipUnpublished: true });
+    expect(skipped.mode).toBe(RELEASE_MODE.resume);
+    expect(skipped.pendingVersion).toBe("0.3.0");
+    expect(skipped.warnings).toEqual([expect.stringContaining("Se saltea 0.2.0 (tag v0.2.0)")]);
+  });
+
+  it("should resume the unpublished release itself when HEAD is its release commit", () => {
+    const plan = buildReleasePlan(createMainState({ ...UNPUBLISHED_RELEASE, headSubject: "0.2.0" }), NPM_PACKAGE);
+
+    expect(plan.mode).toBe(RELEASE_MODE.resume);
+    expect(plan.pendingVersion).toBe("0.2.0");
+  });
+
   it("should ignore old versions below the latest published one and projects that do not track npm", () => {
     const olderThanLatest = createMainState({ ...UNPUBLISHED_RELEASE, npm: { ...NPM_WITH_FIRST_RELEASE, publishedVersions: ["0.1.0", "0.3.0"] } });
     expect(buildReleasePlan(olderThanLatest, NPM_PACKAGE).mode).toBe(RELEASE_MODE.newRelease);
@@ -333,8 +359,16 @@ describe("create-version plan with a last release missing from npm", () => {
 });
 
 describe("create-version plan from a detached release tag", () => {
-  /** Detached `HEAD` on the `0.2.0` commit of tag `v0.2.0`, missing from npm. */
-  const DETACHED_ON_TAG = { currentBranch: null, headVersion: "0.2.0", headSubject: "0.2.0", headReleaseTag: "v0.2.0", npm: NPM_WITH_FIRST_RELEASE };
+  /** Detached `HEAD` on the `0.2.0` commit of tag `v0.2.0`, already on origin and missing from npm. */
+  const DETACHED_ON_TAG = {
+    currentBranch: null,
+    headSha: "release-sha",
+    headVersion: "0.2.0",
+    headSubject: "0.2.0",
+    headReleaseTag: "v0.2.0",
+    remoteReleaseTagSha: "release-sha",
+    npm: NPM_WITH_FIRST_RELEASE,
+  };
 
   it("should only prepare and publish the tagged release, without syncing nor pushing main", () => {
     const plan = buildReleasePlan(createMainState({ ...DETACHED_ON_TAG, main: { aheadCommits: [], behindCount: 3 } }), NPM_PACKAGE);
@@ -359,6 +393,30 @@ describe("create-version plan from a detached release tag", () => {
     );
     expect(buildReleasePlan(createMainState({ ...DETACHED_ON_TAG, headReleaseTag: null }), NPM_PACKAGE).blockers[0].title).toContain("desacoplado");
     expect(buildReleasePlan(createMainState({ ...DETACHED_ON_TAG, headSubject: "fix: hotfix" }), NPM_PACKAGE).blockers[0].title).toContain("desacoplado");
+  });
+
+  it("should refuse to publish a tag that is missing from origin or points at another commit there", () => {
+    const missing = buildReleasePlan(createMainState({ ...DETACHED_ON_TAG, remoteReleaseTagSha: null }), NPM_PACKAGE);
+    expect(missing.mode).toBe(RELEASE_MODE.blocked);
+    expect(missing.steps).toEqual([]);
+    expect(missing.blockers[0].title).toContain("v0.2.0 no está en origin");
+    expect(missing.blockers[0].details.join("\n")).toContain("git switch main y corré pnpm create-version, que retoma el push");
+
+    const moved = buildReleasePlan(createMainState({ ...DETACHED_ON_TAG, remoteReleaseTagSha: "other-sha" }), NPM_PACKAGE);
+    expect(moved.mode).toBe(RELEASE_MODE.blocked);
+    expect(moved.blockers[0].title).toBe("v0.2.0 de origin apunta a otro commit que el v0.2.0 local");
+  });
+
+  it("should refuse to publish a tag whose version is not above the latest stable version on npm", () => {
+    const skippedOnPurpose = buildReleasePlan(createMainState({ ...DETACHED_ON_TAG, npm: { ...NPM_WITH_FIRST_RELEASE, publishedVersions: ["0.1.0", "0.3.0", "0.4.0-beta.1"] } }), NPM_PACKAGE);
+
+    expect(skippedOnPurpose.mode).toBe(RELEASE_MODE.blocked);
+    expect(skippedOnPurpose.steps).toEqual([]);
+    expect(skippedOnPurpose.blockers.map((blocker) => blocker.title)).toEqual(["0.2.0 no es mayor que 0.3.0, la versión más alta publicada en npm"]);
+    expect(skippedOnPurpose.blockers[0].details[0]).toContain("movería latest hacia atrás");
+
+    const onlyPrerelease = buildReleasePlan(createMainState({ ...DETACHED_ON_TAG, npm: { ...NPM_WITH_FIRST_RELEASE, publishedVersions: ["0.1.0", "0.3.0-beta.1"] } }), NPM_PACKAGE);
+    expect(onlyPrerelease.mode).toBe(RELEASE_MODE.resume);
   });
 
   it("should still require valid npm credentials to publish from the tag", () => {

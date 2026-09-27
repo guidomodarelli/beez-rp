@@ -1,13 +1,14 @@
 /**
  * Gathers the snapshot consumed by `plan.js`: current branch, uncommitted
  * changes, `main` compared with `origin/main`, the version and subject of
- * `HEAD`, the last release, the commits waiting to be released, the pull
- * request of a feature branch, the published versions, the npm credentials
- * (when the plan would publish to npm) and pending migrations.
+ * `HEAD`, the commit of a detached release tag on `origin`, the last release,
+ * the commits waiting to be released, the pull request of a feature branch,
+ * the published versions, the npm credentials (when the plan would publish to
+ * npm) and pending migrations.
  *
  * Every reader is read-only; the only network operations are `git fetch`,
- * `gh pr view`, `npm view`, `npm whoami`, `npm owner ls` and whatever the
- * project migrations adapter reads.
+ * `git ls-remote`, `gh pr view`, `npm view`, `npm whoami`, `npm owner ls` and
+ * whatever the project migrations adapter reads.
  *
  * @module create-version/state
  */
@@ -59,6 +60,30 @@ async function findReleaseTagAt(reader, version, sha) {
   const tag = toReleaseTag(version);
   const taggedSha = await reader.tryGit(["rev-parse", "--verify", "--quiet", `refs/tags/${tag}^{commit}`]);
   return taggedSha === sha ? tag : null;
+}
+
+/**
+ * Reads the commit a release tag points at on `origin`, so a detached publication can prove that
+ * its commit and tag already reached the remote. An annotated tag is resolved through its peeled
+ * `^{}` entry; a lightweight tag points at the commit directly.
+ *
+ * @param {GitReader} reader - Git reader.
+ * @param {string} tag - Release tag such as `v1.2.0`.
+ * @returns {Promise<string | null>} Commit of the tag on `origin`, or `null` when it is missing or
+ *   `origin` cannot be read.
+ */
+async function readRemoteReleaseTagCommit(reader, tag) {
+  const tagRef = `refs/tags/${tag}`;
+  const peeledRef = `${tagRef}^{}`;
+  const output = await reader.tryGit(["ls-remote", RELEASE_REMOTE, tagRef, peeledRef]);
+  const shaByRef = new Map(
+    (output ?? "")
+      .split("\n")
+      .map((line) => line.trim().split(/\s+/u))
+      .filter((fields) => fields.length === 2)
+      .map(([sha, ref]) => [ref, sha])
+  );
+  return shaByRef.get(peeledRef) ?? shaByRef.get(tagRef) ?? null;
 }
 
 /**
@@ -282,6 +307,8 @@ export async function collectReleaseState({
   const headSubject = await reader.tryGit(["log", "-1", "--format=%s", "HEAD"]);
   const headSha = await reader.tryGit(["rev-parse", "HEAD"]);
   const headReleaseTag = headSha ? await findReleaseTagAt(reader, headVersion, headSha) : null;
+  // Only a detached publication from a tag needs to prove that the tag is on origin.
+  const remoteReleaseTagSha = !currentBranch && headReleaseTag ? await readRemoteReleaseTagCommit(reader, headReleaseTag) : null;
   const releasedVersion = remoteMainExists ? await readPackageVersionAt(reader, REMOTE_MAIN_REF) : null;
   const lastRelease = remoteMainExists ? await findLastRelease(reader, REMOTE_MAIN_REF) : null;
   const unreleasedCommits = remoteMainExists ? await listCommits(reader, lastRelease ? `${lastRelease.sha}..${REMOTE_MAIN_REF}` : REMOTE_MAIN_REF) : [];
@@ -320,7 +347,9 @@ export async function collectReleaseState({
     main: { aheadCommits, behindCount },
     headVersion,
     headSubject,
+    headSha,
     headReleaseTag,
+    remoteReleaseTagSha,
     releasedVersion,
     lastRelease,
     unreleasedCommits,

@@ -243,6 +243,56 @@ describe("create-version state", () => {
   );
 
   it(
+    "should not resume a newer local release commit while the last release of origin is missing from npm",
+    async () => {
+      const { repositoryRoot } = createReleasedRepository();
+      commitVersion(repositoryRoot, "0.2.0", "0.2.0");
+      runGit(["tag", "-a", "v0.2.0", "-m", "0.2.0"], repositoryRoot);
+      runGit(["push", "--quiet", "origin", "main", "refs/tags/v0.2.0"], repositoryRoot);
+      commitVersion(repositoryRoot, "0.3.0", "0.3.0");
+      runGit(["tag", "-a", "v0.3.0", "-m", "0.3.0"], repositoryRoot);
+      const npmPackage = { checks: false, prepare: false, publish: true, publishTitle: "Publicar en npm" };
+
+      const state = await collect(repositoryRoot, ["0.1.0"]);
+      const blocked = buildReleasePlan(state, npmPackage);
+      const skipped = buildReleasePlan(state, npmPackage, { skipUnpublished: true });
+
+      expect(state.main.aheadCommits.map((commit) => commit.subject)).toEqual(["0.3.0"]);
+      expect(blocked.mode).toBe(RELEASE_MODE.blocked);
+      expect(blocked.blockers[0].title).toBe("La versión 0.2.0 (último release, tag v0.2.0) no está en npm");
+      expect(skipped.mode).toBe(RELEASE_MODE.resume);
+      expect(skipped.pendingVersion).toBe("0.3.0");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should read the commit a detached release tag points at on origin, and nothing while it is only local",
+    async () => {
+      const { repositoryRoot } = createReleasedRepository();
+      commitVersion(repositoryRoot, "0.2.0", "0.2.0");
+      runGit(["tag", "-a", "v0.2.0", "-m", "0.2.0"], repositoryRoot);
+      runGit(["switch", "--quiet", "--detach", "v0.2.0"], repositoryRoot);
+      const releaseSha = runGit(["rev-parse", "HEAD"], repositoryRoot);
+
+      const localOnly = await collect(repositoryRoot, ["0.1.0"]);
+
+      expect(localOnly.headReleaseTag).toBe("v0.2.0");
+      expect(localOnly.remoteReleaseTagSha).toBeNull();
+      expect(buildReleasePlan(localOnly, { checks: false, prepare: false, publish: true, publishTitle: "Publicar en npm" }).blockers[0].title).toContain(
+        "v0.2.0 no está en origin"
+      );
+
+      runGit(["push", "--quiet", "origin", "refs/tags/v0.2.0"], repositoryRoot);
+      const pushed = await collect(repositoryRoot, ["0.1.0"]);
+
+      expect(pushed.headSha).toBe(releaseSha);
+      expect(pushed.remoteReleaseTagSha).toBe(releaseSha);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
     "should look up published versions on the registry the working-tree package.json publishes to",
     async () => {
       const { repositoryRoot } = createReleasedRepository();
@@ -803,6 +853,31 @@ describe("beez-rp create-version command", () => {
 
       expect(next).toContain("Elegir la nueva versión y crear commit + tag");
       expect(next).not.toContain("no está en npm");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should not publish from a detached release tag that never reached origin",
+    async () => {
+      const registry = await startOwnedRegistry({ publishedVersions: ["0.1.0"] });
+      const manifestFields = publishTo(registry.registryUrl);
+      const { repositoryRoot, remoteRoot } = createReleasedRepository("0.1.0", manifestFields);
+      const hookLog = path.join(path.dirname(repositoryRoot), "hooks.log");
+      pushConfiguration(repositoryRoot, npmReleaseConfiguration(hookLog));
+      commitVersion(repositoryRoot, "0.2.0", "0.2.0", manifestFields);
+      runGit(["tag", "-a", "v0.2.0", "-m", "0.2.0"], repositoryRoot);
+      runGit(["switch", "--quiet", "--detach", "v0.2.0"], repositoryRoot);
+
+      const detached = await runCliAsync(repositoryRoot, [], { NPM_TOKEN: OWNER_TOKEN });
+      const output = flattenOutput(detached.output);
+
+      expect(detached.status, detached.output).toBe(0);
+      expect(output).toContain("v0.2.0 no está en origin");
+      expect(output).toContain("git switch main y corré pnpm create-version, que retoma el push de main y v0.2.0 antes de publicar");
+      expect(existsSync(hookLog)).toBe(false);
+      expect(registry.publications).toEqual([]);
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
     },
     GIT_FIXTURE_TEST_TIMEOUT_MS
   );

@@ -153,7 +153,7 @@ Límite: que el usuario sea dueño del paquete no prueba que el token pueda escr
 
 ### Versiones sin publicar
 
-Con `registry: "npm"`, si la versión del último release (`package.json` en `origin/main`) es estable, no está en npm y es mayor que la última publicada, el comando no crea un release nuevo, porque la saltearía. Si npm no tiene ninguna versión, solo bloquea cuando ese release tiene su tag `vX.Y.Z` (una versión inicial sin tag no es un release). El bloqueo explica cómo publicarla:
+Con `registry: "npm"`, si la versión del último release (`package.json` en `origin/main`) es estable, no está en npm y es mayor que la última publicada, el comando no crea un release nuevo ni retoma un commit de versión local de otra versión, porque la saltearía. Si npm no tiene ninguna versión, solo bloquea cuando ese release tiene su tag `vX.Y.Z` (una versión inicial sin tag no es un release). El bloqueo explica cómo publicarla:
 
 ```bash
 git switch --detach vX.Y.Z
@@ -162,7 +162,7 @@ git switch main
 pnpm create-version   # ahora sí, el release nuevo
 ```
 
-Con HEAD desacoplado el comando solo corre cuando HEAD es exactamente el commit del tag `vX.Y.Z`, su asunto es `X.Y.Z` y esa versión falta en npm. Si el release no se puede retomar así (otro asunto o sin tag), hay que publicarlo a mano. `--skip-unpublished` crea el release nuevo igual, a propósito, y lo advierte en el plan.
+Con HEAD desacoplado el comando solo corre cuando HEAD es exactamente el commit del tag `vX.Y.Z`, su asunto es `X.Y.Z` y esa versión falta en npm. Además bloquea si el tag no está en origin o apunta ahí a otro commit (volvé a `main` y corré `pnpm create-version`, que retoma el push) y si la versión no es mayor que la versión estable más alta de npm, porque publicarla con `--tag latest` movería `latest` hacia atrás. Si el release no se puede retomar así (otro asunto o sin tag), hay que publicarlo a mano. `--skip-unpublished` crea el release nuevo igual, a propósito, y lo advierte en el plan.
 
 ## Bloquear publicaciones con pnpm
 
