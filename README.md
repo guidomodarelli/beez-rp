@@ -107,8 +107,10 @@ Solo `changelog.audience` es obligatorio. Los hooks (`migrations.check`, `migrat
 Sin `artifact`, `publish: "npm"` publica el working tree. Con `artifact` publica exactamente el tarball que dejó `prepare`, después de verificarlo:
 
 - El patrón es relativo a la raíz, reemplaza `{version}` (obligatorio) y `{name}` (el nombre de archivo que usa `npm pack`: `@scope/pkg` pasa a `scope-pkg`), y dentro de un segmento acepta `*` y `{sha256}`. Si hay varios, toma el más reciente.
-- `{sha256}`: el SHA-256 del archivo tiene que coincidir con el de su ruta.
-- Contenido (leído sin herramientas externas): todo bajo `package/`, sin rutas inseguras, dotfiles ni `node_modules`; nada fuera de `files` (salvo los que npm siempre incluye); todos los entrypoints públicos (`exports`, `main`, `types`, `bin`) presentes; nombre y versión iguales a los de `package.json`.
+- `{sha256}`: el SHA-256 del archivo tiene que coincidir con el de su ruta. Puede repetirse en un segmento o en varios; todas las apariciones tienen que declarar el mismo digest.
+- Contenido (leído sin herramientas externas): todo bajo `package/`, sin rutas inseguras, dotfiles ni `node_modules`; nada fuera de `files`, que acepta globs como npm (`*`, `?`, `**`, directorios con o sin `./` y `/` final, y `!patrón` para excluir: gana la última entrada que coincide), salvo lo que npm siempre incluye (`package.json`, README, LICENSE, CHANGELOG, `main` y los archivos de `bin`).
+- `package.json` del tarball (el que publica npm): mismo nombre y versión que el del repositorio, y los mismos `exports`, `main`, `module`, `types`, `typings`, `bin`, `type`, `files`, `engines`, `bundleDependencies`, `dependencies`, `peerDependencies`, `optionalDependencies` y scripts de instalación (`preinstall`, `install`, `postinstall`, `prepare`). Se aceptan los cambios que hace `pnpm pack`: los campos que sobrescribe `publishConfig` y las dependencias `workspace:`/`catalog:` resueltas a una versión.
+- Todos los entrypoints públicos (`exports`, `main`, `types`, `typings`, `bin`) del `package.json` del tarball presentes.
 
 Si no hay tarball o la verificación falla, no se publica nada y volver a correr el comando retoma preparación y publicación.
 

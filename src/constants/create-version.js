@@ -160,7 +160,10 @@ export const PACKED_SCOPE_REPLACEMENT = "$<scope>-";
 /** Wildcard of an `artifact` pattern segment, such as the checksum in `releases/{version}-*`. */
 export const ARTIFACT_SEGMENT_WILDCARD = "*";
 
-/** Checksum placeholder: that segment must be the SHA-256 of the archive, verified before publishing. */
+/**
+ * Checksum placeholder: the SHA-256 of the archive, verified before publishing. It may repeat,
+ * in one segment or several, and every occurrence must declare the same digest.
+ */
 export const ARTIFACT_SHA256_PLACEHOLDER = "{sha256}";
 
 /** Lowercase hexadecimal SHA-256 digest matched by {@link ARTIFACT_SHA256_PLACEHOLDER}. */
@@ -180,6 +183,54 @@ export const PACKED_ROOT_DIRECTORY = "package/";
 
 /** Files npm always packs regardless of `files`, matched case-insensitively by base name. */
 export const ALWAYS_PACKED_FILE_PATTERN = /^(package\.json|readme(\.[^/]*)?|licen[cs]e(\.[^/]*)?|changelog(\.[^/]*)?|notice(\.[^/]*)?)$/iu;
+
+/** Prefix of a negated `files` entry: a later match excludes what earlier entries included. */
+export const FILES_NEGATION_PREFIX = "!";
+
+/** `files` glob segment that matches any number of directories. */
+export const FILES_GLOBSTAR = "**";
+
+/** `files` glob character that matches exactly one character other than `/`. */
+export const FILES_SINGLE_CHARACTER_WILDCARD = "?";
+
+/** `files` glob character that matches any run of characters other than `/`. */
+export const FILES_ANY_CHARACTERS_WILDCARD = "*";
+
+/** Suffix npm widens to `/**`, so `dir/*` also includes nested directories. */
+export const FILES_DIRECTORY_CONTENTS_SUFFIX = "/*";
+
+/** Leading `./` or `/` of `files` entries and manifest paths, both relative to the package root. */
+export const PACKAGE_ROOT_PREFIX_PATTERN = /^(?:\.\/|\/)+/u;
+
+/** Trailing `/` of directory entries and `files` patterns. */
+export const TRAILING_SLASH_PATTERN = /\/+$/u;
+
+/**
+ * Manifest fields compared between the packed and the repository `package.json`:
+ * npm publishes the packed one, so entrypoints, dependencies and module format must not drift.
+ */
+export const PUBLISH_CRITICAL_MANIFEST_FIELDS = Object.freeze([
+  "exports",
+  "main",
+  "module",
+  "types",
+  "typings",
+  "bin",
+  "type",
+  "files",
+  "engines",
+  "bundleDependencies",
+  "bundledDependencies",
+]);
+
+/** Dependency maps compared entry by entry; `pnpm pack` rewrites some specifiers. */
+export const PUBLISH_CRITICAL_DEPENDENCY_FIELDS = Object.freeze(["dependencies", "peerDependencies", "optionalDependencies"]);
+
+/** Lifecycle scripts npm runs when the published package is installed. */
+export const INSTALL_LIFECYCLE_SCRIPTS = Object.freeze(["preinstall", "install", "postinstall", "prepare"]);
+
+/** Dependency specifiers `pnpm pack` replaces with the resolved version range (`workspace:^`, `catalog:`). */
+export const PACK_REWRITTEN_DEPENDENCY_SPECIFIER_PATTERN = /^(?:workspace|catalog):/u;
 
 /** Path segments that must never reach a published archive. */
 export const PRIVATE_PACKED_SEGMENT_PATTERN = /^(\..*|node_modules)$/u;

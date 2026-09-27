@@ -144,7 +144,7 @@ describe("prepared artifact lookup", () => {
 describe("prepared artifact verification", () => {
   /**
    * @param {Record<string, string>} files - Packed files.
-   * @param {object} [manifest] - Repository manifest.
+   * @param {Record<string, unknown>} [manifest] - Repository manifest.
    * @returns {string[]} Verification problems.
    */
   function verify(files, manifest = MANIFEST) {
@@ -185,6 +185,111 @@ describe("prepared artifact verification", () => {
     expect(verify({ ...validPackage(), "src/index.ts": "export {};" })).toEqual([expect.stringContaining('fuera de "files"')]);
     expect(verify(withoutTypes)).toEqual([expect.stringContaining("dist/index.d.ts")]);
     expect(verify({ ...validPackage(), "package.json": JSON.stringify({ ...MANIFEST, version: "1.1.0" }) })).toEqual([expect.stringContaining("fixture-pkg@1.1.0")]);
+  });
+
+  it("should accept files matched by npm globs and directory entries, and reject files no entry covers", () => {
+    const globManifest = { ...MANIFEST, files: ["./dist/**/*.js", "dist/*.d.ts", "docs/", "!dist/internal"] };
+    const globPackage = {
+      ...validPackage(),
+      "package.json": JSON.stringify(globManifest),
+      "dist/nested/deep/util.js": "export {};",
+      "docs/rules/guide.md": "# guide",
+    };
+
+    expect(verify(globPackage, globManifest)).toEqual([]);
+    expect(verify({ ...globPackage, "dist/notes.md": "notes" }, globManifest)).toEqual([expect.stringContaining('fuera de "files" en el tarball: dist/notes.md')]);
+    expect(verify({ ...globPackage, "dist/internal/secret.js": "export {};" }, globManifest)).toEqual([
+      expect.stringContaining('fuera de "files" en el tarball: dist/internal/secret.js'),
+    ]);
+  });
+
+  it("should accept main and bin files outside files, as npm always packs them", () => {
+    const binObjectManifest = { ...MANIFEST, main: "./lib/main.js", bin: { "fixture-cli": "./bin/cli.js" } };
+    const binStringManifest = { ...MANIFEST, bin: "bin/cli.js" };
+    const withEntryFiles = { ...validPackage(), "lib/main.js": "export {};", "bin/cli.js": "#!/usr/bin/env node" };
+
+    expect(verify({ ...withEntryFiles, "package.json": JSON.stringify(binObjectManifest) }, binObjectManifest)).toEqual([]);
+    expect(verify({ ...validPackage(), "bin/cli.js": "#!/usr/bin/env node", "package.json": JSON.stringify(binStringManifest) }, binStringManifest)).toEqual([]);
+  });
+
+  it("should reject a packed manifest whose dependencies or install scripts differ from the repository", () => {
+    const repositoryManifest = { ...MANIFEST, dependencies: { "left-pad": "^1.3.0" } };
+    const withDependencies = { ...validPackage(), "package.json": JSON.stringify(repositoryManifest) };
+
+    expect(verify(withDependencies, repositoryManifest)).toEqual([]);
+    expect(verify({ ...withDependencies, "package.json": JSON.stringify({ ...repositoryManifest, dependencies: { "left-pad": "^2.0.0" } }) }, repositoryManifest)).toEqual([
+      expect.stringContaining('"dependencies"'),
+    ]);
+    expect(
+      verify({ ...withDependencies, "package.json": JSON.stringify({ ...repositoryManifest, scripts: { postinstall: "node steal.js" } }) }, repositoryManifest)
+    ).toEqual([expect.stringContaining('script "postinstall"')]);
+    expect(verify({ ...withDependencies, "package.json": JSON.stringify({ ...repositoryManifest, exports: "./dist/index.js" }) }, repositoryManifest)).toEqual([
+      expect.stringContaining('"exports"'),
+    ]);
+  });
+
+  it("should accept the fields pnpm pack rewrites: publishConfig overrides and workspace or catalog dependencies", () => {
+    const repositoryManifest = {
+      ...MANIFEST,
+      dependencies: { "shared-utils": "workspace:^", "shared-theme": "catalog:" },
+      publishConfig: { access: "public", types: "./dist/index.d.ts" },
+    };
+    const packedManifest = { ...repositoryManifest, dependencies: { "shared-utils": "^1.4.0", "shared-theme": "^2.0.0" }, types: "./dist/index.d.ts" };
+
+    expect(verify({ ...validPackage(), "package.json": JSON.stringify(packedManifest) }, repositoryManifest)).toEqual([]);
+    expect(
+      verify({ ...validPackage(), "package.json": JSON.stringify({ ...packedManifest, dependencies: { "shared-utils": "^1.4.0" } }) }, repositoryManifest)
+    ).toEqual([expect.stringContaining('"dependencies"')]);
+  });
+
+  it("should check the entrypoints of the packed manifest, the one npm publishes", () => {
+    const repositoryManifest = { ...MANIFEST, publishConfig: { main: "./dist/published.js" } };
+    const packedManifest = { ...MANIFEST, main: "./dist/published.js" };
+
+    expect(verify({ ...validPackage(), "package.json": JSON.stringify(packedManifest) }, repositoryManifest)).toEqual([
+      expect.stringContaining("falta el entrypoint público dist/published.js"),
+    ]);
+    expect(verify({ ...validPackage(), "dist/published.js": "export {};", "package.json": JSON.stringify(packedManifest) }, repositoryManifest)).toEqual([]);
+  });
+});
+
+describe("repeated checksum placeholders", () => {
+  const release = { version: "1.2.0", packageName: "fixture-pkg" };
+  const matchingDigest = "a".repeat(64);
+  const otherDigest = "b".repeat(64);
+
+  /**
+   * @param {string} root - Repository root.
+   * @param {string} relativePath - Archive path relative to the root.
+   * @param {number} seconds - Modification time.
+   */
+  function writeArchive(root, relativePath, seconds) {
+    const archive = path.join(root, relativePath);
+    mkdirSync(path.dirname(archive), { recursive: true });
+    writeFileSync(archive, "archive");
+    utimesSync(archive, seconds, seconds);
+  }
+
+  it("should match {sha256} repeated in one segment only when every occurrence is the same digest", () => {
+    const root = createRoot();
+    writeArchive(root, `releases/1.2.0-${matchingDigest}-${matchingDigest}.tgz`, 1_000);
+    writeArchive(root, `releases/1.2.0-${matchingDigest}-${otherDigest}.tgz`, 2_000);
+
+    expect(findPreparedArtifact(root, "releases/{version}-{sha256}-{sha256}.tgz", release)).toEqual({
+      path: `releases/1.2.0-${matchingDigest}-${matchingDigest}.tgz`,
+      expectedSha256: matchingDigest,
+    });
+  });
+
+  it("should match {sha256} repeated across segments only when every segment declares the same digest", () => {
+    const root = createRoot();
+    writeArchive(root, `releases/${matchingDigest}/fixture-pkg-${matchingDigest}.tgz`, 1_000);
+    writeArchive(root, `releases/${otherDigest}/fixture-pkg-${matchingDigest}.tgz`, 2_000);
+
+    expect(findPreparedArtifact(root, "releases/{sha256}/{name}-{sha256}.tgz", release)).toEqual({
+      path: `releases/${matchingDigest}/fixture-pkg-${matchingDigest}.tgz`,
+      expectedSha256: matchingDigest,
+    });
   });
 });
 

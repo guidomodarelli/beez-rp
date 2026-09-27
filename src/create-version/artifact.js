@@ -8,11 +8,15 @@
  * `@scope/pkg` becomes `scope-pkg`). Inside a single path segment, `*` matches
  * anything and `{sha256}` matches a SHA-256 digest that must equal the
  * archive checksum (for example `releases/{version}-{sha256}/{name}-{version}.tgz`).
+ * `{sha256}` may repeat, in one segment or several: every occurrence must
+ * declare the same digest.
  *
  * Before publishing, the archive is read without external tools: every entry
  * must stay under `package/`, private paths (dotfiles, `node_modules`) are
- * rejected, files outside the manifest `files` are rejected, every public
- * entrypoint must be present and the packed name and version must match.
+ * rejected, files outside the manifest `files` globs are rejected (except the
+ * files npm always packs, such as `main` and `bin`), the packed `package.json`
+ * must keep the repository name, version and publish-critical fields, and every
+ * public entrypoint of the packed manifest must be present.
  *
  * @module create-version/artifact
  */
@@ -28,34 +32,58 @@ import {
   ARTIFACT_SEGMENT_WILDCARD,
   ARTIFACT_SHA256_PLACEHOLDER,
   ARTIFACT_VERSION_PLACEHOLDER,
+  FILES_ANY_CHARACTERS_WILDCARD,
+  FILES_DIRECTORY_CONTENTS_SUFFIX,
+  FILES_GLOBSTAR,
+  FILES_NEGATION_PREFIX,
+  FILES_SINGLE_CHARACTER_WILDCARD,
+  INSTALL_LIFECYCLE_SCRIPTS,
+  PACK_REWRITTEN_DEPENDENCY_SPECIFIER_PATTERN,
   PACKAGE_MANIFEST_FILE,
+  PACKAGE_ROOT_PREFIX_PATTERN,
   PACKAGE_SCOPE_PATTERN,
   PACKED_ROOT_DIRECTORY,
   PACKED_SCOPE_REPLACEMENT,
   PAX_PATH_KEY,
   PRIVATE_PACKED_SEGMENT_PATTERN,
+  PUBLISH_CRITICAL_DEPENDENCY_FIELDS,
+  PUBLISH_CRITICAL_MANIFEST_FIELDS,
   SAFE_ARTIFACT_PATH_PATTERN,
   SHA256_HEX_PATTERN_SOURCE,
   TAR_BLOCK_SIZE,
   TAR_ENTRY_TYPE,
   TAR_HEADER_FIELD,
   TRAILING_NUL_PATTERN,
+  TRAILING_SLASH_PATTERN,
 } from "../constants/create-version.js";
 
 /**
  * @typedef {{ path: string, expectedSha256: string | null }} PreparedArtifact
  * @typedef {{ name: string, content: Buffer }} ArchiveEntry
- * @typedef {{ name?: unknown, version?: unknown, files?: unknown, exports?: unknown, main?: unknown, types?: unknown, typings?: unknown, bin?: unknown }} PackageManifest
+ * @typedef {Record<string, unknown>} PackageManifest
+ * @typedef {{ negated: boolean, matcher: RegExp }} FilesRule
  */
 
 /** Characters with regular-expression meaning, escaped in literal segment text. */
 const REGEXP_SPECIAL_CHARACTERS_PATTERN = /[.+?^${}()|[\]\\]/gu;
 
-/** Leading `./` of manifest paths. */
-const RELATIVE_PREFIX_PATTERN = /^\.\//u;
+/** Expression source of any run of characters inside one path segment. */
+const SEGMENT_CHARACTERS_SOURCE = "[^/]*";
 
-/** Trailing `/` of directory entries and `files` patterns. */
-const TRAILING_SLASH_PATTERN = /\/+$/u;
+/** Expression source of exactly one character inside one path segment. */
+const SEGMENT_CHARACTER_SOURCE = "[^/]";
+
+/** Expression source of a `**` segment followed by more segments: zero or more directories. */
+const DIRECTORIES_SOURCE = "(?:[^/]+/)*";
+
+/** Expression source of a trailing `**` segment: everything below the directory. */
+const DIRECTORY_CONTENTS_SOURCE = ".+";
+
+/** Expression source of the first `{sha256}` of a segment: captures the declared digest. */
+const SHA256_CAPTURE_SOURCE = `(?<sha256>${SHA256_HEX_PATTERN_SOURCE})`;
+
+/** Expression source of a repeated `{sha256}` in the same segment: must equal the captured digest. */
+const SHA256_BACKREFERENCE_SOURCE = "\\k<sha256>";
 
 /**
  * Converts an npm package name into the tarball base name `npm pack` and `pnpm pack` use.
@@ -81,20 +109,24 @@ export function expandArtifactPattern(pattern, { version, packageName }) {
 
 /**
  * Compiles one path segment: `*` matches anything but `/`, `{sha256}` captures a digest.
+ * A repeated `{sha256}` becomes a backreference, so every occurrence must be the same digest.
  *
  * @param {string} segment - Segment of an expanded pattern.
  * @returns {RegExp} Anchored expression; the digest, when present, is the `sha256` group.
  */
 function compileSegment(segment) {
-  const source = segment
+  const [firstPart, ...partsAfterDigests] = segment
     .split(ARTIFACT_SHA256_PLACEHOLDER)
     .map((part) =>
       part
         .split(ARTIFACT_SEGMENT_WILDCARD)
         .map((literal) => literal.replace(REGEXP_SPECIAL_CHARACTERS_PATTERN, "\\$&"))
-        .join("[^/]*")
-    )
-    .join(`(?<sha256>${SHA256_HEX_PATTERN_SOURCE})`);
+        .join(SEGMENT_CHARACTERS_SOURCE)
+    );
+  const source = partsAfterDigests.reduce(
+    (compiled, part, index) => `${compiled}${index === 0 ? SHA256_CAPTURE_SOURCE : SHA256_BACKREFERENCE_SOURCE}${part}`,
+    firstPart
+  );
   return new RegExp(`^${source}$`, "u");
 }
 
@@ -105,6 +137,7 @@ function compileSegment(segment) {
  * @param {string} pattern - Configured pattern with `{version}` and optional `{name}`, `*` and `{sha256}`.
  * @param {{ version: string, packageName: string }} release - Version and npm package name.
  * @returns {PreparedArtifact | null} Path relative to the root with `/` separators and the digest its path declares, or `null`.
+ *   Paths whose segments declare different digests never match.
  */
 export function findPreparedArtifact(repositoryRoot, pattern, release) {
   const segments = expandArtifactPattern(pattern, release).split("/").filter(Boolean);
@@ -123,12 +156,15 @@ export function findPreparedArtifact(repositoryRoot, pattern, release) {
 
       for (const entry of readdirSync(absoluteDirectory, { withFileTypes: true })) {
         const match = matcher.exec(entry.name);
-        if (match && (isLast ? entry.isFile() : entry.isDirectory())) {
-          next.push({
-            path: candidate.path ? `${candidate.path}/${entry.name}` : entry.name,
-            expectedSha256: match.groups?.sha256 ?? candidate.expectedSha256,
-          });
-        }
+        if (!match || !(isLast ? entry.isFile() : entry.isDirectory())) continue;
+
+        const declaredSha256 = match.groups?.sha256 ?? null;
+        if (declaredSha256 && candidate.expectedSha256 && declaredSha256 !== candidate.expectedSha256) continue;
+
+        next.push({
+          path: candidate.path ? `${candidate.path}/${entry.name}` : entry.name,
+          expectedSha256: declaredSha256 ?? candidate.expectedSha256,
+        });
       }
     }
 
@@ -232,6 +268,16 @@ export function readTarballEntries(archive) {
 }
 
 /**
+ * Normalizes a path declared in `package.json` to the form it has inside `package/`.
+ *
+ * @param {string} declaredPath - Manifest path, optionally prefixed with `./` or `/`.
+ * @returns {string} Path relative to the package root.
+ */
+function toPackedPath(declaredPath) {
+  return declaredPath.replace(PACKAGE_ROOT_PREFIX_PATTERN, "");
+}
+
+/**
  * Collects the relative file paths a manifest declares as public entrypoints.
  *
  * @param {unknown} value - `exports`, `main`, `types` or `bin` value.
@@ -239,24 +285,207 @@ export function readTarballEntries(archive) {
  */
 function collectEntrypoints(value) {
   if (typeof value === "string") {
-    return value.includes(ARTIFACT_SEGMENT_WILDCARD) ? [] : [value.replace(RELATIVE_PREFIX_PATTERN, "")];
+    return value.includes(ARTIFACT_SEGMENT_WILDCARD) ? [] : [toPackedPath(value)];
   }
   return value && typeof value === "object" ? Object.values(value).flatMap(collectEntrypoints) : [];
 }
 
 /**
- * Tells whether a packed path is covered by the manifest `files` list.
+ * Collects the files npm packs whatever `files` says: `main` and every `bin` target.
+ *
+ * @param {PackageManifest} manifest - Manifest being published.
+ * @returns {Set<string>} Paths relative to the package root.
+ */
+function collectMandatoryFiles(manifest) {
+  const declaredPaths = [manifest.main, ...(typeof manifest.bin === "string" ? [manifest.bin] : Object.values(manifest.bin ?? {}))];
+  return new Set(declaredPaths.filter((declaredPath) => typeof declaredPath === "string").map(toPackedPath));
+}
+
+/**
+ * Compiles one `files` glob, anchored at the package root: `*` and `?` stay inside a segment and `**` spans directories.
+ *
+ * @param {string} pattern - `files` entry without its negation prefix.
+ * @returns {RegExp} Expression matched against packed paths and their parent directories.
+ */
+function compileFilesPattern(pattern) {
+  let normalized = toPackedPath(pattern);
+  if (normalized.endsWith(FILES_DIRECTORY_CONTENTS_SUFFIX)) normalized += ARTIFACT_SEGMENT_WILDCARD;
+  const segments = normalized.replace(TRAILING_SLASH_PATTERN, "").split("/");
+
+  const source = segments
+    .map((segment, index) => {
+      const isLast = index === segments.length - 1;
+      if (segment === FILES_GLOBSTAR) return isLast ? DIRECTORY_CONTENTS_SOURCE : DIRECTORIES_SOURCE;
+
+      const segmentSource = [...segment]
+        .map((character) => {
+          if (character === FILES_ANY_CHARACTERS_WILDCARD) return SEGMENT_CHARACTERS_SOURCE;
+          if (character === FILES_SINGLE_CHARACTER_WILDCARD) return SEGMENT_CHARACTER_SOURCE;
+          return character.replace(REGEXP_SPECIAL_CHARACTERS_PATTERN, "\\$&");
+        })
+        .join("");
+      return isLast ? segmentSource : `${segmentSource}/`;
+    })
+    .join("");
+
+  return new RegExp(`^${source}$`, "u");
+}
+
+/**
+ * Compiles the manifest `files` list into ordered include and exclude rules.
+ *
+ * @param {string[]} files - Manifest `files` entries.
+ * @returns {FilesRule[]} Rules in declaration order.
+ */
+function compileFilesRules(files) {
+  return files.map((file) => {
+    const negated = file.startsWith(FILES_NEGATION_PREFIX);
+    return { negated, matcher: compileFilesPattern(negated ? file.slice(FILES_NEGATION_PREFIX.length) : file) };
+  });
+}
+
+/**
+ * Tells whether a packed path is covered by the manifest `files` list, with npm's gitignore-style rules:
+ * an entry that matches a directory covers everything inside it and the last matching entry wins,
+ * so a later `!pattern` excludes what an earlier entry included.
  *
  * @param {string} packedPath - Path relative to `package/`.
- * @param {string[]} files - Manifest `files` entries.
+ * @param {FilesRule[]} rules - Compiled `files` entries.
+ * @param {Set<string>} mandatoryFiles - `main` and `bin` targets, always packed.
  * @returns {boolean} Whether npm is allowed to pack it.
  */
-function isDeclaredFile(packedPath, files) {
+function isDeclaredFile(packedPath, rules, mandatoryFiles) {
   if (!packedPath.includes("/") && ALWAYS_PACKED_FILE_PATTERN.test(packedPath)) return true;
-  return files.some((file) => {
-    const root = file.replace(RELATIVE_PREFIX_PATTERN, "").replace(TRAILING_SLASH_PATTERN, "");
-    return packedPath === root || packedPath.startsWith(`${root}/`);
+  if (mandatoryFiles.has(packedPath)) return true;
+
+  const segments = packedPath.split("/");
+  const pathAndParents = segments.map((_segment, index) => segments.slice(0, index + 1).join("/"));
+  let isIncluded = false;
+  for (const { negated, matcher } of rules) {
+    if (pathAndParents.some((candidatePath) => matcher.test(candidatePath))) isIncluded = !negated;
+  }
+  return isIncluded;
+}
+
+/**
+ * Compares two JSON values structurally; object key order is ignored and array order is not.
+ *
+ * @param {unknown} left - First value.
+ * @param {unknown} right - Second value.
+ * @returns {boolean} Whether both values are equivalent.
+ */
+function isStructurallyEqual(left, right) {
+  if (left === right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((item, index) => isStructurallyEqual(item, right[index]));
+  }
+  if (!left || !right || typeof left !== "object" || typeof right !== "object") return false;
+
+  const leftRecord = /** @type {Record<string, unknown>} */ (left);
+  const rightRecord = /** @type {Record<string, unknown>} */ (right);
+  const keys = new Set([...Object.keys(leftRecord), ...Object.keys(rightRecord)]);
+  return [...keys].every((key) => isStructurallyEqual(leftRecord[key], rightRecord[key]));
+}
+
+/**
+ * Lists the values a packed field may legitimately have: the repository value and, when
+ * `publishConfig` overrides the field (as `pnpm pack` applies it), the override.
+ *
+ * @param {PackageManifest} manifest - Repository manifest.
+ * @param {string} field - Manifest field.
+ * @returns {unknown[]} Accepted values.
+ */
+function acceptedFieldValues(manifest, field) {
+  const publishConfig = manifest.publishConfig;
+  const hasOverride = publishConfig !== null && typeof publishConfig === "object" && Object.hasOwn(publishConfig, field);
+  return hasOverride ? [/** @type {Record<string, unknown>} */ (publishConfig)[field], manifest[field]] : [manifest[field]];
+}
+
+/**
+ * Compares a packed dependency map with the repository one; `workspace:` and `catalog:`
+ * specifiers only require the dependency, because `pnpm pack` replaces them with a version range.
+ *
+ * @param {unknown} packed - Packed dependency map.
+ * @param {unknown} expected - Repository (or `publishConfig`) dependency map.
+ * @returns {boolean} Whether both declare the same dependencies.
+ */
+function isSameDependencyMap(packed, expected) {
+  if (!expected || typeof expected !== "object" || !packed || typeof packed !== "object") return isStructurallyEqual(packed, expected);
+
+  const packedRecord = /** @type {Record<string, unknown>} */ (packed);
+  const expectedRecord = /** @type {Record<string, unknown>} */ (expected);
+  const names = new Set([...Object.keys(packedRecord), ...Object.keys(expectedRecord)]);
+  return [...names].every((dependencyName) => {
+    const expectedSpecifier = expectedRecord[dependencyName];
+    const packedSpecifier = packedRecord[dependencyName];
+    if (typeof expectedSpecifier === "string" && PACK_REWRITTEN_DEPENDENCY_SPECIFIER_PATTERN.test(expectedSpecifier)) {
+      return typeof packedSpecifier === "string" && packedSpecifier !== "";
+    }
+    return packedSpecifier === expectedSpecifier;
   });
+}
+
+/**
+ * Reads one lifecycle script of a manifest.
+ *
+ * @param {PackageManifest} manifest - Manifest.
+ * @param {string} scriptName - Script name.
+ * @returns {unknown} Script command, or `undefined`.
+ */
+function readScript(manifest, scriptName) {
+  const scripts = manifest.scripts;
+  return scripts && typeof scripts === "object" ? /** @type {Record<string, unknown>} */ (scripts)[scriptName] : undefined;
+}
+
+/**
+ * Compares the publish-critical fields of the packed manifest with the repository manifest.
+ *
+ * @param {PackageManifest} packed - `package.json` inside the archive, the one npm publishes.
+ * @param {PackageManifest} manifest - Repository `package.json`.
+ * @returns {string[]} Problems in Spanish; empty when nothing drifted.
+ */
+function findManifestDrift(packed, manifest) {
+  /** @type {string[]} */
+  const problems = [];
+
+  for (const field of PUBLISH_CRITICAL_MANIFEST_FIELDS) {
+    if (!acceptedFieldValues(manifest, field).some((accepted) => isStructurallyEqual(packed[field], accepted))) {
+      problems.push(`"${field}" del ${PACKAGE_MANIFEST_FILE} del tarball no coincide con el del repositorio`);
+    }
+  }
+
+  for (const field of PUBLISH_CRITICAL_DEPENDENCY_FIELDS) {
+    if (!acceptedFieldValues(manifest, field).some((accepted) => isSameDependencyMap(packed[field], accepted))) {
+      problems.push(`"${field}" del ${PACKAGE_MANIFEST_FILE} del tarball no coincide con el del repositorio`);
+    }
+  }
+
+  for (const scriptName of INSTALL_LIFECYCLE_SCRIPTS) {
+    if (readScript(packed, scriptName) !== readScript(manifest, scriptName)) {
+      problems.push(`el script "${scriptName}" del ${PACKAGE_MANIFEST_FILE} del tarball no coincide con el del repositorio`);
+    }
+  }
+
+  return problems;
+}
+
+/**
+ * Parses the `package.json` packed in the archive.
+ *
+ * @param {ArchiveEntry[]} entries - Archive files.
+ * @returns {{ packed: PackageManifest | null, problem: string | null }} Parsed manifest, or the reason it is unusable.
+ */
+function readPackedManifest(entries) {
+  const packedManifestEntry = entries.find((entry) => entry.name === `${PACKED_ROOT_DIRECTORY}${PACKAGE_MANIFEST_FILE}`);
+  if (!packedManifestEntry) return { packed: null, problem: `falta ${PACKAGE_MANIFEST_FILE} en el tarball` };
+
+  try {
+    const packed = JSON.parse(packedManifestEntry.content.toString("utf8"));
+    if (packed && typeof packed === "object" && !Array.isArray(packed)) return { packed, problem: null };
+    return { packed: null, problem: `${PACKAGE_MANIFEST_FILE} del tarball no es un objeto JSON` };
+  } catch (error) {
+    return { packed: null, problem: `${PACKAGE_MANIFEST_FILE} del tarball no es JSON válido (${error instanceof Error ? error.message : String(error)})` };
+  }
 }
 
 /**
@@ -269,8 +498,23 @@ function isDeclaredFile(packedPath, files) {
 export function findArchiveProblems(entries, manifest) {
   /** @type {string[]} */
   const problems = [];
+  const { packed, problem: packedManifestProblem } = readPackedManifest(entries);
+
+  if (packedManifestProblem) {
+    problems.push(packedManifestProblem);
+  } else if (packed) {
+    if (packed.name !== manifest.name || packed.version !== manifest.version) {
+      problems.push(`el tarball es ${packed.name}@${packed.version} y el repositorio ${manifest.name}@${manifest.version}`);
+    }
+    problems.push(...findManifestDrift(packed, manifest));
+  }
+
+  // npm publishes the packed manifest, so its `files`, `main`, `bin` and entrypoints are the ones that count.
+  const publishedManifest = packed ?? manifest;
+  const files = Array.isArray(publishedManifest.files) ? publishedManifest.files.filter((file) => typeof file === "string") : null;
+  const filesRules = files ? compileFilesRules(files) : null;
+  const mandatoryFiles = collectMandatoryFiles(publishedManifest);
   const packedPaths = new Set();
-  const files = Array.isArray(manifest.files) ? manifest.files.filter((file) => typeof file === "string") : null;
 
   for (const { name } of entries) {
     if (!name.startsWith(PACKED_ROOT_DIRECTORY) || name.includes("\\") || name.split("/").includes("..")) {
@@ -283,26 +527,14 @@ export function findArchiveProblems(entries, manifest) {
 
     if (packedPath.split("/").some((segment) => PRIVATE_PACKED_SEGMENT_PATTERN.test(segment))) {
       problems.push(`archivo privado en el tarball: ${packedPath}`);
-    } else if (files && !isDeclaredFile(packedPath, files)) {
+    } else if (filesRules && !isDeclaredFile(packedPath, filesRules, mandatoryFiles)) {
       problems.push(`archivo fuera de "files" en el tarball: ${packedPath}`);
     }
   }
 
-  const packedManifestEntry = entries.find((entry) => entry.name === `${PACKED_ROOT_DIRECTORY}${PACKAGE_MANIFEST_FILE}`);
-  if (!packedManifestEntry) {
-    problems.push(`falta ${PACKAGE_MANIFEST_FILE} en el tarball`);
-  } else {
-    try {
-      const packed = JSON.parse(packedManifestEntry.content.toString("utf8"));
-      if (packed.name !== manifest.name || packed.version !== manifest.version) {
-        problems.push(`el tarball es ${packed.name}@${packed.version} y el repositorio ${manifest.name}@${manifest.version}`);
-      }
-    } catch (error) {
-      problems.push(`${PACKAGE_MANIFEST_FILE} del tarball no es JSON válido (${error instanceof Error ? error.message : String(error)})`);
-    }
-  }
-
-  const entrypoints = [manifest.exports, manifest.main, manifest.types, manifest.typings, manifest.bin].flatMap(collectEntrypoints);
+  const entrypoints = [publishedManifest.exports, publishedManifest.main, publishedManifest.types, publishedManifest.typings, publishedManifest.bin].flatMap(
+    collectEntrypoints
+  );
   for (const entrypoint of new Set(entrypoints)) {
     if (!packedPaths.has(entrypoint)) problems.push(`falta el entrypoint público ${entrypoint} en el tarball`);
   }
