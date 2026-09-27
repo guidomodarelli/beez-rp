@@ -324,6 +324,32 @@ describe("prepared artifact inside a package without a files allowlist", () => {
     NPM_COMMAND_TEST_TIMEOUT_MS
   );
 
+  it("should report where the archive stayed when it cannot be put back, even if the operation failed too", async () => {
+    for (const operationFails of [false, true]) {
+      const root = createRoot();
+      const holdingParent = createRoot();
+      mkdirSync(path.join(root, "releases"));
+      writeFileSync(path.join(root, ARCHIVE_PATH), "archive");
+
+      const result = withArtifactOutsidePackageRoot(
+        root,
+        ARCHIVE_PATH,
+        async () => {
+          // A non-empty directory now takes the archive's place, so moving it back fails.
+          mkdirSync(path.join(root, ARCHIVE_PATH));
+          writeFileSync(path.join(root, ARCHIVE_PATH, "blocker"), "");
+          if (operationFails) throw new Error("npm crashed");
+          return "packed";
+        },
+        holdingParent
+      );
+
+      await expect(result).rejects.toThrow(`no se pudo devolver ${ARCHIVE_PATH} a su lugar`);
+      const [holdingDirectory] = readdirSync(holdingParent);
+      expect(readdirSync(path.join(holdingParent, holdingDirectory))).toEqual([path.basename(ARCHIVE_PATH)]);
+    }
+  });
+
   it("should fail without touching anything when the archive is missing", async () => {
     const root = createRoot();
 

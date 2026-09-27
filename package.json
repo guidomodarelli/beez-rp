@@ -70,9 +70,10 @@
   ],
   "scripts": {
     "build:types": "tsc -p tsconfig.types.json",
+    "lint": "oxlint",
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
-    "check": "pnpm typecheck && pnpm test",
+    "check": "pnpm lint && pnpm typecheck && pnpm test",
     "create-version": "node bin/beez-rp.js create-version",
     "cv": "node bin/beez-rp.js create-version",
     "prepack": "pnpm build:types",
@@ -80,6 +81,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.13.4",
+    "oxlint": "^1.85.0",
     "typescript": "^7.0.2",
     "vitest": "^5.0.0"
   }

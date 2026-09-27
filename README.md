@@ -191,6 +191,6 @@ pnpm cv
 
 ```bash
 pnpm install
-pnpm check        # typecheck (JSDoc con checkJs) + tests
+pnpm check        # oxlint (.oxlintrc.json) + typecheck (JSDoc con checkJs) + tests
 pnpm build:types  # genera types/*.d.ts (también corre en prepack)
 ```

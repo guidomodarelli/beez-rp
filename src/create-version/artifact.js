@@ -149,7 +149,7 @@ export function findPreparedArtifact(repositoryRoot, pattern, release) {
 
   const newest = candidates
     .map((candidate) => ({ candidate, modifiedAt: statSync(path.join(repositoryRoot, candidate.path)).mtimeMs }))
-    .sort((left, right) => right.modifiedAt - left.modifiedAt)[0];
+    .toSorted((left, right) => right.modifiedAt - left.modifiedAt)[0];
 
   return newest?.candidate ?? null;
 }
@@ -280,17 +280,25 @@ export async function withArtifactOutsidePackageRoot(repositoryRoot, artifactPat
     throw new Error(`beez-rp create-version: no se pudo apartar ${artifactPath} para verificarlo`, { cause: error });
   }
 
+  /** @type {{ value: T } | { error: unknown }} */
+  let outcome;
   try {
-    return await operation();
-  } finally {
-    try {
-      moveFile(heldArchivePath, archivePath);
-    } catch (error) {
-      // The holding directory is kept so the archive is never lost.
-      throw new Error(`beez-rp create-version: no se pudo devolver ${artifactPath} a su lugar; quedó en ${heldArchivePath}`, { cause: error });
-    }
-    rmSync(holdingDirectory, { recursive: true, force: true });
+    outcome = { value: await operation() };
+  } catch (error) {
+    outcome = { error };
   }
+
+  // Putting the archive back takes precedence over the operation's own result or failure.
+  try {
+    moveFile(heldArchivePath, archivePath);
+  } catch (error) {
+    // The holding directory is kept so the archive is never lost.
+    throw new Error(`beez-rp create-version: no se pudo devolver ${artifactPath} a su lugar; quedó en ${heldArchivePath}`, { cause: error });
+  }
+  rmSync(holdingDirectory, { recursive: true, force: true });
+
+  if ("error" in outcome) throw outcome.error;
+  return outcome.value;
 }
 
 /**
