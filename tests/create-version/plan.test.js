@@ -268,6 +268,17 @@ describe("create-version plan with npm credentials", () => {
     expect(unknown.mode).toBe(RELEASE_MODE.newRelease);
     expect(unknown.warnings).toEqual([expect.stringContaining("sin red")]);
   });
+
+  it("should explain a failed npm lookup with a rejected credential, and keep the connection blocker otherwise", () => {
+    const failedLookup = { status: NPM_LOOKUP_STATUS.failed, publishedVersions: [], reason: "npm view: npm error code E401" };
+    const blockerTitles = (/** @type {import("../../src/create-version/npm.js").NpmAuthCheck | null} */ npmAuth) =>
+      buildReleasePlan(createMainState({ npm: failedLookup, npmAuth }), NPM_PACKAGE).blockers.map((blocker) => blocker.title);
+
+    expect(blockerTitles(createNpmAuth({ status: NPM_AUTH_STATUS.invalidToken, user: null }))).toEqual(["El NPM_TOKEN (.env del repo) es inválido o venció"]);
+    expect(blockerTitles(createNpmAuth({ status: NPM_AUTH_STATUS.missingToken, user: null, source: null }))).toEqual(["No se pudo consultar npm"]);
+    expect(blockerTitles(createNpmAuth({ status: NPM_AUTH_STATUS.unknown, reason: "sin red" }))).toEqual(["No se pudo consultar npm"]);
+    expect(blockerTitles(null)).toEqual(["No se pudo consultar npm"]);
+  });
 });
 
 describe("create-version plan with a last release missing from npm", () => {

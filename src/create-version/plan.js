@@ -177,6 +177,23 @@ export function describeFeatureBranchGaps(branch, pullRequest, githubError) {
 }
 
 /**
+ * Explains a failed npm lookup through the credential check when the registry answered it and
+ * rejected the credential (an invalid or expired token, or a user that cannot publish): an
+ * authenticated `npm view` fails with E401/E403 in that case, so replacing the token is the fix,
+ * not the connection. A missing token never reached the registry, so it does not explain the lookup.
+ *
+ * @param {NpmAuthCheck | null | undefined} npmAuth - Credential check, when it ran.
+ * @returns {ReleaseBlocker | null} Credential blocker, or `null` to keep the generic lookup blocker.
+ */
+function describeRejectedNpmCredential(npmAuth) {
+  if (!npmAuth || npmAuth.status === NPM_AUTH_STATUS.missingToken) {
+    return null;
+  }
+
+  return describeNpmAuthProblem(npmAuth);
+}
+
+/**
  * Lists the blockers that must be fixed before any release step runs.
  *
  * @param {ReleaseState} state - Snapshot.
@@ -219,10 +236,12 @@ function findBlockers(state) {
   }
 
   if (state.npm && state.npm.status !== NPM_LOOKUP_STATUS.ok) {
-    blockers.push({
-      title: "No se pudo consultar npm",
-      details: [`${state.npm.reason ?? "npm no respondió"}.`, "Revisá la conexión y volvé a correr pnpm create-version."],
-    });
+    blockers.push(
+      describeRejectedNpmCredential(state.npmAuth) ?? {
+        title: "No se pudo consultar npm",
+        details: [`${state.npm.reason ?? "npm no respondió"}.`, "Revisá la conexión y volvé a correr pnpm create-version."],
+      }
+    );
   }
 
   return blockers;

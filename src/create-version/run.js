@@ -896,11 +896,50 @@ async function describeReleaseOnOrigin(context, remoteUrl) {
   }
 
   const host = GITHUB_REPOSITORY_PATTERN.test(remoteUrl) ? "GitHub" : RELEASE_REMOTE;
-  const isDetached = !context.state.currentBranch;
-  const refs = isDetached ? "tag" : `${MAIN_BRANCH} + tag`;
   const target = context.config.publish === NPM_PUBLISHER ? "publicar en npm" : "publicar el release";
-  const rerun = isDetached ? `Corré pnpm create-version desde ${tag} (HEAD desacoplado)` : "Corré pnpm create-version";
-  return `${tag} ya está en ${host} (${refs}); falta ${target}. ${rerun} para reintentar solo la publicación.`;
+
+  // A detached release is published from its tag and never pushes `main`.
+  if (!context.state.currentBranch) {
+    return `${tag} ya está en ${host} (tag); falta ${target}. Corré pnpm create-version desde ${tag} (HEAD desacoplado) para reintentar solo la publicación.`;
+  }
+
+  if (context.pushed || (await isTagCommitOnRemoteMain(context.reader, tag))) {
+    return `${tag} ya está en ${host} (${MAIN_BRANCH} + tag); falta ${target}. Corré pnpm create-version para reintentar solo la publicación.`;
+  }
+
+  return `${tag} ya está en ${host} solo como tag: ${MAIN_BRANCH} de ${RELEASE_REMOTE} todavía no tiene el commit del release; faltan subir ${MAIN_BRANCH} y ${target}. Corré pnpm create-version para retomar desde el push.`;
+}
+
+/**
+ * Tells whether `main` on `origin` already contains the commit a release tag points at. The remote
+ * ref is read with `git ls-remote`, independently of the tag, because a prior or manual push may
+ * have sent only the tag.
+ *
+ * @param {GitReader} reader - Git reader of the repository.
+ * @param {string} tag - Release tag, such as `v1.2.0`.
+ * @returns {Promise<boolean>} `true` when remote `main` includes the tag commit; `false` when it
+ *   does not, or when it cannot be decided (no remote `main`, or its commit is not fetched locally).
+ */
+async function isTagCommitOnRemoteMain(reader, tag) {
+  const remoteMainLine = await reader.tryGit(["ls-remote", RELEASE_REMOTE, `refs/heads/${MAIN_BRANCH}`]);
+  const remoteMainSha = remoteMainLine?.trim().split(/\s+/u)[0];
+
+  if (!remoteMainSha) {
+    return false;
+  }
+
+  return (await reader.tryGit(["merge-base", "--is-ancestor", `refs/tags/${tag}^{commit}`, remoteMainSha])) !== null;
+}
+
+/**
+ * Tells whether the npm lookup of the diagnosis ran and failed, so the plan is blocked before it
+ * could show a publication step.
+ *
+ * @param {{ npm: import("./npm.js").NpmLookup | null }} snapshot - Snapshot without credentials.
+ * @returns {boolean} `true` when npm was queried and did not answer with the published versions.
+ */
+function hasFailedNpmLookup(snapshot) {
+  return snapshot.npm !== null && snapshot.npm.status !== NPM_LOOKUP_STATUS.ok;
 }
 
 /**
@@ -948,9 +987,11 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
       repositoryRoot,
       trackNpm: config.registry === RELEASE_REGISTRY.npm,
       checkMigrations: migrations ? () => migrations.check(createHookContext(repositoryRoot, reader, null)) : null,
-      // The credentials are only checked when the plan would publish to npm.
+      // The credentials are checked when the plan would publish to npm, and also when the npm lookup
+      // failed: an authenticated `npm view` rejected with E401/E403 means the token, not the connection, is wrong.
       checkNpmAuth: (snapshot) =>
-        config.publish === NPM_PUBLISHER && buildReleasePlan(snapshot, capabilities, planOptions).steps.some((planStep) => planStep.id === RELEASE_STEP.publishRelease),
+        config.publish === NPM_PUBLISHER &&
+        (hasFailedNpmLookup(snapshot) || buildReleasePlan(snapshot, capabilities, planOptions).steps.some((planStep) => planStep.id === RELEASE_STEP.publishRelease)),
       onProgress: (label) => spinner.update(label),
     });
     spinner.succeed("Diagnóstico completo");

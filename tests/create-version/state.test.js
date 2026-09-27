@@ -169,15 +169,17 @@ function runCliAsync(repositoryRoot, commandArguments, environmentOverrides = {}
 /**
  * Starts a fixture registry where {@link OWNER_TOKEN} owns `fixture-app`.
  *
- * @param {{ publishedVersions?: string[], rejectPublications?: boolean }} [options] - Versions already
- *   published (none means the package does not exist yet) and whether every publication fails with 404.
+ * @param {{ publishedVersions?: string[], rejectPublications?: boolean, rejectUnknownTokenReads?: boolean }} [options] - Versions
+ *   already published (none means the package does not exist yet), whether every publication fails with 404
+ *   and whether reads authenticated with an unknown token fail with 401.
  * @returns {ReturnType<typeof startFixtureNpmRegistry>} Running registry.
  */
-async function startOwnedRegistry({ publishedVersions = [], rejectPublications = false } = {}) {
+async function startOwnedRegistry({ publishedVersions = [], rejectPublications = false, rejectUnknownTokenReads = false } = {}) {
   const registry = await startFixtureNpmRegistry({
     users: { [OWNER_TOKEN]: OWNER_USER },
     packages: publishedVersions.length > 0 ? { "fixture-app": { maintainers: [OWNER_USER], versions: publishedVersions } } : {},
     rejectPublications,
+    rejectUnknownTokenReads,
   });
   openRegistries.push(registry);
   return registry;
@@ -667,6 +669,64 @@ describe("beez-rp create-version command", () => {
       expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
       expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
       expect(existsSync(hookLog)).toBe(false);
+      expect(registry.publications).toEqual([]);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should diagnose an invalid NPM_TOKEN, not the connection, when the registry rejects the authenticated npm lookup",
+    async () => {
+      const registry = await startOwnedRegistry({ publishedVersions: ["0.1.0"], rejectUnknownTokenReads: true });
+      const { repositoryRoot, remoteRoot } = createReleasedRepository("0.1.0", publishTo(registry.registryUrl));
+      const hookLog = path.join(path.dirname(repositoryRoot), "hooks.log");
+      pushConfiguration(repositoryRoot, npmReleaseConfiguration(hookLog));
+
+      const rejected = await runCliAsync(repositoryRoot, ["--bump", "minor"], { NPM_TOKEN: "expired-fixture-token" });
+      const output = flattenOutput(rejected.output);
+
+      expect(rejected.status, rejected.output).toBe(0);
+      expect(output).toContain("npm auth token inválido o vencido (variable de entorno)");
+      expect(output).toContain("El NPM_TOKEN (variable de entorno) es inválido o venció");
+      expect(output).not.toContain("No se pudo consultar npm");
+      expect(output).not.toContain("Revisá la conexión");
+      expect(output).not.toContain("expired-fixture-token");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+      expect(existsSync(hookLog)).toBe(false);
+      expect(registry.publications).toEqual([]);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should say that only the tag is on origin when a resumed release fails before pushing main",
+    async () => {
+      const registry = await startOwnedRegistry({ publishedVersions: ["0.1.0"] });
+      const manifestFields = publishTo(registry.registryUrl);
+      const { repositoryRoot, remoteRoot } = createReleasedRepository("0.1.0", manifestFields);
+      pushConfiguration(repositoryRoot, [
+        "export default {",
+        '  changelog: { audience: "equipo" },',
+        '  registry: "npm",',
+        '  publish: "npm",',
+        '  prepare: () => { throw new Error("prepare fixture failure"); },',
+        "};",
+      ]);
+      const remoteMainSha = runGit(["rev-parse", "main"], remoteRoot);
+      commitVersion(repositoryRoot, "0.2.0", "0.2.0", manifestFields);
+      runGit(["tag", "-a", "v0.2.0", "-m", "0.2.0"], repositoryRoot);
+      runGit(["push", "--quiet", "origin", "refs/tags/v0.2.0"], repositoryRoot);
+
+      const resumed = await runCliAsync(repositoryRoot, [], { NPM_TOKEN: OWNER_TOKEN });
+      const output = flattenOutput(resumed.output);
+
+      expect(resumed.status, resumed.output).toBe(1);
+      expect(output).toContain("prepare fixture failure");
+      expect(output).toContain(
+        "v0.2.0 ya está en origin solo como tag: main de origin todavía no tiene el commit del release; faltan subir main y publicar en npm. Corré pnpm create-version para retomar desde el push."
+      );
+      expect(output).not.toContain("(main + tag)");
+      expect(runGit(["rev-parse", "main"], remoteRoot)).toBe(remoteMainSha);
       expect(registry.publications).toEqual([]);
     },
     GIT_FIXTURE_TEST_TIMEOUT_MS

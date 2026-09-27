@@ -5,7 +5,9 @@
  * the packument). Tokens map to users; a PUT by a user that is not a
  * maintainer gets the 404 the public registry answers. A package can hide its
  * owners: `npm owner ls` then gets a 404, as a registry answers a user without
- * access to a private package.
+ * access to a private package. A registry may also reject reads authenticated
+ * with an unknown token (401), as private registries do for an expired or
+ * invalid token.
  *
  * @module tests/create-version/support/fixture-npm-registry
  */
@@ -85,11 +87,13 @@ function buildPackument(packageName, fixturePackage) {
  *   users?: Record<string, string>,
  *   packages?: Record<string, FixturePackage>,
  *   rejectPublications?: boolean,
+ *   rejectUnknownTokenReads?: boolean,
  * }} [options] - `users` maps each accepted token to its npm user; `packages` are the published
- *   packages; `rejectPublications` answers every PUT with 404, as npm does for a token without write access.
+ *   packages; `rejectPublications` answers every PUT with 404, as npm does for a token without write access;
+ *   `rejectUnknownTokenReads` answers 401 to a GET whose bearer token maps to no user.
  * @returns {Promise<FixtureRegistry>} Running registry.
  */
-export async function startFixtureNpmRegistry({ users = {}, packages = {}, rejectPublications = false } = {}) {
+export async function startFixtureNpmRegistry({ users = {}, packages = {}, rejectPublications = false, rejectUnknownTokenReads = false } = {}) {
   /** @type {Map<string, FixturePackage>} */
   const registryPackages = new Map(Object.entries(packages).map(([name, fixturePackage]) => [name, { ...fixturePackage, maintainers: [...fixturePackage.maintainers], versions: [...fixturePackage.versions] }]));
   /** @type {FixturePublication[]} */
@@ -106,6 +110,11 @@ export async function startFixtureNpmRegistry({ users = {}, packages = {}, rejec
     }
 
     const fixturePackage = registryPackages.get(requestPath);
+
+    if (request.method === "GET" && rejectUnknownTokenReads && authorization.startsWith(BEARER_PREFIX) && !user) {
+      sendJson(response, 401, { error: "invalid token" });
+      return;
+    }
 
     if (request.method === "GET") {
       const visible = fixturePackage && !(fixturePackage.hiddenFromOwnerList && request.headers[NPM_COMMAND_HEADER] === OWNER_COMMAND);
