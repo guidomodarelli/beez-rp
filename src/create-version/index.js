@@ -10,25 +10,24 @@
  */
 
 export {
+  computeNpmIntegrity,
   computeSha256,
   expandArtifactPattern,
-  findArchiveProblems,
-  findPackedFileSetProblems,
+  findPnpmPackRewrites,
   findPreparedArtifact,
-  findReleaseManifestProblems,
-  isRewrittenDependencySpecifier,
   isSafeArtifactPath,
-  readTarballEntries,
   verifyPreparedArtifact,
 } from "./artifact.js";
 export { defineCreateVersionConfig, loadCreateVersionConfig, resolveCreateVersionConfig } from "./config.js";
 export { ReleaseStepError } from "./errors.js";
 export {
+  buildNpmAuthConfigLine,
   buildNpmPublishArguments,
-  listNpmPackFiles,
   lookupPublishedVersions,
   parseNpmPackDryRunOutput,
   publishToNpm,
+  readNpmPackIntegrity,
+  resolvePublishRegistry,
   withNpmAuthConfig,
 } from "./npm.js";
 export { DEFAULT_CAPABILITIES, RELEASE_USAGE, buildReleasePlan, describeFeatureBranchGaps, parseReleaseArguments } from "./plan.js";

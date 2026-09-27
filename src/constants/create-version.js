@@ -169,8 +169,11 @@ export const ARTIFACT_SHA256_PLACEHOLDER = "{sha256}";
 /** Lowercase hexadecimal SHA-256 digest matched by {@link ARTIFACT_SHA256_PLACEHOLDER}. */
 export const SHA256_HEX_PATTERN_SOURCE = "[0-9a-f]{64}";
 
-/** Characters allowed in an artifact path passed to `npm publish` through the Windows shell. */
-export const SAFE_ARTIFACT_PATH_PATTERN = /^[\w.@+/-]+$/u;
+/**
+ * Characters allowed in an artifact path passed to `npm publish` through the Windows shell;
+ * `~` is allowed because npm package names (and so tarball names) may contain it.
+ */
+export const SAFE_ARTIFACT_PATH_PATTERN = /^[\w.@+~/-]+$/u;
 
 /**
  * Prefix that makes npm read an artifact path as a local file: a bare
@@ -178,170 +181,47 @@ export const SAFE_ARTIFACT_PATH_PATTERN = /^[\w.@+/-]+$/u;
  */
 export const LOCAL_PATH_PREFIX = "./";
 
-/** Root directory of every entry inside an npm tarball. */
-export const PACKED_ROOT_DIRECTORY = "package/";
-
-/** Leading `./` or `/` of manifest paths, relative to the package root. */
-export const PACKAGE_ROOT_PREFIX_PATTERN = /^(?:\.\/|\/)+/u;
-
-/** Trailing `/` of directory entries. */
-export const TRAILING_SLASH_PATTERN = /\/+$/u;
-
 /**
- * Arguments of the `npm pack` run that lists the files npm would pack from the release checkout:
- * nothing is written and no lifecycle script runs, so it only reports what `prepare` left.
+ * Arguments of the `npm pack` run that reports the integrity npm would pack from the release
+ * checkout: nothing is written and no lifecycle script runs, so it only reads what `prepare` left.
  */
 export const NPM_PACK_DRY_RUN_ARGUMENTS = Object.freeze(["pack", "--dry-run", "--json", "--ignore-scripts"]);
 
-/**
- * Manifest fields compared between the packed and the repository `package.json`:
- * npm publishes the packed one, so entrypoints, dependencies and module format must not drift.
- */
-export const PUBLISH_CRITICAL_MANIFEST_FIELDS = Object.freeze([
-  "exports",
-  "main",
-  "module",
-  "types",
-  "typings",
-  "bin",
-  "type",
-  "files",
-  "engines",
-  "bundleDependencies",
-  "bundledDependencies",
-]);
+/** Hash algorithm of the npm `integrity` string (`sha512-<base64>`). */
+export const NPM_INTEGRITY_ALGORITHM = "sha512";
 
-/**
- * Manifest field npm applies as publish options (`registry`, `tag`, `access`, `provenance`...)
- * when it publishes an archive, so the packed value must equal the repository one.
- */
+/** npm `integrity` string as `npm pack --json` reports it. */
+export const NPM_INTEGRITY_PATTERN = /^sha512-[A-Za-z0-9+/]+={0,2}$/u;
+
+/** Manifest field whose keys npm applies as configuration when it publishes. */
 export const PUBLISH_CONFIG_FIELD = "publishConfig";
 
 /**
- * `publishConfig` keys `pnpm pack` moves to the top level of the packed manifest (and removes
- * from `publishConfig`), as listed by pnpm's `PUBLISH_CONFIG_WHITELIST`.
+ * `publishConfig` keys npm uses as publish configuration. pnpm additionally hoists manifest
+ * fields (`exports`, `main`, `bin`...) from `publishConfig` when packing, which npm never does.
  */
-export const PNPM_HOISTED_PUBLISH_CONFIG_FIELDS = Object.freeze([
-  "bin",
-  "engines",
-  "type",
-  "imports",
-  "main",
-  "module",
-  "typings",
-  "types",
-  "exports",
-  "browser",
-  "esnext",
-  "es2015",
-  "unpkg",
-  "umd:main",
-  "os",
-  "cpu",
-  "libc",
-  "typesVersions",
-]);
+export const NPM_PUBLISH_CONFIG_KEYS = Object.freeze(["registry", "access", "tag", "provenance"]);
 
-/** Dependency maps compared entry by entry; `pnpm pack` rewrites some specifiers. */
-export const PUBLISH_CRITICAL_DEPENDENCY_FIELDS = Object.freeze(["dependencies", "peerDependencies", "optionalDependencies"]);
+/** Scoped registry key of `publishConfig`, such as `@scope:registry`, also npm configuration. */
+export const NPM_SCOPED_REGISTRY_KEY_PATTERN = /^@[^/:]+:registry$/u;
 
-/** Lifecycle scripts npm runs when the published package is installed. */
-export const INSTALL_LIFECYCLE_SCRIPTS = Object.freeze(["preinstall", "install", "postinstall", "prepare"]);
+/** Dependency maps npm publishes as they are written in `package.json`. */
+export const PUBLISHED_DEPENDENCY_FIELDS = Object.freeze(["dependencies", "peerDependencies", "optionalDependencies"]);
 
-/** Dependency specifiers `pnpm pack` replaces with the resolved version range (`workspace:^`, `catalog:`). */
-export const PACK_REWRITTEN_DEPENDENCY_SPECIFIER_PATTERN = /^(?:workspace|catalog):/u;
+/** Dependency specifiers only `pnpm pack` replaces with a resolved version range (`workspace:^`, `catalog:`). */
+export const PNPM_PACK_REWRITTEN_SPECIFIER_PATTERN = /^(?:workspace|catalog):/u;
 
-/** Numeric identifier of a semantic version, or an `x`/`X`/`*` wildcard of a range. */
-const SEMVER_RANGE_IDENTIFIER_SOURCE = String.raw`(?:0|[1-9]\d*|[xX*])`;
+/** Registry `npm publish` uses when `publishConfig.registry` is not set. */
+export const DEFAULT_NPM_REGISTRY_URL = "https://registry.npmjs.org/";
 
-/** Optional prerelease and build suffixes of a semantic version. */
-const SEMVER_SUFFIXES_SOURCE = String.raw`(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?`;
-
-/** Full or partial version of a range (`1`, `1.2`, `1.2.3-beta.1`, `1.x`). */
-const SEMVER_PARTIAL_VERSION_SOURCE = String.raw`v?${SEMVER_RANGE_IDENTIFIER_SOURCE}(?:\.${SEMVER_RANGE_IDENTIFIER_SOURCE}(?:\.${SEMVER_RANGE_IDENTIFIER_SOURCE}${SEMVER_SUFFIXES_SOURCE})?)?`;
-
-/** One comparator of a range, such as `^1.2.0`, `>=2` or `~1.4`. */
-const SEMVER_COMPARATOR_SOURCE = String.raw`(?:<=|>=|<|>|=|~>|~|\^)?\s*${SEMVER_PARTIAL_VERSION_SOURCE}`;
-
-/** One comparator set: a hyphen range (`1.0.0 - 2.0.0`) or comparators joined by spaces. */
-const SEMVER_COMPARATOR_SET_SOURCE = String.raw`(?:${SEMVER_PARTIAL_VERSION_SOURCE}\s+-\s+${SEMVER_PARTIAL_VERSION_SOURCE}|${SEMVER_COMPARATOR_SOURCE}(?:\s+${SEMVER_COMPARATOR_SOURCE})*)`;
+/** Protocols a publish registry URL may use. */
+export const NPM_REGISTRY_PROTOCOLS = Object.freeze(["http:", "https:"]);
 
 /**
- * Semantic version or range as node-semver accepts it (comparator sets joined by `||`); the only
- * form a `workspace:` or `catalog:` specifier may be rewritten to, besides an `npm:` alias.
+ * Value of the registry credential in the temporary npm config: npm expands `${NPM_TOKEN}` from
+ * the environment, so the token never reaches the disk or a command line.
  */
-export const SEMVER_RANGE_PATTERN = new RegExp(String.raw`^\s*${SEMVER_COMPARATOR_SET_SOURCE}(?:\s*\|\|\s*${SEMVER_COMPARATOR_SET_SOURCE})*\s*$`, "u");
-
-/** npm alias specifier `npm:<name>@<range>`; the `name` and `range` groups are validated separately. */
-export const NPM_ALIAS_SPECIFIER_PATTERN = /^npm:(?<name>(?:@[^/@]+\/)?[^/@]+)@(?<range>.+)$/u;
-
-/** Archive path segments that make an entry name ambiguous: parent, current and empty. */
-export const UNSAFE_PACKED_SEGMENTS = Object.freeze(["..", ".", ""]);
-
-/** Size of a tar header and data block, in bytes. */
-export const TAR_BLOCK_SIZE = 512;
-
-/** Byte ranges of the tar header fields read by the archive verifier. */
-export const TAR_HEADER_FIELD = Object.freeze({
-  name: [0, 100],
-  size: [124, 136],
-  type: [156, 157],
-  linkName: [157, 257],
-  prefix: [345, 500],
-});
-
-/**
- * Tar entry types: regular files (`0`, NUL or contiguous `7`), links, directories, and the
- * PAX or GNU headers that carry long names or link targets for the next entry.
- */
-export const TAR_ENTRY_TYPE = Object.freeze({
-  file: "0",
-  legacyFile: "\0",
-  contiguousFile: "7",
-  hardLink: "1",
-  symbolicLink: "2",
-  directory: "5",
-  paxHeader: "x",
-  paxGlobalHeader: "g",
-  gnuLongName: "L",
-  gnuLongLinkName: "K",
-});
-
-/** Kinds of archive entries reported by the tar reader; only files and directories are publishable. */
-export const ARCHIVE_ENTRY_KIND = Object.freeze({
-  file: "file",
-  directory: "directory",
-  hardLink: "hard-link",
-  symbolicLink: "symbolic-link",
-  unsupported: "unsupported",
-});
-
-/** Trailing NUL padding of a GNU long-name record. */
-export const TRAILING_NUL_PATTERN = /\0+$/u;
-
-/** PAX record key holding an entry path longer than the header allows. */
-export const PAX_PATH_KEY = "path";
-
-/** PAX record key holding a link target longer than the header allows. */
-export const PAX_LINK_PATH_KEY = "linkpath";
-
-/** PAX record key holding the entry data size, which overrides the ustar header size. */
-export const PAX_SIZE_KEY = "size";
-
-/** Decimal size of a PAX `size` record. */
-export const PAX_DECIMAL_SIZE_PATTERN = /^\d+$/u;
-
-/** Octal size of a ustar header, after trimming spaces; base-256 sizes are rejected. */
-export const TAR_OCTAL_SIZE_PATTERN = /^[0-7]*$/u;
-
-/** Separator between the byte length and the `key=value` text of a PAX record. */
-export const PAX_LENGTH_SEPARATOR = " ";
-
-/** Newline that terminates every PAX record. */
-export const PAX_RECORD_TERMINATOR_PATTERN = /\n$/u;
-
-/** npm registry credential line; npm expands `${NPM_TOKEN}` from the environment, so the token never reaches the disk. */
-export const NPM_AUTH_CONFIG_LINE = "//registry.npmjs.org/:_authToken=${NPM_TOKEN}\n";
+export const NPM_AUTH_TOKEN_REFERENCE = `\${${NPM_TOKEN_VARIABLE}}`;
 
 /** Prefix of the temporary directory holding the publish-only npm user config. */
 export const NPM_AUTH_DIRECTORY_PREFIX = "beez-rp-npm-auth-";

@@ -61,12 +61,12 @@ import {
   startSpinner,
 } from "../terminal-ui.js";
 import { listNextVersions, resolveRequestedVersion, suggestReleaseType, toReleaseTag } from "../versions.js";
-import { expandArtifactPattern, findPreparedArtifact, findReleaseManifestProblems, isSafeArtifactPath, verifyPreparedArtifact } from "./artifact.js";
+import { expandArtifactPattern, findPnpmPackRewrites, findPreparedArtifact, isSafeArtifactPath, verifyPreparedArtifact } from "./artifact.js";
 import { loadCreateVersionConfig } from "./config.js";
 import { ReleaseStepError } from "./errors.js";
-import { listNpmPackFiles, lookupPublishedVersions, publishToNpm } from "./npm.js";
+import { buildNpmAuthConfigLine, lookupPublishedVersions, publishToNpm, readNpmPackIntegrity, resolvePublishRegistry } from "./npm.js";
 import { RELEASE_USAGE, buildReleasePlan, parseReleaseArguments } from "./plan.js";
-import { createGitReader, listCommits, readPackageManifestAt, runCommandLine, runInherited } from "./process.js";
+import { createGitReader, listCommits, runCommandLine, runInherited } from "./process.js";
 import { collectReleaseState } from "./state.js";
 
 /**
@@ -560,26 +560,34 @@ async function pushReleaseStep(context) {
 }
 
 /**
- * Reads the `package.json` of the release commit: the one the `v<version>` tag points to or,
- * when the tag does not exist, `HEAD`. `prepare` may rewrite the working tree, so the identity
- * the archive must match never comes from it.
+ * Lists the tracked files that differ from `HEAD`. `prepare` may create untracked or ignored
+ * output (`dist/`, `releases/`), but a modified tracked file (such as `package.json`) means
+ * `npm pack --dry-run` would no longer read the release commit.
  *
  * @param {ReleaseContext} context - Release context.
- * @param {string} version - Version being published.
- * @returns {Promise<import("./artifact.js").PackageManifest | null>} Release manifest, or `null` when unreadable.
+ * @returns {Promise<string[]>} `git status --porcelain` lines of modified tracked files.
+ * @throws {ReleaseStepError} When Git cannot report the working tree state.
  */
-async function readReleaseManifest(context, version) {
-  return (await readPackageManifestAt(context.reader, toReleaseTag(version))) ?? readPackageManifestAt(context.reader, "HEAD");
+async function listTrackedChanges(context) {
+  const output = await context.reader.tryGit(["status", "--porcelain", "--untracked-files=no"]);
+
+  if (output === null) {
+    throw new ReleaseStepError("No se pudo leer el estado del working tree antes de publicar.", "No se publicó nada. Revisá git status y volvé a correr pnpm create-version.");
+  }
+
+  return output.split("\n").filter((line) => line.trim() !== "");
 }
 
 /**
- * Finds and verifies the archive prepared for the release when the project configured `artifact`:
- * the release commit must declare the version being published, the working tree must still describe
- * it, and the archive must match that manifest and contain exactly the files `npm pack --dry-run` lists.
+ * Finds and verifies the archive prepared for the release when the project configured `artifact`.
+ * The working tree must still be the release commit (no tracked file modified by `prepare`), the
+ * manifest must not rely on rewrites only `pnpm pack` applies, and the archive must have the same
+ * SHA-512 integrity `npm pack --dry-run --ignore-scripts` reports for that commit: `npm pack` is
+ * reproducible, so equal hashes mean the archive is byte for byte what npm packs.
  *
  * @param {ReleaseContext} context - Release context.
  * @param {string} version - Version being published.
- * @param {import("./artifact.js").PackageManifest} workingManifest - Working tree `package.json`, after `prepare`.
+ * @param {Record<string, unknown>} workingManifest - Working tree `package.json`, after `prepare`.
  * @returns {Promise<string | null>} Verified archive path relative to the root, or `null` to publish the working tree.
  */
 async function resolvePublishedArtifact(context, version, workingManifest) {
@@ -589,18 +597,25 @@ async function resolvePublishedArtifact(context, version, workingManifest) {
     return null;
   }
 
-  const notPublishedHint = "No se publicó nada. Borrá ese tarball y volvé a correr pnpm create-version: vuelve a prepararlo y a verificarlo.";
-  const releaseManifest = await readReleaseManifest(context, version);
-  const releaseProblems = findReleaseManifestProblems({ releaseManifest, workingManifest, version });
+  const trackedChanges = await listTrackedChanges(context);
 
-  if (!releaseManifest || releaseProblems.length > 0) {
+  if (trackedChanges.length > 0) {
     throw new ReleaseStepError(
-      `No se puede verificar el artefacto de ${version}: ${releaseProblems.slice(0, MAX_LISTED_ITEMS).join("; ")}.`,
-      `No se publicó nada. Revisá que ${toReleaseTag(version)} (o HEAD) sea el commit de release y que prepare no cambie package.json.`
+      `El paso de preparación modificó archivos versionados: ${trackedChanges.slice(0, MAX_LISTED_ITEMS).join("; ")}.`,
+      "No se publicó nada. prepare puede generar archivos ignorados (dist/, releases/) pero no cambiar archivos versionados como package.json: revertí esos cambios y volvé a correr pnpm create-version."
     );
   }
 
-  const release = { version, packageName: String(releaseManifest.name) };
+  const pnpmRewrites = findPnpmPackRewrites(workingManifest);
+
+  if (pnpmRewrites.length > 0) {
+    throw new ReleaseStepError(
+      `Este paquete depende de reescrituras de pnpm al empaquetar y beez-rp publica con npm: ${pnpmRewrites.slice(0, MAX_LISTED_ITEMS).join("; ")}.`,
+      "No se publicó nada. Reemplazá los especificadores workspace:/catalog: por rangos de versión y dejá en publishConfig solo configuración de npm (registry, access, tag, provenance)."
+    );
+  }
+
+  const release = { version, packageName: String(workingManifest.name) };
   const prepared = findPreparedArtifact(context.repositoryRoot, artifact, release);
 
   if (!prepared) {
@@ -611,26 +626,56 @@ async function resolvePublishedArtifact(context, version, workingManifest) {
   }
 
   if (!isSafeArtifactPath(prepared.path)) {
-    throw new ReleaseStepError(`La ruta del artefacto ${prepared.path} tiene caracteres no permitidos.`, "Usá rutas con letras, números, ., -, _, @, + y /.");
+    throw new ReleaseStepError(`La ruta del artefacto ${prepared.path} tiene caracteres no permitidos.`, "Usá rutas con letras, números, ., -, _, @, +, ~ y /.");
   }
 
-  const npmPack = await listNpmPackFiles(context.repositoryRoot);
+  const npmPack = await readNpmPackIntegrity(context.repositoryRoot);
 
-  if (!npmPack.listing) {
+  if (!npmPack.pack) {
     throw new ReleaseStepError(
       `No se pudo verificar ${prepared.path}: ${npmPack.problem}.`,
       "No se publicó nada. Corré npm pack --dry-run --json --ignore-scripts en la raíz para ver el error y volvé a correr pnpm create-version."
     );
   }
 
-  const problems = verifyPreparedArtifact(context.repositoryRoot, prepared, { manifest: releaseManifest, npmPack: npmPack.listing });
-
-  if (problems.length > 0) {
-    throw new ReleaseStepError(`El artefacto ${prepared.path} no se puede publicar: ${problems.slice(0, MAX_LISTED_ITEMS).join("; ")}.`, notPublishedHint);
+  if (npmPack.pack.version !== version) {
+    throw new ReleaseStepError(
+      `npm pack --dry-run describe ${npmPack.pack.name}@${npmPack.pack.version} y se está publicando ${version}.`,
+      "No se publicó nada. Revisá que HEAD sea el commit de release y volvé a correr pnpm create-version."
+    );
   }
 
-  print(`${ICON.success} ${prepared.path} verificado${prepared.expectedSha256 ? " (SHA-256, contenido y lista de npm pack)" : " (contenido y lista de npm pack)"}.`);
+  const problems = verifyPreparedArtifact(context.repositoryRoot, prepared, npmPack.pack.integrity);
+
+  if (problems.length > 0) {
+    throw new ReleaseStepError(
+      `El artefacto ${prepared.path} no se puede publicar: ${problems.join("; ")}.`,
+      "No se publicó nada. Hacé que prepare empaquete con npm pack --ignore-scripts después de construir, borrá ese tarball y volvé a correr pnpm create-version."
+    );
+  }
+
+  print(`${ICON.success} ${prepared.path} verificado${prepared.expectedSha256 ? " (SHA-256 de la ruta e integrity de npm pack)" : " (integrity de npm pack)"}.`);
   return prepared.path;
+}
+
+/**
+ * Builds the temporary npm credential line for the registry the release is published to.
+ *
+ * @param {Record<string, unknown>} manifest - Working tree `package.json`.
+ * @returns {string} Config line that only references `${NPM_TOKEN}`.
+ * @throws {ReleaseStepError} When `publishConfig.registry` is not a valid http(s) URL.
+ */
+function buildPublishAuthConfigLine(manifest) {
+  const registryUrl = resolvePublishRegistry(manifest);
+
+  try {
+    return buildNpmAuthConfigLine(registryUrl);
+  } catch (error) {
+    throw new ReleaseStepError(
+      `No se puede publicar en el registry ${registryUrl}: ${error instanceof Error ? error.message : String(error)}.`,
+      "No se publicó nada. Corregí publishConfig.registry en package.json (una URL http(s) sin credenciales) y volvé a correr pnpm create-version."
+    );
+  }
 }
 
 /**
@@ -648,11 +693,12 @@ async function publishReleaseStep(context) {
     const manifest = readWorkingManifest(context.repositoryRoot);
     const packageName = String(manifest.name);
     context.packageName = packageName;
+    const authConfigLine = buildPublishAuthConfigLine(manifest);
     const artifactPath = await resolvePublishedArtifact(context, version, manifest);
     if (artifactPath) {
       print(paint("gray", `Publicando ${artifactPath}; npm puede pedir la confirmación 2FA en el navegador o un código.`));
     }
-    const result = await publishToNpm(context.repositoryRoot, artifactPath);
+    const result = await publishToNpm(context.repositoryRoot, { authConfigLine, artifactPath });
 
     if (result.missingToken) {
       throw new ReleaseStepError(

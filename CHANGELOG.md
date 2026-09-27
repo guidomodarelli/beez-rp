@@ -8,12 +8,12 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y e
 
 ### Added
 
-- `artifact` en `beez-rp.config.js`: con `publish: "npm"`, publica exactamente el tarball que dejó el paso `prepare` (por ejemplo `releases/{version}-{sha256}/{name}-{version}.tgz`) en vez de reempaquetar el working tree.
-- Antes de publicar ese tarball verifica su SHA-256 (`{sha256}`, que puede repetirse si todas las apariciones declaran el mismo digest) y su contenido: rutas seguras y sin repetir, solo archivos regulares y directorios (sin links, con los `size` de PAX aplicados como en npm), exactamente los archivos que lista `npm pack --dry-run --json --ignore-scripts` sobre el commit de release, y el mismo nombre, versión, entrypoints, `publishConfig`, dependencias (las `workspace:`/`catalog:` solo resueltas a semver o a un alias `npm:`) y scripts de instalación que el `package.json` del commit de release, que además tiene que coincidir con el del working tree y declarar la versión que se publica.
+- `artifact` en `beez-rp.config.js`: con `publish: "npm"`, publica exactamente el tarball que dejó el paso `prepare` (por ejemplo `releases/{version}-{sha256}/{name}-{version}.tgz`) en vez de reempaquetar el working tree. Los proyectos lo empaquetan con `npm pack --ignore-scripts`.
+- Antes de publicar ese tarball exige que `prepare` no haya modificado archivos versionados, rechaza paquetes que dependen de reescrituras de pnpm al empaquetar (`workspace:`/`catalog:` o campos de `publishConfig` que no son configuración de npm), verifica el SHA-256 de su ruta cuando el patrón usa `{sha256}` y compara su SHA-512 con el `integrity` de `npm pack --dry-run --json --ignore-scripts` del commit de release.
 
 ### Changed
 
-- `publish: "npm"` usa una config de npm temporal que solo referencia `${NPM_TOKEN}`: los proyectos ya no necesitan `.npmrc` y pnpm deja de advertir por credenciales en el repositorio. La confirmación 2FA de npm sigue siendo interactiva.
+- `publish: "npm"` usa una config de npm temporal que solo referencia `${NPM_TOKEN}`, asociada al registry donde se publica (`publishConfig.registry` o `https://registry.npmjs.org/`): los proyectos ya no necesitan `.npmrc` y pnpm deja de advertir por credenciales en el repositorio. La confirmación 2FA de npm sigue siendo interactiva.
 
 ### Removed
 
