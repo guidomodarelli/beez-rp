@@ -106,7 +106,7 @@ Solo `changelog.audience` es obligatorio. Los hooks (`migrations.check`, `migrat
 
 Sin `artifact`, `publish: "npm"` publica el working tree. Con `artifact` publica exactamente el tarball que dejó `prepare`, después de verificarlo:
 
-- El patrón es relativo a la raíz, reemplaza `{version}` (obligatorio) y `{name}`, y dentro de un segmento acepta `*` y `{sha256}`. Si hay varios, toma el más reciente.
+- El patrón es relativo a la raíz, reemplaza `{version}` (obligatorio) y `{name}` (el nombre de archivo que usa `npm pack`: `@scope/pkg` pasa a `scope-pkg`), y dentro de un segmento acepta `*` y `{sha256}`. Si hay varios, toma el más reciente.
 - `{sha256}`: el SHA-256 del archivo tiene que coincidir con el de su ruta.
 - Contenido (leído sin herramientas externas): todo bajo `package/`, sin rutas inseguras, dotfiles ni `node_modules`; nada fuera de `files` (salvo los que npm siempre incluye); todos los entrypoints públicos (`exports`, `main`, `types`, `bin`) presentes; nombre y versión iguales a los de `package.json`.
 

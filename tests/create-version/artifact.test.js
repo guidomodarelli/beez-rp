@@ -113,6 +113,26 @@ describe("prepared artifact lookup", () => {
     expect(findPreparedArtifact(root, "missing/{version}.tgz", release)).toBeNull();
   });
 
+  it("should expand {name} of a scoped package to the tarball base name npm pack produces", () => {
+    const scopedRelease = { version: "1.2.3", packageName: "@scope/pkg" };
+
+    expect(expandArtifactPattern(CHECKSUM_ARCHIVE_PATTERN, scopedRelease)).toBe("releases/1.2.3-{sha256}/scope-pkg-1.2.3.tgz");
+    expect(expandArtifactPattern("{name}.tgz", release)).toBe("eslint-plugin-no-magic.tgz");
+  });
+
+  it("should find the archive npm pack wrote for a scoped package", () => {
+    const root = createRoot();
+    const digest = "d".repeat(64);
+    const archive = path.join(root, "releases", `1.2.3-${digest}`, "scope-pkg-1.2.3.tgz");
+    mkdirSync(path.dirname(archive), { recursive: true });
+    writeFileSync(archive, "archive");
+
+    expect(findPreparedArtifact(root, CHECKSUM_ARCHIVE_PATTERN, { version: "1.2.3", packageName: "@scope/pkg" })).toEqual({
+      path: `releases/1.2.3-${digest}/scope-pkg-1.2.3.tgz`,
+      expectedSha256: digest,
+    });
+  });
+
   it("should only accept archive paths that are safe on a shell command line", () => {
     expect(isSafeArtifactPath("releases/1.9.0-abc/@scope+pkg_1.9.0.tgz")).toBe(true);
     expect(isSafeArtifactPath("releases/1.9.0 abc/pkg.tgz")).toBe(false);

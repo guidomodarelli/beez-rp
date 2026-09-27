@@ -147,6 +147,16 @@ export const SHORT_SHA_LENGTH = 7;
 export const ARTIFACT_VERSION_PLACEHOLDER = "{version}";
 export const ARTIFACT_NAME_PLACEHOLDER = "{name}";
 
+/**
+ * Scope of a package name as `npm pack` and `pnpm pack` name the tarball: the
+ * leading `@` is dropped and the `/` becomes `-` (`@scope/pkg` → `scope-pkg`).
+ * The `scope` group keeps the scope without `@`.
+ */
+export const PACKAGE_SCOPE_PATTERN = /^@(?<scope>[^/]+)\//u;
+
+/** Replacement of {@link PACKAGE_SCOPE_PATTERN} that yields the tarball base name prefix. */
+export const PACKED_SCOPE_REPLACEMENT = "$<scope>-";
+
 /** Wildcard of an `artifact` pattern segment, such as the checksum in `releases/{version}-*`. */
 export const ARTIFACT_SEGMENT_WILDCARD = "*";
 

@@ -4,7 +4,8 @@
  * instead of repacking the working tree.
  *
  * Patterns are relative to the repository root, use `/` separators and
- * replace `{version}` and `{name}`. Inside a single path segment, `*` matches
+ * replace `{version}` and `{name}` (the tarball base name `npm pack` uses, so
+ * `@scope/pkg` becomes `scope-pkg`). Inside a single path segment, `*` matches
  * anything and `{sha256}` matches a SHA-256 digest that must equal the
  * archive checksum (for example `releases/{version}-{sha256}/{name}-{version}.tgz`).
  *
@@ -28,7 +29,9 @@ import {
   ARTIFACT_SHA256_PLACEHOLDER,
   ARTIFACT_VERSION_PLACEHOLDER,
   PACKAGE_MANIFEST_FILE,
+  PACKAGE_SCOPE_PATTERN,
   PACKED_ROOT_DIRECTORY,
+  PACKED_SCOPE_REPLACEMENT,
   PAX_PATH_KEY,
   PRIVATE_PACKED_SEGMENT_PATTERN,
   SAFE_ARTIFACT_PATH_PATTERN,
@@ -55,14 +58,25 @@ const RELATIVE_PREFIX_PATTERN = /^\.\//u;
 const TRAILING_SLASH_PATTERN = /\/+$/u;
 
 /**
+ * Converts an npm package name into the tarball base name `npm pack` and `pnpm pack` use.
+ *
+ * @param {string} packageName - npm package name, optionally scoped.
+ * @returns {string} Name without `@` and with the scope joined by `-` (`@scope/pkg` → `scope-pkg`); unscoped names are unchanged.
+ */
+function toPackedName(packageName) {
+  return packageName.replace(PACKAGE_SCOPE_PATTERN, PACKED_SCOPE_REPLACEMENT);
+}
+
+/**
  * Replaces the `{version}` and `{name}` placeholders of an artifact pattern; `{sha256}` stays.
+ * `{name}` becomes the tarball base name, so scoped packages never add a path separator.
  *
  * @param {string} pattern - Configured pattern.
  * @param {{ version: string, packageName: string }} release - Version and npm package name.
  * @returns {string} Pattern with placeholders replaced.
  */
 export function expandArtifactPattern(pattern, { version, packageName }) {
-  return pattern.replaceAll(ARTIFACT_VERSION_PLACEHOLDER, version).replaceAll(ARTIFACT_NAME_PLACEHOLDER, packageName);
+  return pattern.replaceAll(ARTIFACT_VERSION_PLACEHOLDER, version).replaceAll(ARTIFACT_NAME_PLACEHOLDER, toPackedName(packageName));
 }
 
 /**
