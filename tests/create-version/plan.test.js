@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { MIGRATION_STATUS, NPM_LOOKUP_STATUS, PULL_REQUEST_STATE, RELEASE_MODE, RELEASE_STEP } from "../../src/constants/create-version.js";
+import { MIGRATION_STATUS, NPM_AUTH_STATUS, NPM_LOOKUP_STATUS, NPM_TOKEN_SOURCE, PULL_REQUEST_STATE, RELEASE_MODE, RELEASE_STEP } from "../../src/constants/create-version.js";
 import { buildReleasePlan, parseReleaseArguments } from "../../src/create-version/plan.js";
 import { resolveRequestedVersion } from "../../src/versions.js";
 import { ALLOWED_NEXT_VERSIONS, CURRENT_STABLE_VERSION, REJECTED_VERSION_BUMP_CASES } from "../../src/testing.js";
@@ -76,7 +76,8 @@ describe("create-version arguments", () => {
   );
 
   it("should parse spaced and inline flags and reject invalid combinations", () => {
-    expect(parseReleaseArguments(["--bump", "minor", "--dry-run", "--"])).toEqual({ bump: "minor", setVersion: null, dryRun: true, help: false });
+    expect(parseReleaseArguments(["--bump", "minor", "--dry-run", "--"])).toEqual({ bump: "minor", setVersion: null, dryRun: true, skipUnpublished: false, help: false });
+    expect(parseReleaseArguments(["--skip-unpublished"]).skipUnpublished).toBe(true);
     expect(parseReleaseArguments(["-h"]).help).toBe(true);
     expect(() => parseReleaseArguments(["--bump", "huge"])).toThrow(/--bump espera/);
     expect(() => parseReleaseArguments(["--bump", "patch", "--set-version", "0.1.1"])).toThrow(/no los dos a la vez/);
@@ -203,5 +204,136 @@ describe("create-version plan", () => {
 
   it("should plan nothing when everything is already released", () => {
     expect(buildReleasePlan(createMainState({ unreleasedCommits: [] }), DEPLOYED_APP).mode).toBe(RELEASE_MODE.upToDate);
+  });
+});
+
+/**
+ * @param {Partial<import("../../src/create-version/npm.js").NpmAuthCheck>} [overrides] - Check changes.
+ * @returns {import("../../src/create-version/npm.js").NpmAuthCheck} Passing check of `fixture-app`.
+ */
+function createNpmAuth(overrides = {}) {
+  return {
+    status: NPM_AUTH_STATUS.ok,
+    user: "fixture-owner",
+    source: NPM_TOKEN_SOURCE.repository,
+    registryUrl: "https://registry.npmjs.org/",
+    packageName: "fixture-app",
+    owners: ["fixture-owner"],
+    firstPublication: false,
+    reason: null,
+    ...overrides,
+  };
+}
+
+/** npm lookup that only has `0.1.0`. */
+const NPM_WITH_FIRST_RELEASE = { status: NPM_LOOKUP_STATUS.ok, publishedVersions: ["0.1.0"], reason: null };
+
+describe("create-version plan with npm credentials", () => {
+  it("should block a plan that publishes when the token is missing, invalid or cannot publish the package", () => {
+    const missing = buildReleasePlan(createMainState({ npm: NPM_WITH_FIRST_RELEASE, npmAuth: createNpmAuth({ status: NPM_AUTH_STATUS.missingToken, user: null, source: null }) }), NPM_PACKAGE);
+    expect(missing.mode).toBe(RELEASE_MODE.blocked);
+    expect(missing.blockers[0].title).toBe("Falta NPM_TOKEN para publicar fixture-app");
+
+    const invalid = buildReleasePlan(createMainState({ npm: NPM_WITH_FIRST_RELEASE, npmAuth: createNpmAuth({ status: NPM_AUTH_STATUS.invalidToken, user: null }) }), NPM_PACKAGE);
+    expect(invalid.blockers[0].title).toBe("El NPM_TOKEN (.env del repo) es inválido o venció");
+
+    const notOwner = buildReleasePlan(createMainState({ npm: NPM_WITH_FIRST_RELEASE, npmAuth: createNpmAuth({ status: NPM_AUTH_STATUS.notOwner, user: "fixture-stranger" }) }), NPM_PACKAGE);
+    expect(notOwner.blockers[0].title).toBe("El token autentica como fixture-stranger, que no puede publicar fixture-app (dueños: fixture-owner)");
+  });
+
+  it("should ignore the credentials when the plan would not publish", () => {
+    const invalidAuth = createNpmAuth({ status: NPM_AUTH_STATUS.invalidToken, user: null });
+
+    expect(buildReleasePlan(createMainState({ npmAuth: invalidAuth }), DEPLOYED_APP).mode).toBe(RELEASE_MODE.newRelease);
+    expect(buildReleasePlan(createMainState({ npmAuth: invalidAuth, unreleasedCommits: [] }), NPM_PACKAGE).mode).toBe(RELEASE_MODE.upToDate);
+    expect(stepIds(createMainState({ npmAuth: invalidAuth, main: { aheadCommits: [], behindCount: 1 } }), NPM_PACKAGE)).toEqual([RELEASE_STEP.syncMain]);
+  });
+
+  it("should block the resume of a publication too and only warn when the check could not decide", () => {
+    const resumed = createMainState({ headVersion: "0.2.0", headSubject: "0.2.0", npm: NPM_WITH_FIRST_RELEASE, npmAuth: createNpmAuth({ status: NPM_AUTH_STATUS.invalidToken }) });
+    expect(buildReleasePlan(resumed, NPM_PACKAGE).mode).toBe(RELEASE_MODE.blocked);
+
+    const unknown = buildReleasePlan(createMainState({ npmAuth: createNpmAuth({ status: NPM_AUTH_STATUS.unknown, reason: "sin red" }) }), NPM_PACKAGE);
+    expect(unknown.mode).toBe(RELEASE_MODE.newRelease);
+    expect(unknown.warnings).toEqual([expect.stringContaining("sin red")]);
+  });
+});
+
+describe("create-version plan with a last release missing from npm", () => {
+  /** `origin/main` whose last release `0.2.0` (commit `0.2.0` with tag `v0.2.0`) never reached npm. */
+  const UNPUBLISHED_RELEASE = {
+    releasedVersion: "0.2.0",
+    lastRelease: { sha: "release-sha", version: "0.2.0", subject: "0.2.0", tagged: true },
+    headVersion: "0.2.0",
+    headSubject: "Merge pull request #3",
+    npm: NPM_WITH_FIRST_RELEASE,
+  };
+
+  it("should not plan a new release that would skip it, and explain how to publish it from its tag", () => {
+    const plan = buildReleasePlan(createMainState(UNPUBLISHED_RELEASE), NPM_PACKAGE);
+
+    expect(plan.mode).toBe(RELEASE_MODE.blocked);
+    expect(plan.blockers[0].title).toBe("La versión 0.2.0 (último release, tag v0.2.0) no está en npm");
+    expect(plan.blockers[0].details.join("\n")).toContain("git switch --detach v0.2.0 y pnpm create-version");
+    expect(plan.blockers[0].details.join("\n")).toContain("--skip-unpublished");
+  });
+
+  it("should plan the new release with a warning when --skip-unpublished skips it on purpose", () => {
+    const plan = buildReleasePlan(createMainState(UNPUBLISHED_RELEASE), NPM_PACKAGE, { skipUnpublished: true });
+
+    expect(plan.mode).toBe(RELEASE_MODE.newRelease);
+    expect(plan.warnings).toEqual([expect.stringContaining("Se saltea 0.2.0 (tag v0.2.0)")]);
+  });
+
+  it("should block when nothing was published yet, and ask to publish by hand a release that cannot be resumed", () => {
+    const neverPublished = buildReleasePlan(createMainState({ ...UNPUBLISHED_RELEASE, npm: { ...NPM_WITH_FIRST_RELEASE, publishedVersions: [] } }), NPM_PACKAGE);
+    expect(neverPublished.blockers[0].details[0]).toContain("npm no tiene ninguna versión publicada");
+
+    const untagged = buildReleasePlan(createMainState({ ...UNPUBLISHED_RELEASE, lastRelease: { ...UNPUBLISHED_RELEASE.lastRelease, tagged: false } }), NPM_PACKAGE);
+    expect(untagged.blockers[0].details.join("\n")).toContain("publicala a mano");
+  });
+
+  it("should plan the first release of a package whose initial untagged version was never published", () => {
+    const initialVersion = createMainState({
+      ...UNPUBLISHED_RELEASE,
+      lastRelease: { sha: "init-sha", version: "0.2.0", subject: "chore: init", tagged: false },
+      npm: { ...NPM_WITH_FIRST_RELEASE, publishedVersions: [] },
+    });
+
+    expect(buildReleasePlan(initialVersion, NPM_PACKAGE).mode).toBe(RELEASE_MODE.newRelease);
+  });
+
+  it("should ignore old versions below the latest published one and projects that do not track npm", () => {
+    const olderThanLatest = createMainState({ ...UNPUBLISHED_RELEASE, npm: { ...NPM_WITH_FIRST_RELEASE, publishedVersions: ["0.1.0", "0.3.0"] } });
+    expect(buildReleasePlan(olderThanLatest, NPM_PACKAGE).mode).toBe(RELEASE_MODE.newRelease);
+    expect(buildReleasePlan(createMainState({ ...UNPUBLISHED_RELEASE, npm: null }), DEPLOYED_APP).mode).toBe(RELEASE_MODE.newRelease);
+  });
+});
+
+describe("create-version plan from a detached release tag", () => {
+  /** Detached `HEAD` on the `0.2.0` commit of tag `v0.2.0`, missing from npm. */
+  const DETACHED_ON_TAG = { currentBranch: null, headVersion: "0.2.0", headSubject: "0.2.0", headReleaseTag: "v0.2.0", npm: NPM_WITH_FIRST_RELEASE };
+
+  it("should only prepare and publish the tagged release, without syncing nor pushing main", () => {
+    const plan = buildReleasePlan(createMainState({ ...DETACHED_ON_TAG, main: { aheadCommits: [], behindCount: 3 } }), NPM_PACKAGE);
+
+    expect(plan.mode).toBe(RELEASE_MODE.resume);
+    expect(plan.pendingVersion).toBe("0.2.0");
+    expect(plan.steps.map((planStep) => planStep.id)).toEqual([RELEASE_STEP.prepareRelease, RELEASE_STEP.publishRelease]);
+  });
+
+  it("should block a detached HEAD that is not an unpublished tagged release", () => {
+    expect(buildReleasePlan(createMainState({ ...DETACHED_ON_TAG, npm: { ...NPM_WITH_FIRST_RELEASE, publishedVersions: ["0.1.0", "0.2.0"] } }), NPM_PACKAGE).blockers[0].title).toContain(
+      "desacoplado"
+    );
+    expect(buildReleasePlan(createMainState({ ...DETACHED_ON_TAG, headReleaseTag: null }), NPM_PACKAGE).blockers[0].title).toContain("desacoplado");
+    expect(buildReleasePlan(createMainState({ ...DETACHED_ON_TAG, headSubject: "fix: hotfix" }), NPM_PACKAGE).blockers[0].title).toContain("desacoplado");
+  });
+
+  it("should still require valid npm credentials to publish from the tag", () => {
+    const plan = buildReleasePlan(createMainState({ ...DETACHED_ON_TAG, npmAuth: createNpmAuth({ status: NPM_AUTH_STATUS.invalidToken }) }), NPM_PACKAGE);
+
+    expect(plan.mode).toBe(RELEASE_MODE.blocked);
+    expect(plan.blockers[0].title).toContain("inválido o venció");
   });
 });

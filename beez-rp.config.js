@@ -1,6 +1,6 @@
 /**
  * `beez-rp create-version` configuration of beez-rp itself: validate with
- * `pnpm check`, then publish to npm with the `NPM_TOKEN` referenced by `.npmrc`.
+ * `pnpm check`, then publish to npm with `NPM_TOKEN` (environment, `.env` or `~/.config/beez-rp/.env`).
  *
  * @module beez-rp.config
  */

@@ -31,6 +31,73 @@ export const PINNED_NODE_VERSION_FILE = ".nvmrc";
 /** Environment file that may hold `NPM_TOKEN` locally; ignored by Git. */
 export const LOCAL_ENVIRONMENT_FILE = ".env";
 
+/** Environment variable that holds the npm token; the temporary npm config references it as `${NPM_TOKEN}`. */
+export const NPM_TOKEN_VARIABLE = "NPM_TOKEN";
+
+/**
+ * Path segments, relative to the user home directory (`os.homedir()`), of the environment file
+ * shared by every project: one `NPM_TOKEN` for all the repositories that release with beez-rp.
+ */
+export const SHARED_ENVIRONMENT_FILE_SEGMENTS = Object.freeze([".config", "beez-rp", LOCAL_ENVIRONMENT_FILE]);
+
+/** How the shared environment file is shown to the user, independent of the platform. */
+export const SHARED_ENVIRONMENT_FILE_LABEL = `~/${SHARED_ENVIRONMENT_FILE_SEGMENTS.join("/")}`;
+
+/** Where `NPM_TOKEN` was found, in lookup order: environment, repository `.env`, shared file. */
+export const NPM_TOKEN_SOURCE = Object.freeze({
+  environment: "environment",
+  repository: "repository",
+  shared: "shared",
+});
+
+/** How each {@link NPM_TOKEN_SOURCE} is named in the diagnosis and the error messages; never the token. */
+export const NPM_TOKEN_SOURCE_LABEL = Object.freeze({
+  [NPM_TOKEN_SOURCE.environment]: "variable de entorno",
+  [NPM_TOKEN_SOURCE.repository]: `${LOCAL_ENVIRONMENT_FILE} del repo`,
+  [NPM_TOKEN_SOURCE.shared]: SHARED_ENVIRONMENT_FILE_LABEL,
+});
+
+/**
+ * Result of checking the npm credentials before publishing:
+ * - `ok`: the token authenticates and the user can publish the package (or it was never published);
+ * - `missingToken`: no source defines `NPM_TOKEN`;
+ * - `invalidToken`: the registry rejects the token (`npm whoami` answers 401/403);
+ * - `notOwner`: the token authenticates as a user that is not an owner of the package;
+ * - `unknown`: the check could not finish (network, a registry without `npm owner ls`, an
+ *   organization package whose access may come from a team); it warns but does not block.
+ */
+export const NPM_AUTH_STATUS = Object.freeze({
+  ok: "ok",
+  missingToken: "missing-token",
+  invalidToken: "invalid-token",
+  notOwner: "not-owner",
+  unknown: "unknown",
+});
+
+/** npm error codes of a rejected credential: `npm whoami` fails with them for an invalid or expired token. */
+export const NPM_REJECTED_CREDENTIAL_PATTERN = /\bE40[13]\b/u;
+
+/** Where `NPM_TOKEN` can be defined, in lookup order, as the credential messages explain it. */
+export const NPM_TOKEN_LOCATIONS = `la variable de entorno ${NPM_TOKEN_VARIABLE}, el ${LOCAL_ENVIRONMENT_FILE} del repo (ignorado por Git) o ${SHARED_ENVIRONMENT_FILE_LABEL} (un solo token para todos tus proyectos)`;
+
+/** Why npm answers 404 to a publication the token cannot make. */
+export const NPM_PUT_NOT_FOUND_NOTE = "Un 404 Not Found de npm en el PUT suele significar falta de permisos sobre el paquete (npm responde 404 en vez de 403).";
+
+/** Next action after fixing the npm credentials reported by the diagnosis. */
+export const NPM_AUTH_RERUN_ACTION = "volvé a correr pnpm create-version";
+
+/** Next action after fixing the npm credentials once `npm publish` failed. */
+export const NPM_PUBLISH_RETRY_ACTION = "corré pnpm create-version para reintentar solo la publicación";
+
+/** Arguments of the npm command that prints the user a token authenticates as. */
+export const NPM_WHOAMI_ARGUMENTS = Object.freeze(["whoami"]);
+
+/** Arguments of the npm command that lists the owners of a package, followed by the package name. */
+export const NPM_OWNER_LIST_ARGUMENTS = Object.freeze(["owner", "ls"]);
+
+/** One line of `npm owner ls`: `<user> <<email>>`; the `user` group keeps the npm user name. */
+export const NPM_OWNER_LINE_PATTERN = /^(?<user>[^\s<]+)(?:\s+<[^>]*>)?$/u;
+
 /** Stable identifiers of every step the command knows how to run, in execution order. */
 export const RELEASE_STEP = Object.freeze({
   syncMain: "sync-main",
@@ -91,9 +158,6 @@ export const NPM_PACKAGE_NAME_PATTERN = /^(?:@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9
 /** npm error code of a package that was never published. */
 export const NPM_NOT_FOUND_CODE = "E404";
 
-/** Environment variable that holds the npm token; the repository `.npmrc` references it as `${NPM_TOKEN}`. */
-export const NPM_TOKEN_VARIABLE = "NPM_TOKEN";
-
 /** npm dist-tag every stable release is published under. */
 export const NPM_DIST_TAG = "latest";
 
@@ -108,6 +172,7 @@ export const CREATE_VERSION_FLAG = Object.freeze({
   bump: "bump",
   setVersion: "set-version",
   dryRun: "dry-run",
+  skipUnpublished: "skip-unpublished",
   help: "help",
   helpShort: "h",
   endOfOptions: "--",

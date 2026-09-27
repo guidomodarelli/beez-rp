@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import { ALLOWED_NEXT_VERSIONS, CURRENT_STABLE_VERSION, REJECTED_VERSION_BUMP_CASES } from "../src/testing.js";
 import {
   bumpReleaseVersion,
+  compareReleaseVersions,
+  findHighestStableVersion,
   isReleaseCommitSubject,
   isStableReleaseVersion,
   listAllowedVersionsAfter,
@@ -88,5 +90,19 @@ describe("release commits and tags", () => {
     expect(suggestReleaseType([{ subject: "refactor!: drop legacy routes" }]).releaseType).toBe("major");
     expect(suggestReleaseType([{ subject: "feat: new auth", body: "BREAKING CHANGE: sessions reset" }]).releaseType).toBe("major");
     expect(suggestReleaseType([{ subject: "0.94.0" }]).releaseType).toBe("minor");
+  });
+});
+
+describe("release version ordering", () => {
+  it("should compare stable versions numerically, not as text", () => {
+    expect(compareReleaseVersions("1.10.0", "1.9.0")).toBeGreaterThan(0);
+    expect(compareReleaseVersions("1.9.0", "1.9.1")).toBeLessThan(0);
+    expect(compareReleaseVersions("2.0.0", "2.0.0")).toBe(0);
+    expect(() => compareReleaseVersions("1.0.0-beta.1", "1.0.0")).toThrow("X.Y.Z");
+  });
+
+  it("should find the highest stable version, ignoring prereleases and invalid entries", () => {
+    expect(findHighestStableVersion(["1.8.0", "1.10.0-beta.1", "1.9.0", "latest", 3])).toBe("1.9.0");
+    expect(findHighestStableVersion([])).toBeNull();
   });
 });

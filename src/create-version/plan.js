@@ -7,10 +7,12 @@
  *
  * - a new release: sync `main`, apply migrations, fill the changelog, run the
  *   checks, bump (commit `X.Y.Z` + tag `vX.Y.Z`), prepare, push and publish;
- * - the resume of a release commit that never reached `origin` or the registry;
+ * - the resume of a release commit that never reached `origin` or the registry,
+ *   including the publication of a tagged release from a detached `HEAD`;
  * - nothing, when every commit is already released;
  * - blockers that explain what to fix first (feature branch, uncommitted
- *   files, foreign commits on `main`, unreachable registry, invalid changelog).
+ *   files, foreign commits on `main`, unreachable registry, invalid changelog,
+ *   npm credentials that cannot publish, a last release missing from npm).
  *
  * @module create-version/plan
  */
@@ -23,6 +25,7 @@ import {
   MAIN_BRANCH,
   MAX_LISTED_ITEMS,
   MIGRATION_STATUS,
+  NPM_AUTH_STATUS,
   NPM_LOOKUP_STATUS,
   PORCELAIN_STATUS_WIDTH,
   PULL_REQUEST_STATE,
@@ -31,14 +34,18 @@ import {
   VERSION_PREFIX_PATTERN,
 } from "../constants/create-version.js";
 import { RELEASE_TYPE } from "../constants/versions.js";
-import { isReleaseCommitSubject, isStableReleaseVersion, toReleaseTag } from "../versions.js";
+import { compareReleaseVersions, findHighestStableVersion, isReleaseCommitSubject, isStableReleaseVersion, toReleaseTag } from "../versions.js";
+import { describeNpmAuthProblem } from "./npm-auth.js";
 
 /**
  * @typedef {{ sha?: string, subject: string, body?: string }} ReleaseCommit
  * @typedef {{ name: string, headSha: string, hasUpstream: boolean, unpushedCount: number, aheadOfMainCount: number }} FeatureBranchSnapshot
  * @typedef {{ number: number, url: string, title?: string, state: string, isDraft: boolean, headRefOid: string }} PullRequestSnapshot
  * @typedef {import("./npm.js").NpmLookup} NpmLookup
+ * @typedef {import("./npm.js").NpmAuthCheck} NpmAuthCheck
  * @typedef {import("./config.js").MigrationCheck} MigrationCheck
+ * @typedef {{ sha: string, version: string | null, subject?: string | null, tagged?: boolean }} LastReleaseSnapshot
+ *   Newest commit of `origin/main` that changed `version`; `tagged` when `vX.Y.Z` points at it.
  * @typedef {{
  *   currentBranch: string | null,
  *   workingTreeChanges: string[],
@@ -48,8 +55,12 @@ import { isReleaseCommitSubject, isStableReleaseVersion, toReleaseTag } from "..
  *   main: { aheadCommits: ReleaseCommit[], behindCount: number },
  *   headVersion: string | null,
  *   headSubject: string | null,
+ *   headReleaseTag?: string | null,
+ *   releasedVersion?: string | null,
+ *   lastRelease?: LastReleaseSnapshot | null,
  *   unreleasedCommits: ReleaseCommit[],
  *   npm: NpmLookup | null,
+ *   npmAuth?: NpmAuthCheck | null,
  *   migrations: MigrationCheck | null,
  *   changelog: { exists: boolean, entryCount: number, unknownSections: string[] },
  * }} ReleaseState
@@ -57,7 +68,9 @@ import { isReleaseCommitSubject, isStableReleaseVersion, toReleaseTag } from "..
  * @typedef {{ id: string, title: string, detail?: string }} ReleasePlanStep
  * @typedef {{ title: string, details: string[] }} ReleaseBlocker
  * @typedef {{ mode: string, steps: ReleasePlanStep[], blockers: ReleaseBlocker[], warnings: string[], pendingVersion: string | null }} ReleasePlan
- * @typedef {{ bump: "patch" | "minor" | "major" | null, setVersion: string | null, dryRun: boolean, help: boolean }} ReleaseOptions
+ * @typedef {{ bump: "patch" | "minor" | "major" | null, setVersion: string | null, dryRun: boolean, skipUnpublished: boolean, help: boolean }} ReleaseOptions
+ * @typedef {{ skipUnpublished?: boolean }} PlanOptions
+ *   `skipUnpublished` plans a new release even when the last release is missing from npm.
  */
 
 /** Capabilities of a project without checks, preparation or publication. */
@@ -70,6 +83,7 @@ export const RELEASE_USAGE = [
   "  --bump patch|minor|major   Elige el tipo de versión sin preguntar.",
   "  --set-version X.Y.Z        Fija la versión exacta (solo el siguiente patch, minor o major).",
   "  --dry-run                  Diagnostica y muestra el plan sin cambiar nada.",
+  "  --skip-unpublished         Crea un release nuevo aunque el último release no esté en npm (lo saltea).",
   "  --help                     Muestra esta ayuda.",
 ].join("\n");
 
@@ -90,6 +104,7 @@ export function parseReleaseArguments(argv) {
         [CREATE_VERSION_FLAG.bump]: { type: "string" },
         [CREATE_VERSION_FLAG.setVersion]: { type: "string" },
         [CREATE_VERSION_FLAG.dryRun]: { type: "boolean", default: false },
+        [CREATE_VERSION_FLAG.skipUnpublished]: { type: "boolean", default: false },
         [CREATE_VERSION_FLAG.help]: { type: "boolean", short: CREATE_VERSION_FLAG.helpShort, default: false },
       },
     }));
@@ -114,6 +129,7 @@ export function parseReleaseArguments(argv) {
     // A typed `v1.2.0` means `1.2.0`; the version rules validate the rest.
     setVersion: setVersion === undefined ? null : setVersion.replace(VERSION_PREFIX_PATTERN, ""),
     dryRun: Boolean(values[CREATE_VERSION_FLAG.dryRun]),
+    skipUnpublished: Boolean(values[CREATE_VERSION_FLAG.skipUnpublished]),
     help: Boolean(values[CREATE_VERSION_FLAG.help]),
   };
 }
@@ -167,14 +183,22 @@ export function describeFeatureBranchGaps(branch, pullRequest, githubError) {
  * @returns {ReleaseBlocker[]} Blockers, most urgent first.
  */
 function findBlockers(state) {
-  if (!state.currentBranch) {
-    return [{ title: "HEAD está desacoplado (detached)", details: [`Hacé git switch ${MAIN_BRANCH} y volvé a correr pnpm create-version.`] }];
+  if (!state.currentBranch && !findDetachedReleaseVersion(state)) {
+    return [
+      {
+        title: "HEAD está desacoplado (detached)",
+        details: [
+          `Hacé git switch ${MAIN_BRANCH} y volvé a correr pnpm create-version.`,
+          "Desacoplado solo se puede publicar un release que falta en npm: HEAD tiene que ser el commit X.Y.Z de su tag vX.Y.Z.",
+        ],
+      },
+    ];
   }
 
   /** @type {ReleaseBlocker[]} */
   const blockers = [];
 
-  if (state.currentBranch !== MAIN_BRANCH) {
+  if (state.currentBranch && state.currentBranch !== MAIN_BRANCH) {
     blockers.push({
       title: `Estás en ${state.currentBranch}: los releases salen solo desde ${MAIN_BRANCH}`,
       details: state.branch
@@ -267,17 +291,171 @@ function planResume(state, capabilities) {
 }
 
 /**
- * Decides what is still missing to publish a release from `main`.
+ * Returns the version a detached `HEAD` may publish: `HEAD` must be exactly the commit its tag
+ * `vX.Y.Z` points at, with subject `X.Y.Z`, and npm must report that the version is missing.
+ *
+ * @param {ReleaseState} state - Snapshot.
+ * @returns {string | null} Version to publish, or `null` when `HEAD` is not detached on such a release.
+ */
+function findDetachedReleaseVersion(state) {
+  const { currentBranch, headVersion, headSubject, headReleaseTag, npm } = state;
+
+  if (currentBranch || !isStableReleaseVersion(headVersion) || headSubject?.trim() !== headVersion) {
+    return null;
+  }
+
+  const version = /** @type {string} */ (headVersion);
+  const tagged = headReleaseTag === toReleaseTag(version);
+  const missingFromNpm = npm?.status === NPM_LOOKUP_STATUS.ok && !npm.publishedVersions.includes(version);
+  return tagged && missingFromNpm ? version : null;
+}
+
+/**
+ * Plans the publication of a tagged release from a detached `HEAD`: preparation and publication
+ * only, without syncing nor pushing `main`.
+ *
+ * @param {string} version - Version found by {@link findDetachedReleaseVersion}.
+ * @param {ReleaseCapabilities} capabilities - Project capabilities.
+ * @returns {ReleasePlan} Resume plan, or a blocker when the project has no publication step.
+ */
+function planDetachedResume(version, capabilities) {
+  const tag = toReleaseTag(version);
+
+  if (!capabilities.publish) {
+    return {
+      mode: RELEASE_MODE.blocked,
+      steps: [],
+      blockers: [{ title: `${tag} no está en npm, pero este proyecto no configura publish`, details: ["Agregá publish en beez-rp.config.js o publicalo a mano."] }],
+      warnings: [],
+      pendingVersion: null,
+    };
+  }
+
+  /** @type {ReleasePlanStep[]} */
+  const steps = [];
+
+  if (capabilities.prepare) {
+    steps.push({ id: RELEASE_STEP.prepareRelease, title: `Preparar el release ${version}`, detail: `Desde el tag ${tag} (HEAD desacoplado): no se toca ${MAIN_BRANCH}.` });
+  }
+
+  steps.push({ id: RELEASE_STEP.publishRelease, title: `${capabilities.publishTitle} (${version})`, detail: `Desde el tag ${tag}: solo falta publicarlo, sin sync ni push de ${MAIN_BRANCH}.` });
+  return { mode: RELEASE_MODE.resume, steps, blockers: [], warnings: [], pendingVersion: version };
+}
+
+/**
+ * Finds a last release that npm never received and that a new release would skip: a stable
+ * version (from `origin/main`) missing from the published versions and higher than every
+ * published one (or, with nothing published, tagged as `vX.Y.Z`).
+ *
+ * @param {ReleaseState} state - Snapshot.
+ * @returns {{ version: string, latestPublished: string | null, resumable: boolean } | null} Unpublished
+ *   release, or `null` when npm is not tracked or has it. `resumable` when its commit is `X.Y.Z` with tag `vX.Y.Z`.
+ */
+function findUnpublishedLastRelease(state) {
+  const { npm, lastRelease } = state;
+  const version = state.releasedVersion ?? lastRelease?.version ?? null;
+
+  if (npm?.status !== NPM_LOOKUP_STATUS.ok || !isStableReleaseVersion(version) || npm.publishedVersions.includes(/** @type {string} */ (version))) {
+    return null;
+  }
+
+  const releaseVersion = /** @type {string} */ (version);
+  const latestPublished = findHighestStableVersion(npm.publishedVersions);
+
+  if (latestPublished && compareReleaseVersions(releaseVersion, latestPublished) <= 0) {
+    return null;
+  }
+
+  // With nothing published, an untagged version is the initial one of a package that was never
+  // released (not a skipped release), so only a tagged release blocks.
+  if (!latestPublished && !lastRelease?.tagged) {
+    return null;
+  }
+
+  const resumable = Boolean(lastRelease?.tagged) && lastRelease?.version === releaseVersion && lastRelease?.subject?.trim() === releaseVersion;
+  return { version: releaseVersion, latestPublished, resumable };
+}
+
+/**
+ * Explains why no new release is planned while the last one is missing from npm, and how to publish it.
+ *
+ * @param {{ version: string, latestPublished: string | null, resumable: boolean }} unpublished - Unpublished release.
+ * @returns {ReleaseBlocker} Blocker.
+ */
+function unpublishedReleaseBlocker({ version, latestPublished, resumable }) {
+  const tag = toReleaseTag(version);
+  const published = latestPublished ? `npm llega hasta ${latestPublished}` : "npm no tiene ninguna versión publicada";
+  const howToPublish = resumable
+    ? [
+        `Para publicarla: git switch --detach ${tag} y pnpm create-version, que retoma solo la preparación y la publicación desde el tag (sin tocar ${MAIN_BRANCH}).`,
+        `Después volvé con git switch ${MAIN_BRANCH} y corré pnpm create-version para el release nuevo.`,
+      ]
+    : [`Su commit no es un commit ${version} con el tag ${tag}, así que create-version no puede retomarlo: publicala a mano desde ese commit.`];
+
+  return {
+    title: `La versión ${version} (último release, tag ${tag}) no está en npm`,
+    details: [`${published}; un release nuevo la saltearía.`, ...howToPublish, "Para saltearla a propósito: pnpm create-version --skip-unpublished."],
+  };
+}
+
+/**
+ * Stops a plan that would publish when the npm credential check found a problem, or warns when
+ * the check could not decide.
+ *
+ * @param {ReleasePlan} plan - Plan built from the rest of the snapshot.
+ * @param {NpmAuthCheck | null | undefined} npmAuth - Credential check, when the project publishes to npm.
+ * @returns {ReleasePlan} The same plan, blocked or with a warning when needed.
+ */
+function applyNpmAuth(plan, npmAuth) {
+  if (!npmAuth || !plan.steps.some((planStep) => planStep.id === RELEASE_STEP.publishRelease)) {
+    return plan;
+  }
+
+  const problem = describeNpmAuthProblem(npmAuth);
+
+  if (problem) {
+    return { mode: RELEASE_MODE.blocked, steps: [], blockers: [problem], warnings: [], pendingVersion: null };
+  }
+
+  if (npmAuth.status === NPM_AUTH_STATUS.unknown) {
+    return { ...plan, warnings: [...plan.warnings, `No se pudieron verificar las credenciales de npm: ${npmAuth.reason ?? "motivo desconocido"}. Se intenta publicar igual.`] };
+  }
+
+  return plan;
+}
+
+/**
+ * Decides what is still missing to publish a release from `main` (or, from a detached `HEAD` on
+ * a release tag, to publish that release).
  *
  * @param {ReleaseState} state - Snapshot gathered by `state.js`.
  * @param {ReleaseCapabilities} [capabilities] - Steps the project configured.
+ * @param {PlanOptions} [planOptions] - Options chosen on the command line.
  * @returns {ReleasePlan} Ordered plan.
  */
-export function buildReleasePlan(state, capabilities = DEFAULT_CAPABILITIES) {
+export function buildReleasePlan(state, capabilities = DEFAULT_CAPABILITIES, planOptions = {}) {
+  return applyNpmAuth(planRelease(state, capabilities, planOptions), state.npmAuth);
+}
+
+/**
+ * Plans the release from the snapshot, before the npm credential check is applied.
+ *
+ * @param {ReleaseState} state - Snapshot gathered by `state.js`.
+ * @param {ReleaseCapabilities} capabilities - Steps the project configured.
+ * @param {PlanOptions} planOptions - Options chosen on the command line.
+ * @returns {ReleasePlan} Ordered plan.
+ */
+function planRelease(state, capabilities, { skipUnpublished = false }) {
   const blockers = findBlockers(state);
 
   if (blockers.length > 0) {
     return { mode: RELEASE_MODE.blocked, steps: [], blockers, warnings: [], pendingVersion: null };
+  }
+
+  const detachedVersion = findDetachedReleaseVersion(state);
+
+  if (detachedVersion) {
+    return planDetachedResume(detachedVersion, capabilities);
   }
 
   const resume = planResume(state, capabilities);
@@ -288,6 +466,12 @@ export function buildReleasePlan(state, capabilities = DEFAULT_CAPABILITIES) {
 
   if (state.main.aheadCommits.length > 0) {
     return { mode: RELEASE_MODE.blocked, steps: [], blockers: [foreignCommitsBlocker(state.main.aheadCommits)], warnings: [], pendingVersion: null };
+  }
+
+  const unpublished = findUnpublishedLastRelease(state);
+
+  if (unpublished && !skipUnpublished) {
+    return { mode: RELEASE_MODE.blocked, steps: [], blockers: [unpublishedReleaseBlocker(unpublished)], warnings: [], pendingVersion: null };
   }
 
   if (state.unreleasedCommits.length === 0) {
@@ -312,7 +496,9 @@ export function buildReleasePlan(state, capabilities = DEFAULT_CAPABILITIES) {
   /** @type {ReleasePlanStep[]} */
   const steps = [];
   /** @type {string[]} */
-  const warnings = [];
+  const warnings = unpublished
+    ? [`Se saltea ${unpublished.version} (tag ${toReleaseTag(unpublished.version)}), que no está en npm: el release nuevo sale sin publicarla (--skip-unpublished).`]
+    : [];
 
   // The rest of the plan depends on the code and configuration of the updated main, so the run
   // stops after syncing and the next one diagnoses again.

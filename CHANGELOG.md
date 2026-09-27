@@ -6,6 +6,22 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y e
 
 ## [Unreleased]
 
+### Added
+
+- Con `publish: "npm"`, el diagnóstico verifica las credenciales antes de tocar nada cuando el plan publicaría: falta `NPM_TOKEN`, token inválido o vencido (`npm whoami` con 401/403) o usuario que no es dueño del paquete (`npm owner ls`) cortan con un bloqueo que dice qué hacer; un paquete que todavía no existe es la primera publicación y sigue. La fila `npm auth` muestra el usuario y de dónde salió el token, nunca el valor.
+- `NPM_TOKEN` también se lee de `~/.config/beez-rp/.env`, compartido por todos los proyectos, después de la variable de entorno y del `.env` del repo.
+- Si el último release no está en npm y es mayor que la última versión publicada, `create-version` no crea un release nuevo que lo saltee: explica cómo publicarlo con `git switch --detach vX.Y.Z` y `pnpm create-version`, que con HEAD desacoplado en ese tag solo prepara y publica (sin sincronizar ni pushear `main`). `--skip-unpublished` crea el release nuevo igual, con una advertencia.
+
+### Changed
+
+- Si `npm publish` falla, vuelve a verificar las credenciales y explica si el token es inválido, si el usuario no puede publicar el paquete (un 404 en el PUT suele significar eso) o, si están bien, el error genérico.
+- Si un paso falla cuando `main` y el tag ya están en origin, el recuadro de error dice que el release ya está en GitHub (o en origin) y que solo falta publicar.
+- El diagnóstico, `npm view` y la publicación resuelven `NPM_TOKEN` con una sola búsqueda y ya no lo cargan en el entorno del proceso: solo lo recibe el proceso de npm.
+
+### Fixed
+
+- Las variables de entorno que se pasan a los comandos con salida capturada (como `npm config get`) ahora llegan al proceso hijo.
+
 ## [0.3.0] - 2026-09-27
 
 ### Added

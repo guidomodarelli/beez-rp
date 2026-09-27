@@ -1,40 +1,51 @@
 /**
  * npm adapter of `beez-rp create-version`: resolves the registry a package is
- * published to (`publishConfig`, else npm's own config), lists the versions
- * published there (authenticated with `NPM_TOKEN` when available), reads the integrity npm
+ * published to (`publishConfig`, else npm's own config), resolves `NPM_TOKEN`
+ * with a single ordered lookup (environment, repository `.env`, shared
+ * `~/.config/beez-rp/.env`), checks that the token can publish the package
+ * (`npm whoami` + `npm owner ls`), lists the versions published there
+ * (authenticated with `NPM_TOKEN` when available), reads the integrity npm
  * would pack from the release checkout, and publishes the working tree or a
  * prepared archive with `NPM_TOKEN` bound to the publish registry.
  *
  * @module create-version/npm
  */
 
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
+import { parseEnv } from "node:util";
 
 import {
   DEFAULT_NPM_REGISTRY_URL,
   LOCAL_ENVIRONMENT_FILE,
   LOCAL_PATH_PREFIX,
   NPM_AUTH_DIRECTORY_PREFIX,
+  NPM_AUTH_STATUS,
   NPM_AUTH_TOKEN_REFERENCE,
   NPM_CONFIG_GET_ARGUMENTS,
   NPM_DIST_TAG,
   NPM_INTEGRITY_PATTERN,
   NPM_LOOKUP_STATUS,
   NPM_NOT_FOUND_CODE,
+  NPM_OWNER_LINE_PATTERN,
+  NPM_OWNER_LIST_ARGUMENTS,
   NPM_PACK_DRY_RUN_ARGUMENTS,
   NPM_PACKAGE_NAME_PATTERN,
   NPM_REGISTRY_OPTION,
   NPM_REGISTRY_PROTOCOLS,
+  NPM_REJECTED_CREDENTIAL_PATTERN,
+  NPM_TOKEN_SOURCE,
   NPM_TOKEN_VARIABLE,
   NPM_UNSET_CONFIG_VALUE,
   NPM_USER_CONFIG_OPTION,
+  NPM_WHOAMI_ARGUMENTS,
   NPMJS_PACKAGE_PAGE_URL,
   PACKAGE_SCOPE_PATTERN,
   PUBLISH_CONFIG_FIELD,
   PUBLISH_CONFIG_REGISTRY_KEY,
   SCOPED_REGISTRY_KEY_SUFFIX,
+  SHARED_ENVIRONMENT_FILE_SEGMENTS,
   SHELL_SAFE_REGISTRY_URL_PATTERN,
   UNSAFE_QUOTED_PATH_PATTERN,
 } from "../constants/create-version.js";
@@ -46,6 +57,23 @@ import { USES_SHELL_FOR_PACKAGE_MANAGERS, runCaptured, runInherited } from "./pr
  * @typedef {{ name: unknown, version: unknown, integrity: string }} NpmPackDescription
  *   What `npm pack --dry-run --json` reports for the release checkout: package name, version and `sha512-<base64>` integrity.
  * @typedef {{ pack: NpmPackDescription | null, problem: string | null }} NpmPackResult
+ * @typedef {{ token: string | null, source: string | null }} NpmTokenResolution
+ *   `NPM_TOKEN` and the `NPM_TOKEN_SOURCE` it came from; both `null` when no source defines it.
+ * @typedef {{ environment?: NodeJS.ProcessEnv, homeDirectory?: string }} NpmTokenLookup
+ *   Environment and home directory {@link resolveNpmToken} reads; the current process and `os.homedir()` by default.
+ * @typedef {{
+ *   status: string,
+ *   user: string | null,
+ *   source: string | null,
+ *   registryUrl: string,
+ *   packageName: string,
+ *   owners: string[],
+ *   firstPublication: boolean,
+ *   reason: string | null,
+ * }} NpmAuthCheck
+ *   Result of {@link checkNpmPublishAccess}: one of `NPM_AUTH_STATUS`, the user the token
+ *   authenticates as, where the token came from (never the token itself), the owners npm reports
+ *   and why the check did not pass.
  */
 
 /**
@@ -81,32 +109,199 @@ function runNpmCaptured(npmArguments, repositoryRoot, environment = process.env)
  * @throws {Error} When the registry is not a valid http(s) URL or has characters unsafe on the Windows shell.
  */
 export function buildNpmViewArguments(packageName, registryUrl, userConfigPath = null) {
+  return ["view", packageName, "versions", "--json", ...buildRegistryOptions(registryUrl, userConfigPath, "npm view")];
+}
+
+/**
+ * Builds the options that point an npm command at a registry and, optionally, at the temporary
+ * user config of {@link withNpmAuthConfig}.
+ *
+ * @param {string} registryUrl - Registry resolved by {@link resolvePublishRegistry}.
+ * @param {string | null} userConfigPath - Temporary npm config, or `null` for npm's usual config.
+ * @param {string} commandName - npm command named in the error, such as `npm view`.
+ * @returns {string[]} `--registry <url>` and, with a config, `--userconfig <path>`.
+ * @throws {Error} When the registry is not a valid http(s) URL or has characters unsafe on the Windows shell.
+ */
+function buildRegistryOptions(registryUrl, userConfigPath, commandName) {
   const { href } = parseRegistryUrl(registryUrl);
   if (!SHELL_SAFE_REGISTRY_URL_PATTERN.test(href)) {
-    throw new Error(`beez-rp create-version: el registry "${registryUrl}" tiene caracteres no permitidos en la línea de comandos de npm view`);
+    throw new Error(`beez-rp create-version: el registry "${registryUrl}" tiene caracteres no permitidos en la línea de comandos de ${commandName}`);
   }
   const userConfig = userConfigPath ? [NPM_USER_CONFIG_OPTION, userConfigPath] : [];
-  return ["view", packageName, "versions", "--json", NPM_REGISTRY_OPTION, href, ...userConfig];
+  return [NPM_REGISTRY_OPTION, href, ...userConfig];
 }
 
 /**
- * Loads `NPM_TOKEN` from the ignored `.env` when the environment does not define it.
+ * Builds the `npm whoami` arguments that ask a registry which user the temporary config authenticates as.
  *
- * @param {string} repositoryRoot - Repository root holding the optional `.env`.
- * @returns {boolean} Whether `NPM_TOKEN` is available in the environment.
+ * @param {string} registryUrl - Registry the package is published to.
+ * @param {string} userConfigPath - Temporary npm config from {@link withNpmAuthConfig}.
+ * @returns {string[]} Arguments that follow `npm`.
+ * @throws {Error} When the registry is invalid or unsafe on the Windows shell.
  */
-export function loadNpmToken(repositoryRoot) {
-  const environmentFilePath = path.join(repositoryRoot, LOCAL_ENVIRONMENT_FILE);
+export function buildNpmWhoamiArguments(registryUrl, userConfigPath) {
+  return [...NPM_WHOAMI_ARGUMENTS, ...buildRegistryOptions(registryUrl, userConfigPath, "npm whoami")];
+}
 
-  if (!process.env[NPM_TOKEN_VARIABLE] && existsSync(environmentFilePath)) {
-    process.loadEnvFile(environmentFilePath);
+/**
+ * Builds the `npm owner ls` arguments that list the owners of a package on a registry.
+ *
+ * @param {string} packageName - npm package name, already checked with `NPM_PACKAGE_NAME_PATTERN`.
+ * @param {string} registryUrl - Registry the package is published to.
+ * @param {string} userConfigPath - Temporary npm config from {@link withNpmAuthConfig}.
+ * @returns {string[]} Arguments that follow `npm`.
+ * @throws {Error} When the registry is invalid or unsafe on the Windows shell.
+ */
+export function buildNpmOwnerListArguments(packageName, registryUrl, userConfigPath) {
+  return [...NPM_OWNER_LIST_ARGUMENTS, packageName, ...buildRegistryOptions(registryUrl, userConfigPath, "npm owner ls")];
+}
+
+/**
+ * Reads `NPM_TOKEN` from an environment file without loading anything into the process.
+ *
+ * @param {string} environmentFilePath - `.env` file.
+ * @returns {string | null} Non-empty token, or `null` when the file is missing or does not define it.
+ */
+function readTokenFromEnvironmentFile(environmentFilePath) {
+  if (!existsSync(environmentFilePath)) {
+    return null;
   }
 
-  return Boolean(process.env[NPM_TOKEN_VARIABLE]);
+  return parseEnv(readFileSync(environmentFilePath, "utf8"))[NPM_TOKEN_VARIABLE] || null;
 }
 
 /**
- * Lists the versions of a package published on a registry. With `NPM_TOKEN` (environment or `.env`)
+ * Resolves `NPM_TOKEN` with the single lookup shared by the diagnosis, `npm view` and the
+ * publication: the `NPM_TOKEN` environment variable, else the repository `.env` (ignored by Git),
+ * else the file shared by every project, `~/.config/beez-rp/.env`. The token is only returned:
+ * it is never written to disk nor loaded into `process.env`.
+ *
+ * @param {string} repositoryRoot - Repository root holding the optional `.env`.
+ * @param {NpmTokenLookup} [lookup] - Environment and home directory to read.
+ * @returns {NpmTokenResolution} Token and its source.
+ */
+export function resolveNpmToken(repositoryRoot, { environment = process.env, homeDirectory = homedir() } = {}) {
+  const candidates = [
+    { source: NPM_TOKEN_SOURCE.environment, read: () => environment[NPM_TOKEN_VARIABLE] || null },
+    { source: NPM_TOKEN_SOURCE.repository, read: () => readTokenFromEnvironmentFile(path.join(repositoryRoot, LOCAL_ENVIRONMENT_FILE)) },
+    { source: NPM_TOKEN_SOURCE.shared, read: () => readTokenFromEnvironmentFile(path.join(homeDirectory, ...SHARED_ENVIRONMENT_FILE_SEGMENTS)) },
+  ];
+
+  for (const candidate of candidates) {
+    const token = candidate.read();
+    if (token) {
+      return { token, source: candidate.source };
+    }
+  }
+
+  return { token: null, source: null };
+}
+
+/**
+ * Builds the environment of an npm command that authenticates with the temporary config: the
+ * publish environment ({@link buildNpmPublishEnvironment}) plus `NPM_TOKEN`, which npm expands
+ * from `${NPM_TOKEN}` in that config. Only the child process receives the token.
+ *
+ * @param {string} token - Token from {@link resolveNpmToken}.
+ * @param {NodeJS.ProcessEnv} [environment] - Environment to copy; the current process by default.
+ * @returns {NodeJS.ProcessEnv} Environment for npm.
+ */
+export function buildNpmTokenEnvironment(token, environment = process.env) {
+  return { ...buildNpmPublishEnvironment(environment), [NPM_TOKEN_VARIABLE]: token };
+}
+
+/**
+ * Parses the output of `npm owner ls`: one `<user> <<email>>` line per owner.
+ *
+ * @param {string} output - Standard output of npm.
+ * @returns {string[]} npm user names.
+ */
+export function parseNpmOwnerList(output) {
+  return output
+    .split("\n")
+    .map((line) => NPM_OWNER_LINE_PATTERN.exec(line.trim())?.groups?.user)
+    .filter((owner) => typeof owner === "string");
+}
+
+/**
+ * Returns the first line of a failed npm command, for messages that never include the token.
+ *
+ * @param {{ status: number, stdout: string, stderr: string }} result - Captured npm result.
+ * @param {string} commandName - npm command, such as `npm whoami`.
+ * @returns {string} First meaningful output line, or the exit code.
+ */
+function describeNpmFailure(result, commandName) {
+  const firstLine = `${result.stderr}\n${result.stdout}`
+    .split("\n")
+    .map((line) => line.trim())
+    .find(Boolean);
+  return firstLine ? `${commandName}: ${firstLine}` : `${commandName} salió con código ${result.status}`;
+}
+
+/**
+ * Checks, before anything is touched, that `NPM_TOKEN` can publish the package: resolves the token
+ * ({@link resolveNpmToken}), asks the registry who it authenticates as (`npm whoami`) and whether
+ * that user owns the package (`npm owner ls`). A package the registry does not know yet (E404) is a
+ * first publication and passes. Both commands use the same temporary config and registry as
+ * `npm publish`, so a passing check means npm accepts the credential.
+ *
+ * @param {string} packageName - npm package name.
+ * @param {string} repositoryRoot - Repository root, where npm reads its project config.
+ * @param {string} registryUrl - Registry from {@link resolvePublishRegistry}.
+ * @param {NpmTokenLookup} [lookup] - Token lookup of {@link resolveNpmToken}.
+ * @returns {Promise<NpmAuthCheck>} Check result; never rejects.
+ */
+export async function checkNpmPublishAccess(packageName, repositoryRoot, registryUrl, lookup = {}) {
+  const { token, source } = resolveNpmToken(repositoryRoot, lookup);
+  /** @type {NpmAuthCheck} */
+  const check = { status: NPM_AUTH_STATUS.unknown, user: null, source, registryUrl, packageName, owners: [], firstPublication: false, reason: null };
+
+  if (!token) {
+    return { ...check, status: NPM_AUTH_STATUS.missingToken };
+  }
+
+  if (!NPM_PACKAGE_NAME_PATTERN.test(packageName)) {
+    return { ...check, reason: `nombre de paquete inválido: ${packageName}` };
+  }
+
+  const environment = buildNpmTokenEnvironment(token, lookup.environment);
+
+  try {
+    return await withNpmAuthConfig(buildNpmAuthConfigLine(registryUrl), async (userConfigPath) => {
+      const whoami = await runNpmCaptured(buildNpmWhoamiArguments(registryUrl, userConfigPath), repositoryRoot, environment);
+
+      if (whoami.status !== 0) {
+        const rejected = NPM_REJECTED_CREDENTIAL_PATTERN.test(`${whoami.stderr}\n${whoami.stdout}`);
+        return { ...check, status: rejected ? NPM_AUTH_STATUS.invalidToken : NPM_AUTH_STATUS.unknown, reason: describeNpmFailure(whoami, "npm whoami") };
+      }
+
+      const user = whoami.stdout.trim();
+      const ownerList = await runNpmCaptured(buildNpmOwnerListArguments(packageName, registryUrl, userConfigPath), repositoryRoot, environment);
+
+      if (ownerList.status !== 0) {
+        return `${ownerList.stdout}\n${ownerList.stderr}`.includes(NPM_NOT_FOUND_CODE)
+          ? { ...check, status: NPM_AUTH_STATUS.ok, user, firstPublication: true }
+          : { ...check, user, reason: describeNpmFailure(ownerList, "npm owner ls") };
+      }
+
+      const owners = parseNpmOwnerList(ownerList.stdout);
+
+      if (owners.includes(user)) {
+        return { ...check, status: NPM_AUTH_STATUS.ok, user, owners };
+      }
+
+      // An organization may grant publication through a team without listing the user as owner.
+      return readPackageScope(packageName)
+        ? { ...check, user, owners, reason: `${user} no figura entre los dueños de ${packageName}; puede publicar solo si tiene acceso por un equipo de la organización` }
+        : { ...check, status: NPM_AUTH_STATUS.notOwner, user, owners };
+    });
+  } catch (error) {
+    return { ...check, reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/**
+ * Lists the versions of a package published on a registry. With `NPM_TOKEN` ({@link resolveNpmToken})
  * the query authenticates through the same temporary config the publication uses, so a private
  * package can be diagnosed; without it the registry is queried with npm's usual config.
  *
@@ -121,12 +316,14 @@ export async function lookupPublishedVersions(packageName, repositoryRoot, regis
     return { status: NPM_LOOKUP_STATUS.failed, publishedVersions: [], reason: `nombre de paquete inválido: ${packageName}` };
   }
 
+  const { token } = resolveNpmToken(repositoryRoot);
+  const environment = token ? buildNpmTokenEnvironment(token) : process.env;
   /** @param {string | null} userConfigPath - Temporary authenticated config, or `null`. */
-  const view = (userConfigPath) => runNpmCaptured(buildNpmViewArguments(packageName, registryUrl, userConfigPath), repositoryRoot);
+  const view = (userConfigPath) => runNpmCaptured(buildNpmViewArguments(packageName, registryUrl, userConfigPath), repositoryRoot, environment);
 
   let result;
   try {
-    result = loadNpmToken(repositoryRoot) ? await withNpmAuthConfig(buildNpmAuthConfigLine(registryUrl), view) : await view(null);
+    result = token ? await withNpmAuthConfig(buildNpmAuthConfigLine(registryUrl), view) : await view(null);
   } catch (error) {
     return { status: NPM_LOOKUP_STATUS.failed, publishedVersions: [], reason: error instanceof Error ? error.message : String(error) };
   }
@@ -389,9 +586,11 @@ export function buildNpmPublishEnvironment(environment = process.env) {
 
 /**
  * Publishes the working tree, or a prepared archive, to npm. `NPM_TOKEN` comes
- * from the environment or the ignored `.env` and only reaches npm through the
+ * from {@link resolveNpmToken} and only reaches npm through the child
  * environment and a temporary user config. npm inherits the terminal, so its
- * interactive browser or one-time-password (2FA) confirmation works.
+ * interactive browser or one-time-password (2FA) confirmation works; that is
+ * also why its output cannot be parsed, and a failure is explained afterwards
+ * with {@link checkNpmPublishAccess}.
  *
  * @param {string} repositoryRoot - Package root.
  * @param {{ authConfigLine: string, artifactPath?: string | null }} publication - Registry credential line from
@@ -401,7 +600,9 @@ export function buildNpmPublishEnvironment(environment = process.env) {
  * @throws {Error} When the temporary config path could break out of its shell quotes.
  */
 export async function publishToNpm(repositoryRoot, { authConfigLine, artifactPath = null }) {
-  if (!loadNpmToken(repositoryRoot)) {
+  const { token } = resolveNpmToken(repositoryRoot);
+
+  if (!token) {
     return { exitCode: 1, missingToken: true };
   }
 
@@ -412,7 +613,7 @@ export async function publishToNpm(repositoryRoot, { authConfigLine, artifactPat
 
     // The command line is constant apart from validated paths; the token only travels through the environment.
     const publishArguments = buildNpmPublishArguments(artifactPath);
-    const env = buildNpmPublishEnvironment();
+    const env = buildNpmTokenEnvironment(token);
     return USES_SHELL_FOR_PACKAGE_MANAGERS
       ? runInherited(`npm ${publishArguments.join(" ")} --userconfig "${userConfigPath}"`, [], { cwd: repositoryRoot, shell: true, env })
       : runInherited("npm", [...publishArguments, "--userconfig", userConfigPath], { cwd: repositoryRoot, env });

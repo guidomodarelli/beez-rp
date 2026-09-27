@@ -52,6 +52,40 @@ export function parseReleaseVersion(version) {
 }
 
 /**
+ * Compares two stable `X.Y.Z` versions numerically.
+ *
+ * @param {string} leftVersion - First version.
+ * @param {string} rightVersion - Second version.
+ * @returns {number} Negative when `leftVersion` is lower, `0` when equal, positive when higher.
+ * @throws {Error} When either version is not a stable release version.
+ */
+export function compareReleaseVersions(leftVersion, rightVersion) {
+  const left = parseReleaseVersion(leftVersion);
+  const right = parseReleaseVersion(rightVersion);
+  const differentIndex = left.findIndex((part, index) => part !== right[index]);
+  return differentIndex === -1 ? 0 : left[differentIndex] - right[differentIndex];
+}
+
+/**
+ * Returns the highest stable version of a list, ignoring prereleases and invalid entries.
+ *
+ * @param {unknown[]} versions - Versions, such as the ones `npm view <pkg> versions` lists.
+ * @returns {string | null} Highest stable `X.Y.Z` version, or `null` when there is none.
+ */
+export function findHighestStableVersion(versions) {
+  /** @type {string | null} */
+  let highest = null;
+
+  for (const version of versions) {
+    if (typeof version === "string" && isStableReleaseVersion(version) && (highest === null || compareReleaseVersions(version, highest) > 0)) {
+      highest = version;
+    }
+  }
+
+  return highest;
+}
+
+/**
  * Returns the next version for a semver release type.
  *
  * @param {string} version - Current `X.Y.Z` version.

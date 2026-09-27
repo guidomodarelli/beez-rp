@@ -4,7 +4,8 @@
  *
  * 1. Diagnosis: fetches `origin`, reads the branch, working tree, `main`
  *    versus `origin/main`, the last release, unreleased commits, the
- *    published versions and pending migrations (`state.js`).
+ *    published versions, the npm credentials (when the plan would publish to
+ *    npm) and pending migrations (`state.js`).
  * 2. Plan: `plan.js` turns that snapshot into ordered steps, or into blockers
  *    that explain what to fix.
  * 3. Execution: runs each step; project-specific work (checks, migrations,
@@ -31,10 +32,11 @@ import {
   MAX_LISTED_COMMITS,
   MAX_LISTED_ITEMS,
   MIGRATION_STATUS,
+  NPM_AUTH_STATUS,
   NPM_LOOKUP_STATUS,
   NPM_PUBLISHER,
+  NPM_TOKEN_LOCATIONS,
   NPM_TOKEN_VARIABLE,
-  LOCAL_ENVIRONMENT_FILE,
   PACKAGE_MANIFEST_FILE,
   PACKAGE_VERSION_FIELD_PATTERN,
   PINNED_NODE_VERSION_FILE,
@@ -72,7 +74,16 @@ import {
 } from "./artifact.js";
 import { loadCreateVersionConfig } from "./config.js";
 import { ReleaseStepError } from "./errors.js";
-import { buildNpmAuthConfigLine, describePublishedRelease, lookupPublishedVersions, publishToNpm, readNpmPackIntegrity, resolvePublishRegistry } from "./npm.js";
+import {
+  buildNpmAuthConfigLine,
+  checkNpmPublishAccess,
+  describePublishedRelease,
+  lookupPublishedVersions,
+  publishToNpm,
+  readNpmPackIntegrity,
+  resolvePublishRegistry,
+} from "./npm.js";
+import { describeNpmPublishFailure, describeNpmTokenSource } from "./npm-auth.js";
 import { RELEASE_USAGE, buildReleasePlan, parseReleaseArguments } from "./plan.js";
 import { createGitReader, listCommits, runCommandLine, runInherited } from "./process.js";
 import { collectReleaseState } from "./state.js";
@@ -180,8 +191,14 @@ function renderDiagnosis(state, repositoryRoot) {
     ...(behindCount > 0 ? [paint("yellow", `${behindCount} atrás`)] : []),
     ...(aheadCommits.length > 0 ? [paint("yellow", `${aheadCommits.length} adelante`)] : []),
   ];
+  const detachedTag = !state.currentBranch && state.headReleaseTag ? state.headReleaseTag : null;
+  const branchRow = isOnMain
+    ? renderRow(ICON.success, "Rama", MAIN_BRANCH)
+    : detachedTag
+      ? renderRow(ICON.warning, "Rama", paint("yellow", `HEAD desacoplado en ${detachedTag}`))
+      : renderRow(ICON.failure, "Rama", paint("red", state.currentBranch ?? "HEAD desacoplado"));
   const rows = [
-    renderRow(isOnMain ? ICON.success : ICON.failure, "Rama", isOnMain ? MAIN_BRANCH : paint("red", state.currentBranch ?? "HEAD desacoplado")),
+    branchRow,
     renderRow(
       state.workingTreeChanges.length === 0 ? ICON.success : ICON.warning,
       "Working tree",
@@ -206,6 +223,10 @@ function renderDiagnosis(state, repositoryRoot) {
         state.npm.status === NPM_LOOKUP_STATUS.ok ? `latest ${paint("cyan", latestPublished ?? "ninguna todavía")}` : paint("red", "no respondió")
       )
     );
+  }
+
+  if (state.npmAuth) {
+    rows.push(renderNpmAuthRow(state.npmAuth));
   }
 
   rows.push(
@@ -244,6 +265,29 @@ function renderDiagnosis(state, repositoryRoot) {
   }
 
   return renderBox({ title: "Diagnóstico", lines: rows, tone: BOX_TONE.info });
+}
+
+/**
+ * Renders the npm credential row of the diagnosis: the user and where the token came from, or the problem.
+ *
+ * @param {import("./npm.js").NpmAuthCheck} npmAuth - Credential check.
+ * @returns {string} Row.
+ */
+function renderNpmAuthRow(npmAuth) {
+  const source = describeNpmTokenSource(npmAuth);
+
+  switch (npmAuth.status) {
+    case NPM_AUTH_STATUS.ok:
+      return renderRow(ICON.success, "npm auth", `${npmAuth.user} (${source})${npmAuth.firstPublication ? paint("gray", " · primera publicación") : ""}`);
+    case NPM_AUTH_STATUS.missingToken:
+      return renderRow(ICON.failure, "npm auth", paint("red", `falta ${NPM_TOKEN_VARIABLE}`));
+    case NPM_AUTH_STATUS.invalidToken:
+      return renderRow(ICON.failure, "npm auth", paint("red", `token inválido o vencido (${source})`));
+    case NPM_AUTH_STATUS.notOwner:
+      return renderRow(ICON.failure, "npm auth", paint("red", `${npmAuth.user} no puede publicar ${npmAuth.packageName} (${source})`));
+    default:
+      return renderRow(ICON.warning, "npm auth", paint("yellow", `no se pudo verificar (${source})`));
+  }
 }
 
 /**
@@ -749,15 +793,15 @@ async function publishReleaseStep(context) {
     if (result.missingToken) {
       throw new ReleaseStepError(
         `Falta ${NPM_TOKEN_VARIABLE} para publicar ${version}.`,
-        `Definilo en el entorno o en ${LOCAL_ENVIRONMENT_FILE} (ignorado por Git) y corré pnpm create-version: retoma solo la publicación.`
+        `Definilo en ${NPM_TOKEN_LOCATIONS} y corré pnpm create-version: retoma solo la publicación.`
       );
     }
 
     if (result.exitCode !== 0) {
-      throw new ReleaseStepError(
-        `npm publish terminó con código ${result.exitCode}.`,
-        `Comprobá en npm si ${version} llegó; si no, corré pnpm create-version para reintentar solo la publicación.`
-      );
+      // npm inherited the terminal (2FA), so its output cannot be parsed: the credentials are checked again.
+      const npmAuth = await checkNpmPublishAccess(packageName, context.repositoryRoot, registryUrl);
+      const failure = describeNpmPublishFailure(npmAuth, { exitCode: result.exitCode, version });
+      throw new ReleaseStepError(failure.message, failure.hint);
     }
 
     // npm view ignores publishConfig, so the registry the release went to is queried explicitly.
@@ -830,6 +874,36 @@ function renderReleaseSummary(context, remoteUrl, startedAt) {
 }
 
 /**
+ * Explains, after a failed step, that the release already reached `origin` and only the
+ * publication is missing, so the user knows GitHub has it and npm does not.
+ *
+ * @param {ReleaseContext} context - Release context.
+ * @param {string} remoteUrl - `origin` URL.
+ * @returns {Promise<string | null>} Spanish summary, or `null` when the release tag is not on `origin` or it was published.
+ */
+async function describeReleaseOnOrigin(context, remoteUrl) {
+  const version = context.version;
+
+  if (!version || context.published || !context.config.publish) {
+    return null;
+  }
+
+  const tag = toReleaseTag(version);
+  const tagOnOrigin = context.pushed || Boolean(await context.reader.tryGit(["ls-remote", "--tags", RELEASE_REMOTE, `refs/tags/${tag}`]));
+
+  if (!tagOnOrigin) {
+    return null;
+  }
+
+  const host = GITHUB_REPOSITORY_PATTERN.test(remoteUrl) ? "GitHub" : RELEASE_REMOTE;
+  const isDetached = !context.state.currentBranch;
+  const refs = isDetached ? "tag" : `${MAIN_BRANCH} + tag`;
+  const target = context.config.publish === NPM_PUBLISHER ? "publicar en npm" : "publicar el release";
+  const rerun = isDetached ? `Corré pnpm create-version desde ${tag} (HEAD desacoplado)` : "Corré pnpm create-version";
+  return `${tag} ya está en ${host} (${refs}); falta ${target}. ${rerun} para reintentar solo la publicación.`;
+}
+
+/**
  * Runs `create-version` in a repository.
  *
  * @param {{ repositoryRoot: string, argv: string[] }} options - Repository root and arguments after the command name.
@@ -864,6 +938,8 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   const reader = createGitReader(repositoryRoot);
   const remoteUrl = (await reader.tryGit(["remote", "get-url", RELEASE_REMOTE])) ?? "";
   const { migrations } = config;
+  const capabilities = describeReleaseCapabilities(config);
+  const planOptions = { skipUnpublished: options.skipUnpublished };
   const spinner = startSpinner("Diagnosticando el repositorio");
   let state;
 
@@ -872,6 +948,9 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
       repositoryRoot,
       trackNpm: config.registry === RELEASE_REGISTRY.npm,
       checkMigrations: migrations ? () => migrations.check(createHookContext(repositoryRoot, reader, null)) : null,
+      // The credentials are only checked when the plan would publish to npm.
+      checkNpmAuth: (snapshot) =>
+        config.publish === NPM_PUBLISHER && buildReleasePlan(snapshot, capabilities, planOptions).steps.some((planStep) => planStep.id === RELEASE_STEP.publishRelease),
       onProgress: (label) => spinner.update(label),
     });
     spinner.succeed("Diagnóstico completo");
@@ -888,7 +967,7 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   print(renderBanner({ projectName: config.projectName ?? state.packageName, publishedLabel }));
   print(renderDiagnosis(state, repositoryRoot));
 
-  const plan = buildReleasePlan(state, describeReleaseCapabilities(config));
+  const plan = buildReleasePlan(state, capabilities, planOptions);
 
   if (plan.mode === RELEASE_MODE.upToDate) {
     const since = state.lastRelease?.version ? toReleaseTag(state.lastRelease.version) : "el inicio";
@@ -952,7 +1031,8 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
       if (error instanceof ReleaseStepError) {
         lines.push("", `${paint("bold", "Qué hacer:")} ${error.hint}`);
       }
-      lines.push("", paint("gray", "pnpm create-version retoma desde el primer paso que falte."));
+      const releaseOnOrigin = await describeReleaseOnOrigin(context, remoteUrl);
+      lines.push("", releaseOnOrigin ? `${ICON.warning} ${paint("bold", releaseOnOrigin)}` : paint("gray", "pnpm create-version retoma desde el primer paso que falte."));
       print(renderBox({ title: `Falló el paso ${index + 1}: ${planStep.title}`, lines, tone: BOX_TONE.danger }));
       return FAILURE_EXIT_CODE;
     }
