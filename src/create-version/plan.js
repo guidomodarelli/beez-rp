@@ -35,7 +35,7 @@ import {
 } from "../constants/create-version.js";
 import { RELEASE_TYPE } from "../constants/versions.js";
 import { compareReleaseVersions, findHighestStableVersion, isReleaseCommitSubject, isStableReleaseVersion, toReleaseTag } from "../versions.js";
-import { describeNpmAuthProblem } from "./npm-auth.js";
+import { describeNpmAuthProblem, describeNpmFirstPublicationWarning } from "./npm-auth.js";
 
 /**
  * @typedef {{ sha?: string, subject: string, body?: string }} ReleaseCommit
@@ -444,7 +444,7 @@ function unpublishedReleaseBlocker({ version, latestPublished, resumable }) {
 
 /**
  * Stops a plan that would publish when the npm credential check found a problem, or warns when
- * the check could not decide.
+ * the check could not decide or the first publication cannot be told apart from a hidden private package.
  *
  * @param {ReleasePlan} plan - Plan built from the rest of the snapshot.
  * @param {NpmAuthCheck | null | undefined} npmAuth - Credential check, when the project publishes to npm.
@@ -465,7 +465,8 @@ function applyNpmAuth(plan, npmAuth) {
     return { ...plan, warnings: [...plan.warnings, `No se pudieron verificar las credenciales de npm: ${npmAuth.reason ?? "motivo desconocido"}. Se intenta publicar igual.`] };
   }
 
-  return plan;
+  const firstPublicationWarning = describeNpmFirstPublicationWarning(npmAuth);
+  return firstPublicationWarning ? { ...plan, warnings: [...plan.warnings, firstPublicationWarning] } : plan;
 }
 
 /**

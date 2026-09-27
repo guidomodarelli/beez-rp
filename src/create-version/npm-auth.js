@@ -10,6 +10,7 @@
 import {
   NPM_AUTH_RERUN_ACTION,
   NPM_AUTH_STATUS,
+  NPM_NOT_FOUND_CODE,
   NPM_PUBLISH_RETRY_ACTION,
   NPM_PUT_NOT_FOUND_NOTE,
   NPM_TOKEN_LOCATIONS,
@@ -64,7 +65,7 @@ function describeCredentialProblem(npmAuth, nextAction) {
     case NPM_AUTH_STATUS.notOwner:
       return {
         title: `El token autentica como ${npmAuth.user}, que no puede publicar ${npmAuth.packageName} (dueños: ${describeOwners(npmAuth)})`,
-        reason: `Origen del token: ${sourceLabel}.`,
+        reason: `${npmAuth.reason ? `${npmAuth.reason} ` : ""}Origen del token: ${sourceLabel}.`,
         fix: `Usá el token de un dueño o pedí que te agreguen (npm owner add ${npmAuth.user} ${npmAuth.packageName}) y ${nextAction}.`,
       };
     default:
@@ -81,6 +82,22 @@ function describeCredentialProblem(npmAuth, nextAction) {
 export function describeNpmAuthProblem(npmAuth) {
   const problem = describeCredentialProblem(npmAuth, NPM_AUTH_RERUN_ACTION);
   return problem ? { title: problem.title, details: [...(problem.reason ? [problem.reason] : []), problem.fix] } : null;
+}
+
+/**
+ * Warns about a first publication that cannot be told apart from a hidden package: `npm view` and
+ * `npm owner ls` answered E404, which is what a registry answers both for a new package and for a
+ * private package the token has no access to.
+ *
+ * @param {NpmAuthCheck} npmAuth - Result of `checkNpmPublishAccess`, confirmed against `npm view`.
+ * @returns {string | null} Warning, or `null` when the check is not a first publication.
+ */
+export function describeNpmFirstPublicationWarning(npmAuth) {
+  if (npmAuth.status !== NPM_AUTH_STATUS.ok || !npmAuth.firstPublication) {
+    return null;
+  }
+
+  return `El registry ${npmAuth.registryUrl} no muestra ${npmAuth.packageName} (npm view y npm owner ls responden ${NPM_NOT_FOUND_CODE}): se toma como primera publicación. Si ya existe como paquete privado, el token (${describeNpmTokenSource(npmAuth)}) no tiene acceso y npm publish va a fallar después de crear y pushear el commit y el tag.`;
 }
 
 /**

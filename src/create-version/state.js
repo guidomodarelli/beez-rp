@@ -22,6 +22,7 @@ import {
   MIGRATION_STATUS,
   NPM_AUTH_STATUS,
   NPM_LOOKUP_STATUS,
+  NPM_NOT_FOUND_CODE,
   NO_PULL_REQUEST_MESSAGE_PATTERN,
   PACKAGE_MANIFEST_FILE,
   PULL_REQUEST_JSON_FIELDS,
@@ -213,6 +214,31 @@ async function checkNpmAuthOnPublishRegistry(checkAccess, manifest, repositoryRo
 }
 
 /**
+ * Confirms a first publication (`npm owner ls` answered E404) against the versions `npm view`
+ * listed with the same token. Registries hide a private package from users without access, so an
+ * owner E404 only means "new package" when `npm view` does not list versions either: when it does,
+ * the package exists and the token cannot manage it, which blocks like a user that is not an owner.
+ *
+ * @param {import("./npm.js").NpmAuthCheck} npmAuth - Credential check.
+ * @param {import("./npm.js").NpmLookup | null} npm - Published versions, or `null` when npm is not tracked.
+ * @returns {import("./npm.js").NpmAuthCheck} The same check, or a `notOwner` one when the package already has versions.
+ */
+function confirmFirstPublication(npmAuth, npm) {
+  const publishedCount = npm?.publishedVersions.length ?? 0;
+
+  if (!npmAuth.firstPublication || publishedCount === 0) {
+    return npmAuth;
+  }
+
+  return {
+    ...npmAuth,
+    status: NPM_AUTH_STATUS.notOwner,
+    firstPublication: false,
+    reason: `npm view lista versiones publicadas de ${npmAuth.packageName} (${publishedCount}), pero npm owner ls respondió ${NPM_NOT_FOUND_CODE}: el token no tiene acceso al paquete.`,
+  };
+}
+
+/**
  * Gathers the complete release snapshot.
  *
  * @param {{
@@ -306,7 +332,7 @@ export async function collectReleaseState({
 
   if (checkNpmAuth?.(snapshot)) {
     onProgress("Verificando las credenciales de npm");
-    snapshot.npmAuth = await checkNpmAuthOnPublishRegistry(checkNpmAccess, manifest, repositoryRoot);
+    snapshot.npmAuth = confirmFirstPublication(await checkNpmAuthOnPublishRegistry(checkNpmAccess, manifest, repositoryRoot), npm);
   }
 
   return snapshot;

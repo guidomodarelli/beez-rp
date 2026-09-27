@@ -624,6 +624,55 @@ describe("beez-rp create-version command", () => {
   );
 
   it(
+    "should accept a package npm view and npm owner ls do not show as a first publication, warning that it may be a hidden private package",
+    async () => {
+      const registry = await startOwnedRegistry();
+      const { repositoryRoot, remoteRoot } = createReleasedRepository("0.1.0", publishTo(registry.registryUrl));
+      pushConfiguration(repositoryRoot, npmReleaseConfiguration(path.join(path.dirname(repositoryRoot), "hooks.log")));
+
+      const preview = await runCliAsync(repositoryRoot, ["--bump", "minor", "--dry-run"], { NPM_TOKEN: OWNER_TOKEN });
+      const output = flattenOutput(preview.output);
+
+      expect(preview.status, preview.output).toBe(0);
+      expect(output).toContain(`npm auth ${OWNER_USER} (variable de entorno) · primera publicación`);
+      expect(output).toContain("4. Publicar en npm");
+      expect(output).toContain("no muestra fixture-app (npm view y npm owner ls responden E404): se toma como primera publicación");
+      expect(output).toContain("Si ya existe como paquete privado, el token (variable de entorno) no tiene acceso");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+      expect(registry.publications).toEqual([]);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should stop in the diagnosis when npm view lists versions but npm owner ls answers E404 to the token",
+    async () => {
+      const registry = await startFixtureNpmRegistry({
+        users: { [OWNER_TOKEN]: OWNER_USER },
+        packages: { "fixture-app": { maintainers: ["fixture-other-owner"], versions: ["0.1.0"], hiddenFromOwnerList: true } },
+      });
+      openRegistries.push(registry);
+      const { repositoryRoot, remoteRoot } = createReleasedRepository("0.1.0", publishTo(registry.registryUrl));
+      const hookLog = path.join(path.dirname(repositoryRoot), "hooks.log");
+      pushConfiguration(repositoryRoot, npmReleaseConfiguration(hookLog));
+
+      const release = await runCliAsync(repositoryRoot, ["--bump", "minor"], { NPM_TOKEN: OWNER_TOKEN });
+      const output = flattenOutput(release.output);
+
+      expect(release.status, release.output).toBe(0);
+      expect(output).toContain(`npm auth ${OWNER_USER} no puede publicar fixture-app (variable de entorno)`);
+      expect(output).toContain(`El token autentica como ${OWNER_USER}, que no puede publicar fixture-app`);
+      expect(output).toContain("npm view lista versiones publicadas de fixture-app (1), pero npm owner ls respondió E404: el token no tiene acceso al paquete.");
+      expect(output).not.toContain("primera publicación");
+      expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+      expect(existsSync(hookLog)).toBe(false);
+      expect(registry.publications).toEqual([]);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
     "should say that the release is already on origin and only npm is missing when the publication fails after the push",
     async () => {
       const registry = await startOwnedRegistry({ publishedVersions: ["0.1.0"], rejectPublications: true });

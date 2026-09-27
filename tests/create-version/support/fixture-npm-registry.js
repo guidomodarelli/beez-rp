@@ -3,7 +3,9 @@
  * the npm CLI makes for `npm whoami` (`/-/whoami`), `npm view` / `npm owner ls`
  * (the packument with its versions and maintainers) and `npm publish` (PUT of
  * the packument). Tokens map to users; a PUT by a user that is not a
- * maintainer gets the 404 the public registry answers.
+ * maintainer gets the 404 the public registry answers. A package can hide its
+ * owners: `npm owner ls` then gets a 404, as a registry answers a user without
+ * access to a private package.
  *
  * @module tests/create-version/support/fixture-npm-registry
  */
@@ -16,8 +18,15 @@ const BEARER_PREFIX = "Bearer ";
 /** Path of the endpoint `npm whoami` queries. */
 const WHOAMI_PATH = "-/whoami";
 
+/** Header where the npm CLI names the command that made the request. */
+const NPM_COMMAND_HEADER = "npm-command";
+
+/** Value of {@link NPM_COMMAND_HEADER} for `npm owner ls`. */
+const OWNER_COMMAND = "owner";
+
 /**
- * @typedef {{ maintainers: string[], versions: string[] }} FixturePackage
+ * @typedef {{ maintainers: string[], versions: string[], hiddenFromOwnerList?: boolean }} FixturePackage
+ *   `hiddenFromOwnerList` answers `npm owner ls` with 404 while `npm view` still lists the versions.
  * @typedef {{ packageName: string, version: string, user: string }} FixturePublication
  * @typedef {{
  *   registryUrl: string,
@@ -82,7 +91,7 @@ function buildPackument(packageName, fixturePackage) {
  */
 export async function startFixtureNpmRegistry({ users = {}, packages = {}, rejectPublications = false } = {}) {
   /** @type {Map<string, FixturePackage>} */
-  const registryPackages = new Map(Object.entries(packages).map(([name, fixturePackage]) => [name, { maintainers: [...fixturePackage.maintainers], versions: [...fixturePackage.versions] }]));
+  const registryPackages = new Map(Object.entries(packages).map(([name, fixturePackage]) => [name, { ...fixturePackage, maintainers: [...fixturePackage.maintainers], versions: [...fixturePackage.versions] }]));
   /** @type {FixturePublication[]} */
   const publications = [];
 
@@ -99,7 +108,8 @@ export async function startFixtureNpmRegistry({ users = {}, packages = {}, rejec
     const fixturePackage = registryPackages.get(requestPath);
 
     if (request.method === "GET") {
-      sendJson(response, fixturePackage ? 200 : 404, fixturePackage ? buildPackument(requestPath, fixturePackage) : { error: "Not found" });
+      const visible = fixturePackage && !(fixturePackage.hiddenFromOwnerList && request.headers[NPM_COMMAND_HEADER] === OWNER_COMMAND);
+      sendJson(response, visible ? 200 : 404, visible ? buildPackument(requestPath, fixturePackage) : { error: "Not found" });
       return;
     }
 
