@@ -46,6 +46,10 @@
       "types": "./types/testing.d.ts",
       "default": "./src/testing.js"
     },
+    "./guard-publish": {
+      "types": "./types/guard-publish.d.ts",
+      "default": "./src/guard-publish.js"
+    },
     "./create-version": {
       "types": "./types/create-version/index.d.ts",
       "default": "./src/create-version/index.js"
@@ -71,7 +75,8 @@
     "check": "pnpm typecheck && pnpm test",
     "create-version": "node bin/beez-rp.js create-version",
     "cv": "node bin/beez-rp.js create-version",
-    "prepack": "pnpm build:types"
+    "prepack": "pnpm build:types",
+    "prepublishOnly": "node bin/beez-rp.js guard-publish"
   },
   "devDependencies": {
     "@types/node": "^24.13.4",

@@ -8,4 +8,5 @@
 export const CLI_COMMAND = Object.freeze({
   ignoreBuild: "ignore-build",
   createVersion: "create-version",
+  guardPublish: "guard-publish",
 });

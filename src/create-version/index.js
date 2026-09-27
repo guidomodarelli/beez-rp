@@ -9,10 +9,31 @@
  * @module create-version
  */
 
+export {
+  computeNpmIntegrity,
+  computeSha256,
+  expandArtifactPattern,
+  findPnpmPackRewrites,
+  findPreparedArtifact,
+  isSafeArtifactPath,
+  verifyPreparedArtifact,
+  withArtifactOutsidePackageRoot,
+} from "./artifact.js";
 export { defineCreateVersionConfig, loadCreateVersionConfig, resolveCreateVersionConfig } from "./config.js";
 export { ReleaseStepError } from "./errors.js";
-export { lookupPublishedVersions, publishToNpm } from "./npm.js";
+export {
+  buildNpmAuthConfigLine,
+  buildNpmPublishArguments,
+  buildNpmPublishEnvironment,
+  buildNpmViewArguments,
+  lookupPublishedVersions,
+  parseNpmPackDryRunOutput,
+  publishToNpm,
+  readNpmPackIntegrity,
+  resolvePublishRegistry,
+  withNpmAuthConfig,
+} from "./npm.js";
 export { DEFAULT_CAPABILITIES, RELEASE_USAGE, buildReleasePlan, describeFeatureBranchGaps, parseReleaseArguments } from "./plan.js";
-export { createGitReader, listCommits, parseCommitLog, readPackageVersionAt, runCaptured, runCommandLine, runInherited } from "./process.js";
+export { createGitReader, listCommits, parseCommitLog, readPackageManifestAt, readPackageVersionAt, runCaptured, runCommandLine, runInherited } from "./process.js";
 export { createHookContext, runCreateVersion } from "./run.js";
 export { collectReleaseState, findLastRelease, readChangelogState } from "./state.js";

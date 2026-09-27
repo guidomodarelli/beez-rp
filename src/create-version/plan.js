@@ -314,8 +314,15 @@ export function buildReleasePlan(state, capabilities = DEFAULT_CAPABILITIES) {
   /** @type {string[]} */
   const warnings = [];
 
+  // The rest of the plan depends on the code and configuration of the updated main, so the run
+  // stops after syncing and the next one diagnoses again.
   if (state.main.behindCount > 0) {
-    steps.push({ id: RELEASE_STEP.syncMain, title: `Actualizar ${MAIN_BRANCH} desde origin`, detail: `${state.main.behindCount} commit(s) nuevos.` });
+    steps.push({
+      id: RELEASE_STEP.syncMain,
+      title: `Actualizar ${MAIN_BRANCH} desde origin`,
+      detail: `${state.main.behindCount} commit(s) nuevos. Después hay que volver a correr pnpm create-version, que diagnostica con el código nuevo.`,
+    });
+    return { mode: RELEASE_MODE.newRelease, steps, blockers: [], warnings, pendingVersion: null };
   }
 
   if (state.migrations?.status === MIGRATION_STATUS.pending) {

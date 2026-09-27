@@ -27,6 +27,7 @@ import {
   FAILURE_EXIT_CODE,
   GITHUB_REPOSITORY_PATTERN,
   MAIN_BRANCH,
+  MAIN_SYNCED_RESTART_MESSAGE,
   MAX_LISTED_COMMITS,
   MAX_LISTED_ITEMS,
   MIGRATION_STATUS,
@@ -61,9 +62,17 @@ import {
   startSpinner,
 } from "../terminal-ui.js";
 import { listNextVersions, resolveRequestedVersion, suggestReleaseType, toReleaseTag } from "../versions.js";
+import {
+  expandArtifactPattern,
+  findPnpmPackRewrites,
+  findPreparedArtifact,
+  isSafeArtifactPath,
+  verifyPreparedArtifact,
+  withArtifactOutsidePackageRoot,
+} from "./artifact.js";
 import { loadCreateVersionConfig } from "./config.js";
 import { ReleaseStepError } from "./errors.js";
-import { lookupPublishedVersions, publishToNpm } from "./npm.js";
+import { buildNpmAuthConfigLine, describePublishedRelease, lookupPublishedVersions, publishToNpm, readNpmPackIntegrity, resolvePublishRegistry } from "./npm.js";
 import { RELEASE_USAGE, buildReleasePlan, parseReleaseArguments } from "./plan.js";
 import { createGitReader, listCommits, runCommandLine, runInherited } from "./process.js";
 import { collectReleaseState } from "./state.js";
@@ -83,11 +92,20 @@ import { collectReleaseState } from "./state.js";
  *   pushed: boolean,
  *   published: boolean,
  *   commitCount: number | null,
+ *   packageName: string,
+ *   registryUrl: string | null,
  * }} ReleaseContext
  */
 
 /** Raised when the user cancels on purpose; ends the run without an error box. */
 class ReleaseCancelledError extends Error {}
+
+/**
+ * Raised after syncing `main` brought new commits: the diagnosis, the plan and the configuration
+ * (with every module it imports) belong to the previous `main`, so the run ends without an error
+ * and asks to run the command again in a new process.
+ */
+class MainSyncedRestartError extends Error {}
 
 /** Answers of the pending-migrations prompt. */
 const MIGRATION_CHOICE = Object.freeze({ apply: "apply", skip: "skip", cancel: "cancel" });
@@ -305,6 +323,16 @@ function readWorkingUnreleased(repositoryRoot) {
 }
 
 /**
+ * Reads the working tree `package.json`, which syncing `main` may have changed after the diagnosis.
+ *
+ * @param {string} repositoryRoot - Repository root.
+ * @returns {import("./artifact.js").PackageManifest} Current manifest.
+ */
+function readWorkingManifest(repositoryRoot) {
+  return JSON.parse(readFileSync(path.join(repositoryRoot, PACKAGE_MANIFEST_FILE), "utf8"));
+}
+
+/**
  * Returns the version being released: the one just bumped or the pending one.
  *
  * @param {ReleaseContext} context - Release context.
@@ -321,12 +349,33 @@ function requireReleaseVersion(context) {
 }
 
 /**
- * Fast-forwards local `main` to `origin/main`.
+ * Steps a configuration adds to the release plan.
+ *
+ * @param {ResolvedCreateVersionConfig} config - Resolved configuration.
+ * @returns {import("./plan.js").ReleaseCapabilities} Capabilities for `buildReleasePlan`.
+ */
+function describeReleaseCapabilities(config) {
+  return {
+    checks: config.checks.length > 0,
+    prepare: config.prepare !== null,
+    publish: config.publish !== null,
+    publishTitle: config.publish === NPM_PUBLISHER ? "Publicar en npm" : "Publicar el release",
+  };
+}
+
+/**
+ * Fast-forwards local `main` to `origin/main`. When that brings new commits the release stops
+ * before touching the version: the diagnosis, the plan and `beez-rp.config.(m)js` (imported with
+ * its modules at startup) come from the previous `main`, so the command must run again in a new
+ * process to diagnose with the new code and configuration.
  *
  * @param {ReleaseContext} context - Release context.
  * @returns {Promise<void>}
+ * @throws {ReleaseStepError} When the fast-forward fails.
+ * @throws {MainSyncedRestartError} When `main` moved and the command has to run again.
  */
 async function syncMainStep(context) {
+  const headBeforeSync = await context.reader.git(["rev-parse", "HEAD"]);
   await runGitStep(
     context,
     ["merge", "--ff-only", "--quiet", REMOTE_MAIN_REF],
@@ -334,6 +383,10 @@ async function syncMainStep(context) {
     `Revisá git status y git log ${REMOTE_MAIN_REF}..${MAIN_BRANCH}.`
   );
   print(`${ICON.success} ${MAIN_BRANCH} quedó igual a ${REMOTE_MAIN_REF}.`);
+
+  if ((await context.reader.git(["rev-parse", "HEAD"])) !== headBeforeSync) {
+    throw new MainSyncedRestartError();
+  }
 }
 
 /**
@@ -548,6 +601,128 @@ async function pushReleaseStep(context) {
 }
 
 /**
+ * Lists the tracked files that differ from `HEAD`. `prepare` may create untracked or ignored
+ * output (`dist/`, `releases/`), but a modified tracked file (such as `package.json`) means
+ * `npm pack --dry-run` would no longer read the release commit.
+ *
+ * @param {ReleaseContext} context - Release context.
+ * @returns {Promise<string[]>} `git status --porcelain` lines of modified tracked files.
+ * @throws {ReleaseStepError} When Git cannot report the working tree state.
+ */
+async function listTrackedChanges(context) {
+  const output = await context.reader.tryGit(["status", "--porcelain", "--untracked-files=no"]);
+
+  if (output === null) {
+    throw new ReleaseStepError("No se pudo leer el estado del working tree antes de publicar.", "No se publicó nada. Revisá git status y volvé a correr pnpm create-version.");
+  }
+
+  return output.split("\n").filter((line) => line.trim() !== "");
+}
+
+/**
+ * Finds and verifies the archive prepared for the release when the project configured `artifact`.
+ * The working tree must still be the release commit (no tracked file modified by `prepare`), the
+ * manifest must not rely on rewrites only `pnpm pack` applies, and the archive must have the same
+ * SHA-512 integrity `npm pack --dry-run --ignore-scripts` reports for that commit: `npm pack` is
+ * reproducible, so equal hashes mean the archive is byte for byte what npm packs.
+ *
+ * @param {ReleaseContext} context - Release context.
+ * @param {string} version - Version being published.
+ * @param {Record<string, unknown>} workingManifest - Working tree `package.json`, after `prepare`.
+ * @returns {Promise<string | null>} Verified archive path relative to the root, or `null` to publish the working tree.
+ */
+async function resolvePublishedArtifact(context, version, workingManifest) {
+  const { artifact } = context.config;
+
+  if (!artifact) {
+    return null;
+  }
+
+  const trackedChanges = await listTrackedChanges(context);
+
+  if (trackedChanges.length > 0) {
+    throw new ReleaseStepError(
+      `El paso de preparación modificó archivos versionados: ${trackedChanges.slice(0, MAX_LISTED_ITEMS).join("; ")}.`,
+      "No se publicó nada. prepare puede generar archivos ignorados (dist/, releases/) pero no cambiar archivos versionados como package.json: revertí esos cambios y volvé a correr pnpm create-version."
+    );
+  }
+
+  const pnpmRewrites = findPnpmPackRewrites(workingManifest);
+
+  if (pnpmRewrites.length > 0) {
+    throw new ReleaseStepError(
+      `Este paquete depende de reescrituras de pnpm al empaquetar y beez-rp publica con npm: ${pnpmRewrites.slice(0, MAX_LISTED_ITEMS).join("; ")}.`,
+      "No se publicó nada. Reemplazá los especificadores workspace:/catalog:/jsr: por rangos de versión y sacá de publishConfig los campos del manifest que solo pnpm aplica al empaquetar (exports, main, bin, types...): declaralos en la raíz de package.json."
+    );
+  }
+
+  const release = { version, packageName: String(workingManifest.name) };
+  const prepared = findPreparedArtifact(context.repositoryRoot, artifact, release);
+
+  if (!prepared) {
+    throw new ReleaseStepError(
+      `No hay un artefacto preparado de ${version} que coincida con ${expandArtifactPattern(artifact, release)}.`,
+      "Revisá la salida del paso de preparación y volvé a correr pnpm create-version: retoma la preparación y la publicación."
+    );
+  }
+
+  if (!isSafeArtifactPath(prepared.path)) {
+    throw new ReleaseStepError(`La ruta del artefacto ${prepared.path} tiene caracteres no permitidos.`, "Usá rutas con letras, números, ., -, _, @, +, ~ y /.");
+  }
+
+  // Without a `files` allowlist or an ignore rule, npm would pack the archive into the package it
+  // describes; it is moved out of the root during the dry run and published later from its path.
+  const npmPack = await withArtifactOutsidePackageRoot(context.repositoryRoot, prepared.path, () => readNpmPackIntegrity(context.repositoryRoot));
+
+  if (!npmPack.pack) {
+    throw new ReleaseStepError(
+      `No se pudo verificar ${prepared.path}: ${npmPack.problem}.`,
+      "No se publicó nada. Corré npm pack --dry-run --json --ignore-scripts en la raíz para ver el error y volvé a correr pnpm create-version."
+    );
+  }
+
+  if (npmPack.pack.version !== version) {
+    throw new ReleaseStepError(
+      `npm pack --dry-run describe ${npmPack.pack.name}@${npmPack.pack.version} y se está publicando ${version}.`,
+      "No se publicó nada. Revisá que HEAD sea el commit de release y volvé a correr pnpm create-version."
+    );
+  }
+
+  const problems = verifyPreparedArtifact(context.repositoryRoot, prepared, npmPack.pack.integrity);
+
+  if (problems.length > 0) {
+    throw new ReleaseStepError(
+      `El artefacto ${prepared.path} no se puede publicar: ${problems.join("; ")}.`,
+      "No se publicó nada. Hacé que prepare empaquete con npm pack --ignore-scripts después de construir, borrá ese tarball y volvé a correr pnpm create-version."
+    );
+  }
+
+  print(`${ICON.success} ${prepared.path} verificado${prepared.expectedSha256 ? " (SHA-256 de la ruta e integrity de npm pack)" : " (integrity de npm pack)"}.`);
+  return prepared.path;
+}
+
+/**
+ * Resolves the registry the release is published to: `publishConfig["@scope:registry"]` for a
+ * scoped package, else `publishConfig.registry`, else the registry npm's config resolves in the
+ * repository (project `.npmrc`, environment, global config).
+ *
+ * @param {Record<string, unknown>} manifest - Working tree `package.json`.
+ * @param {string} repositoryRoot - Repository root.
+ * @returns {Promise<string>} Registry URL, already checked to be a plain http(s) URL.
+ * @throws {ReleaseStepError} When the registry is not a valid http(s) URL or npm cannot report it.
+ */
+async function resolveReleaseRegistry(manifest, repositoryRoot) {
+  try {
+    return await resolvePublishRegistry(manifest, repositoryRoot);
+  } catch (error) {
+    throw new ReleaseStepError(
+      `No se puede publicar: ${error instanceof Error ? error.message : String(error)}.`,
+      "No se publicó nada. Corregí el registry (publishConfig.registry o publishConfig[\"@scope:registry\"] en package.json, o registry/@scope:registry en .npmrc) con una URL http(s) sin credenciales y volvé a correr pnpm create-version."
+    );
+  }
+}
+
+/**
  * Publishes the release with npm or the project hook.
  *
  * @param {ReleaseContext} context - Release context.
@@ -558,7 +733,18 @@ async function publishReleaseStep(context) {
   const { publish } = context.config;
 
   if (publish === NPM_PUBLISHER) {
-    const result = await publishToNpm(context.repositoryRoot);
+    // Syncing main may have renamed the package after the diagnosis: publish under the current name.
+    const manifest = readWorkingManifest(context.repositoryRoot);
+    const packageName = String(manifest.name);
+    context.packageName = packageName;
+    const registryUrl = await resolveReleaseRegistry(manifest, context.repositoryRoot);
+    context.registryUrl = registryUrl;
+    const authConfigLine = buildNpmAuthConfigLine(registryUrl);
+    const artifactPath = await resolvePublishedArtifact(context, version, manifest);
+    if (artifactPath) {
+      print(paint("gray", `Publicando ${artifactPath}; npm puede pedir la confirmación 2FA en el navegador o un código.`));
+    }
+    const result = await publishToNpm(context.repositoryRoot, { authConfigLine, artifactPath });
 
     if (result.missingToken) {
       throw new ReleaseStepError(
@@ -574,7 +760,8 @@ async function publishReleaseStep(context) {
       );
     }
 
-    const npm = await lookupPublishedVersions(context.state.packageName, context.repositoryRoot);
+    // npm view ignores publishConfig, so the registry the release went to is queried explicitly.
+    const npm = await lookupPublishedVersions(packageName, context.repositoryRoot, registryUrl);
     if (!npm.publishedVersions.includes(version)) {
       print(`${ICON.warning} ${paint("yellow", `npm todavía no muestra ${version}; puede tardar unos segundos en propagarse.`)}`);
     }
@@ -623,8 +810,8 @@ function renderReleaseSummary(context, remoteUrl, startedAt) {
     lines.push(`${ICON.success} ${paint("bold", "Git")}       ${MAIN_BRANCH} + ${tag} en ${RELEASE_REMOTE}`);
   }
 
-  if (context.published && context.config.registry === RELEASE_REGISTRY.npm) {
-    lines.push(`${ICON.success} ${paint("bold", "npm")}       https://www.npmjs.com/package/${context.state.packageName}/v/${version}`);
+  if (context.published && context.registryUrl) {
+    lines.push(`${ICON.success} ${paint("bold", "npm")}       ${describePublishedRelease({ registryUrl: context.registryUrl, packageName: context.packageName, version })}`);
   }
 
   const githubRepository = GITHUB_REPOSITORY_PATTERN.exec(remoteUrl)?.[1];
@@ -701,12 +888,7 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   print(renderBanner({ projectName: config.projectName ?? state.packageName, publishedLabel }));
   print(renderDiagnosis(state, repositoryRoot));
 
-  const plan = buildReleasePlan(state, {
-    checks: config.checks.length > 0,
-    prepare: config.prepare !== null,
-    publish: config.publish !== null,
-    publishTitle: config.publish === NPM_PUBLISHER ? "Publicar en npm" : "Publicar el release",
-  });
+  const plan = buildReleasePlan(state, describeReleaseCapabilities(config));
 
   if (plan.mode === RELEASE_MODE.upToDate) {
     const since = state.lastRelease?.version ? toReleaseTag(state.lastRelease.version) : "el inicio";
@@ -742,7 +924,7 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   }
 
   /** @type {ReleaseContext} */
-  const context = { repositoryRoot, config, state, options, reader, version: plan.pendingVersion, pushed: false, published: false, commitCount: null };
+  const context = { repositoryRoot, config, state, options, reader, version: plan.pendingVersion, pushed: false, published: false, commitCount: null, packageName: state.packageName, registryUrl: null };
 
   for (const [index, planStep] of plan.steps.entries()) {
     print(renderStepHeader(index + 1, plan.steps.length, planStep.title));
@@ -751,6 +933,18 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
       await STEP_EXECUTORS[planStep.id](context);
     } catch (error) {
       if (error instanceof ReleaseCancelledError) {
+        return 0;
+      }
+
+      // Not a failure: the run ends on purpose so the next one diagnoses the updated main.
+      if (error instanceof MainSyncedRestartError) {
+        print(
+          renderBox({
+            title: `${MAIN_BRANCH} actualizado`,
+            lines: [`${ICON.info} ${MAIN_SYNCED_RESTART_MESSAGE}`, "", paint("gray", "No se tocó la versión ni los tags.")],
+            tone: BOX_TONE.info,
+          })
+        );
         return 0;
       }
 

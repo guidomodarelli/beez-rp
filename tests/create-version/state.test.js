@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -151,6 +151,75 @@ describe("create-version state", () => {
     },
     GIT_FIXTURE_TEST_TIMEOUT_MS
   );
+
+  it(
+    "should look up published versions on the registry the working-tree package.json publishes to",
+    async () => {
+      const { repositoryRoot } = createReleasedRepository();
+      const scopedManifest = { name: "@team/fixture-app", version: "0.1.0", publishConfig: { "@team:registry": "https://npm.example.test/team/" } };
+      writeFileSync(path.join(repositoryRoot, "package.json"), `${JSON.stringify(scopedManifest, null, 2)}\n`);
+      /** @type {unknown[][]} */
+      const lookups = [];
+
+      const state = await collectReleaseState({
+        repositoryRoot,
+        trackNpm: true,
+        lookupNpm: async (...lookupArguments) => {
+          lookups.push(lookupArguments);
+          return { status: NPM_LOOKUP_STATUS.ok, publishedVersions: ["0.1.0"], reason: null };
+        },
+      });
+
+      expect(lookups).toEqual([["@team/fixture-app", repositoryRoot, "https://npm.example.test/team/"]]);
+      expect(state.npm?.publishedVersions).toEqual(["0.1.0"]);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should look up published versions on the registry the project .npmrc selects when publishConfig declares none",
+    async () => {
+      const { repositoryRoot } = createReleasedRepository();
+      writeFileSync(path.join(repositoryRoot, ".npmrc"), "registry=https://npm.example.test/plain/\n");
+      /** @type {unknown[][]} */
+      const lookups = [];
+
+      await collectReleaseState({
+        repositoryRoot,
+        trackNpm: true,
+        lookupNpm: async (...lookupArguments) => {
+          lookups.push(lookupArguments);
+          return { status: NPM_LOOKUP_STATUS.ok, publishedVersions: [], reason: null };
+        },
+      });
+
+      expect(lookups).toEqual([["fixture-app", repositoryRoot, "https://npm.example.test/plain/"]]);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should report a failed npm lookup instead of querying npmjs when the declared registry is invalid",
+    async () => {
+      const { repositoryRoot } = createReleasedRepository();
+      const invalidRegistryManifest = { name: "fixture-app", version: "0.1.0", publishConfig: { registry: "ftp://npm.example.test/" } };
+      writeFileSync(path.join(repositoryRoot, "package.json"), `${JSON.stringify(invalidRegistryManifest, null, 2)}\n`);
+      let lookupCount = 0;
+
+      const state = await collectReleaseState({
+        repositoryRoot,
+        trackNpm: true,
+        lookupNpm: async () => {
+          lookupCount += 1;
+          return { status: NPM_LOOKUP_STATUS.ok, publishedVersions: [], reason: null };
+        },
+      });
+
+      expect(lookupCount).toBe(0);
+      expect(state.npm).toEqual({ status: NPM_LOOKUP_STATUS.failed, publishedVersions: [], reason: expect.stringContaining("http(s)") });
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
 });
 
 describe("beez-rp create-version command", () => {
@@ -210,6 +279,195 @@ describe("beez-rp create-version command", () => {
 
       const again = runCli(repositoryRoot, ["--dry-run"]);
       expect(again.output).toContain("Todo al día");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  /**
+   * Configures `publish: "npm"` with an `artifact` that `prepare` packs with the real `npm pack`.
+   *
+   * @param {string} repositoryRoot - Checkout.
+   * @param {string} [extraPrepare] - Statement run after packing, with `repositoryRoot` in scope.
+   * @param {{ ignoreReleases?: boolean }} [options] - Whether `.gitignore` excludes `releases/` (and so npm skips it too).
+   */
+  function configureNpmPackArtifact(repositoryRoot, extraPrepare = "", { ignoreReleases = true } = {}) {
+    if (ignoreReleases) writeFileSync(path.join(repositoryRoot, ".gitignore"), "releases/\n");
+    writeFileSync(
+      path.join(repositoryRoot, "beez-rp.config.js"),
+      [
+        'import { execSync } from "node:child_process";',
+        'import { mkdirSync, readFileSync, writeFileSync } from "node:fs";',
+        'import path from "node:path";',
+        "export default {",
+        '  changelog: { audience: "equipo" },',
+        '  publish: "npm",',
+        "  registry: null,",
+        '  artifact: "releases/{name}-{version}.tgz",',
+        "  prepare: ({ repositoryRoot }) => {",
+        '    mkdirSync(path.join(repositoryRoot, "releases"), { recursive: true });',
+        '    execSync("npm pack --pack-destination releases --ignore-scripts", { cwd: repositoryRoot, stdio: "ignore" });',
+        `    ${extraPrepare}`,
+        "  },",
+        "};",
+        "",
+      ].join("\n")
+    );
+    runGit(["add", "-A"], repositoryRoot);
+    runGit(["commit", "--quiet", "-m", "chore: configure releases"], repositoryRoot);
+    runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+  }
+
+  /**
+   * Runs a release that stops right after verifying the artifact: without NPM_TOKEN npm never publishes.
+   *
+   * @param {string} repositoryRoot - Checkout.
+   * @returns {string} Combined output.
+   */
+  function runReleaseWithoutToken(repositoryRoot) {
+    /** @type {NodeJS.ProcessEnv} */
+    const environment = { ...cleanEnvironment(), NO_COLOR: "1" };
+    delete environment.NPM_TOKEN;
+    const result = spawnSync(process.execPath, [CLI_PATH, "create-version", "--bump", "minor"], { cwd: repositoryRoot, encoding: "utf8", env: environment });
+    return `${result.stdout}${result.stderr}`;
+  }
+
+  it(
+    "should verify the npm-packed artifact against the npm pack --dry-run integrity, with the package name brought by syncing main",
+    () => {
+      const { repositoryRoot } = createReleasedRepository();
+      configureNpmPackArtifact(repositoryRoot);
+      const renamedManifest = { name: "fixture-app-renamed", version: "0.1.0" };
+      writeFileSync(path.join(repositoryRoot, "package.json"), `${JSON.stringify(renamedManifest, null, 2)}\n`);
+      runGit(["commit", "--quiet", "-am", "chore: rename package"], repositoryRoot);
+      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+      runGit(["reset", "--quiet", "--hard", "HEAD~1"], repositoryRoot);
+
+      expect(runReleaseWithoutToken(repositoryRoot)).toContain("volvé a correr pnpm create-version");
+      const output = runReleaseWithoutToken(repositoryRoot);
+
+      expect(output).toContain("releases/fixture-app-renamed-0.2.0.tgz verificado (integrity de npm pack)");
+      expect(output).not.toContain("No hay un artefacto preparado");
+      expect(output).toContain("Falta NPM_TOKEN para publicar 0.2.0.");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  /**
+   * Commits and pushes a configuration, so a later commit on `origin/main` can replace it.
+   *
+   * @param {string} repositoryRoot - Checkout.
+   * @param {string[]} configLines - Lines of `beez-rp.config.js`.
+   */
+  function pushConfiguration(repositoryRoot, configLines) {
+    writeFileSync(path.join(repositoryRoot, "beez-rp.config.js"), [...configLines, ""].join("\n"));
+    runGit(["add", "-A"], repositoryRoot);
+    runGit(["commit", "--quiet", "-m", "chore: configure releases"], repositoryRoot);
+    runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+  }
+
+  it(
+    "should stop right after syncing main without a new version, and release with the new configuration when run again",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      const hookLog = path.join(path.dirname(repositoryRoot), "hooks.log");
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "};"]);
+      pushConfiguration(repositoryRoot, [
+        'import { appendFileSync } from "node:fs";',
+        `const log = ${JSON.stringify(hookLog)};`,
+        "export default {",
+        '  changelog: { audience: "equipo" },',
+        '  prepare: ({ version }) => appendFileSync(log, `prepare ${version}\\n`),',
+        "};",
+      ]);
+      const remoteMainSha = runGit(["rev-parse", "HEAD"], repositoryRoot);
+      runGit(["reset", "--quiet", "--hard", "HEAD~1"], repositoryRoot);
+
+      const synced = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(synced.status, synced.output).toBe(0);
+      expect(synced.output).toContain("main se actualizó desde origin: volvé a correr pnpm create-version");
+      expect(runGit(["rev-parse", "main"], repositoryRoot)).toBe(remoteMainSha);
+      expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+      expect(JSON.parse(readFileSync(path.join(repositoryRoot, "package.json"), "utf8")).version).toBe("0.1.0");
+      expect(existsSync(hookLog)).toBe(false);
+
+      const release = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(release.status, release.output).toBe(0);
+      expect(readFileSync(hookLog, "utf8")).toBe("prepare 0.2.0\n");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("v0.2.0");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should verify an artifact that npm would otherwise pack into itself, and keep it at its path",
+    () => {
+      const { repositoryRoot } = createReleasedRepository();
+      configureNpmPackArtifact(repositoryRoot, "", { ignoreReleases: false });
+
+      const output = runReleaseWithoutToken(repositoryRoot);
+
+      expect(output).toContain("releases/fixture-app-0.2.0.tgz verificado (integrity de npm pack)");
+      expect(output).toContain("Falta NPM_TOKEN para publicar 0.2.0.");
+      expect(existsSync(path.join(repositoryRoot, "releases", "fixture-app-0.2.0.tgz"))).toBe(true);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should stop before publishing when prepare modifies a tracked file such as package.json",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      configureNpmPackArtifact(
+        repositoryRoot,
+        'const manifestPath = path.join(repositoryRoot, "package.json"); writeFileSync(manifestPath, JSON.stringify({ ...JSON.parse(readFileSync(manifestPath, "utf8")), version: "9.9.9" }));'
+      );
+
+      const output = runReleaseWithoutToken(repositoryRoot);
+
+      // The failure box wraps long lines, so only the start of the reason is matched.
+      expect(output).toContain("El paso de preparación modificó archivos");
+      expect(output).toContain("package.json");
+      expect(output).not.toContain("Falta NPM_TOKEN");
+      expect(JSON.parse(runGit(["show", "v0.2.0:package.json"], remoteRoot)).version).toBe("0.2.0");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+  it(
+    "should stop before publishing when the prepared archive is not what npm packs from the release commit",
+    () => {
+      const { repositoryRoot } = createReleasedRepository();
+      configureNpmPackArtifact(
+        repositoryRoot,
+        'writeFileSync(path.join(repositoryRoot, "releases", "fixture-app-0.2.0.tgz"), "not an npm archive");'
+      );
+
+      const output = runReleaseWithoutToken(repositoryRoot);
+
+      expect(output).toContain("El artefacto releases/fixture-app-0.2.0.tgz no se puede");
+      expect(output).not.toContain("Falta NPM_TOKEN");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should stop before publishing when the package relies on pnpm rewriting workspace dependencies",
+    () => {
+      const { repositoryRoot } = createReleasedRepository();
+      configureNpmPackArtifact(repositoryRoot);
+      // `version` stays the last field so its line is unchanged and the commit is not taken as a release.
+      const workspaceManifest = { name: "fixture-app", dependencies: { "fixture-lib": "workspace:^" }, version: "0.1.0" };
+      writeFileSync(path.join(repositoryRoot, "package.json"), `${JSON.stringify(workspaceManifest, null, 2)}
+`);
+      runGit(["commit", "--quiet", "-am", "feat: depend on workspace library"], repositoryRoot);
+      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+
+      const output = runReleaseWithoutToken(repositoryRoot);
+
+      expect(output).toContain("Este paquete depende de reescrituras de pnpm");
+      expect(output).not.toContain("Falta NPM_TOKEN");
     },
     GIT_FIXTURE_TEST_TIMEOUT_MS
   );

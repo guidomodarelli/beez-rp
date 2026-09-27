@@ -143,8 +143,177 @@ export const MAX_LISTED_ITEMS = 5;
 /** Length of the abbreviated commit ids shown to the user. */
 export const SHORT_SHA_LENGTH = 7;
 
+/** Placeholders of the `artifact` pattern: the released version and the npm package name. */
+export const ARTIFACT_VERSION_PLACEHOLDER = "{version}";
+export const ARTIFACT_NAME_PLACEHOLDER = "{name}";
+
+/**
+ * Scope of a package name as `npm pack` and `pnpm pack` name the tarball: the
+ * leading `@` is dropped and the `/` becomes `-` (`@scope/pkg` → `scope-pkg`).
+ * The `scope` group keeps the scope without `@`.
+ */
+export const PACKAGE_SCOPE_PATTERN = /^@(?<scope>[^/]+)\//u;
+
+/** Replacement of {@link PACKAGE_SCOPE_PATTERN} that yields the tarball base name prefix. */
+export const PACKED_SCOPE_REPLACEMENT = "$<scope>-";
+
+/** Wildcard of an `artifact` pattern segment, such as the checksum in `releases/{version}-*`. */
+export const ARTIFACT_SEGMENT_WILDCARD = "*";
+
+/**
+ * Checksum placeholder: the SHA-256 of the archive, verified before publishing. It may repeat,
+ * in one segment or several, and every occurrence must declare the same digest.
+ */
+export const ARTIFACT_SHA256_PLACEHOLDER = "{sha256}";
+
+/** Lowercase hexadecimal SHA-256 digest matched by {@link ARTIFACT_SHA256_PLACEHOLDER}. */
+export const SHA256_HEX_PATTERN_SOURCE = "[0-9a-f]{64}";
+
+/**
+ * Characters allowed in an artifact path passed to `npm publish` through the Windows shell;
+ * `~` is allowed because npm package names (and so tarball names) may contain it.
+ */
+export const SAFE_ARTIFACT_PATH_PATTERN = /^[\w.@+~/-]+$/u;
+
+/**
+ * Prefix that makes npm read an artifact path as a local file: a bare
+ * `releases/x/pkg.tgz` operand is parsed as a package spec (a GitHub shorthand).
+ */
+export const LOCAL_PATH_PREFIX = "./";
+
+/**
+ * Arguments of the `npm pack` run that reports the integrity npm would pack from the release
+ * checkout: nothing is written and no lifecycle script runs, so it only reads what `prepare` left.
+ */
+export const NPM_PACK_DRY_RUN_ARGUMENTS = Object.freeze(["pack", "--dry-run", "--json", "--ignore-scripts"]);
+
+/**
+ * Prefix of the temporary directory, outside the package root, that holds the prepared archive
+ * while `npm pack --dry-run` runs, so npm never packs the archive into the package it describes.
+ */
+export const ARTIFACT_HOLDING_DIRECTORY_PREFIX = "beez-rp-artifact-";
+
+/** Node.js error code of a `rename` across file systems, retried as copy and delete. */
+export const CROSS_DEVICE_RENAME_ERROR_CODE = "EXDEV";
+
+/** Hash algorithm of the npm `integrity` string (`sha512-<base64>`). */
+export const NPM_INTEGRITY_ALGORITHM = "sha512";
+
+/** npm `integrity` string as `npm pack --json` reports it. */
+export const NPM_INTEGRITY_PATTERN = /^sha512-[A-Za-z0-9+/]+={0,2}$/u;
+
+/** Manifest field whose keys npm applies as configuration when it publishes. */
+export const PUBLISH_CONFIG_FIELD = "publishConfig";
+
+/**
+ * `publishConfig` keys pnpm hoists onto the packed manifest root. npm treats every
+ * `publishConfig` key as npm configuration and never rewrites manifest fields with it, so a
+ * package that declares any of these would be published differently by npm than by `pnpm pack`.
+ * Any other key (`registry`, `access`, `tag`, `provenance`, `@scope:registry`, `otp`...) is npm
+ * configuration and is accepted.
+ *
+ * Source: `PUBLISH_CONFIG_WHITELIST` in pnpm v12.6.0
+ * (`pnpm/crates/exportable-manifest/src/create.rs`; same list as
+ * `releasing/exportable-manifest/src/overridePublishConfig.ts` in pnpm 11).
+ *
+ * @see https://github.com/pnpm/pnpm/blob/v12.6.0/pnpm/crates/exportable-manifest/src/create.rs
+ * @see https://docs.npmjs.com/cli/v11/configuring-npm/package-json#publishconfig
+ */
+export const PNPM_HOISTED_PUBLISH_CONFIG_KEYS = Object.freeze([
+  "name",
+  "bin",
+  "engines",
+  "type",
+  "imports",
+  "main",
+  "module",
+  "typings",
+  "types",
+  "exports",
+  "browser",
+  "esnext",
+  "es2015",
+  "unpkg",
+  "umd:main",
+  "os",
+  "cpu",
+  "libc",
+  "typesVersions",
+]);
+
+/** Dependency maps npm publishes as they are written in `package.json`. */
+export const PUBLISHED_DEPENDENCY_FIELDS = Object.freeze(["dependencies", "peerDependencies", "optionalDependencies"]);
+
+/**
+ * Dependency specifiers only `pnpm pack` rewrites and npm publishes verbatim, which npm then
+ * cannot install (`EUNSUPPORTEDPROTOCOL`):
+ * - `catalog:` (dereferenced to the catalog entry);
+ * - `workspace:` (resolved to the linked package version), as the whole specifier or, in
+ *   `peerDependencies`, as a segment of a compound range (`^1.0.0 || workspace:>=1.0.0`);
+ * - `jsr:` (turned into an `npm:@jsr/<scope>__<name>` alias).
+ *
+ * Source: `convert_dependency_for_publish` (catalog → workspace → jsr replacers) in pnpm v12.6.0
+ * `pnpm/crates/exportable-manifest/src/create.rs`, and `replace_workspace_protocol_peer_dependency`
+ * in `pnpm/crates/exportable-manifest/src/replace.rs`. No other protocol is rewritten there.
+ *
+ * @see https://github.com/pnpm/pnpm/blob/v12.6.0/pnpm/crates/exportable-manifest/src/create.rs
+ * @see https://github.com/pnpm/pnpm/blob/v12.6.0/pnpm/crates/exportable-manifest/src/replace.rs
+ */
+export const PNPM_PACK_REWRITTEN_SPECIFIER_PATTERN = /^(?:workspace|catalog|jsr):|\|\|\s*workspace:/u;
+
+/** Public npm registry: npm's default, used when no config sets `@scope:registry` nor `registry`. */
+export const DEFAULT_NPM_REGISTRY_URL = "https://registry.npmjs.org/";
+
+/** Prefix of a package page on npmjs.com, linked in the summary of a release published to {@link DEFAULT_NPM_REGISTRY_URL}. */
+export const NPMJS_PACKAGE_PAGE_URL = "https://www.npmjs.com/package/";
+
+/** `publishConfig` key of the registry for every package, used when no scope-specific registry applies. */
+export const PUBLISH_CONFIG_REGISTRY_KEY = "registry";
+
+/** Suffix of the scope-specific `publishConfig` registry key, as in `@scope:registry`. */
+export const SCOPED_REGISTRY_KEY_SUFFIX = ":registry";
+
+/**
+ * Registry URL allowed on the `npm view` command line built for the Windows shell: only characters
+ * without shell meaning (no `%`, `&`, `|`, `^`, quotes or spaces), after URL normalization.
+ */
+export const SHELL_SAFE_REGISTRY_URL_PATTERN = /^https?:\/\/[\w.~:/@+-]+$/u;
+
+/** npm option that selects the registry `npm view` queries. */
+export const NPM_REGISTRY_OPTION = "--registry";
+
+/** npm option that replaces the user config (`~/.npmrc`) with the temporary one. */
+export const NPM_USER_CONFIG_OPTION = "--userconfig";
+
+/** npm subcommand that prints the effective value of a config key. */
+export const NPM_CONFIG_GET_ARGUMENTS = Object.freeze(["config", "get"]);
+
+/** What `npm config get` prints for a key no config source sets, such as an unused `@scope:registry`. */
+export const NPM_UNSET_CONFIG_VALUE = "undefined";
+
+/** Protocols a publish registry URL may use. */
+export const NPM_REGISTRY_PROTOCOLS = Object.freeze(["http:", "https:"]);
+
+/**
+ * Value of the registry credential in the temporary npm config: npm expands `${NPM_TOKEN}` from
+ * the environment, so the token never reaches the disk or a command line.
+ */
+export const NPM_AUTH_TOKEN_REFERENCE = `\${${NPM_TOKEN_VARIABLE}}`;
+
+/** Prefix of the temporary directory holding the publish-only npm user config. */
+export const NPM_AUTH_DIRECTORY_PREFIX = "beez-rp-npm-auth-";
+
+/** Characters that could break out of a quoted path on the Windows shell. */
+export const UNSAFE_QUOTED_PATH_PATTERN = /["%]/u;
+
 /** Placeholder replaced by the released version in `summary` lines. */
 export const SUMMARY_VERSION_PLACEHOLDER = "{version}";
+
+/**
+ * Shown when syncing `main` brought new commits: the run ends (exit code 0, it is not a failure)
+ * so the next one loads the updated configuration and diagnoses again.
+ */
+export const MAIN_SYNCED_RESTART_MESSAGE = `${MAIN_BRANCH} se actualizó desde origin: volvé a correr pnpm create-version para diagnosticar con el código y la configuración nuevos.`;
 
 /** Exit code of a release stopped by a failed step, invalid arguments or configuration. */
 export const FAILURE_EXIT_CODE = 1;

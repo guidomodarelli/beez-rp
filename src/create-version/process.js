@@ -12,7 +12,7 @@ import { FIELD_SEPARATOR, PACKAGE_MANIFEST_FILE, RECORD_SEPARATOR } from "../con
 
 /**
  * @typedef {{ status: number, stdout: string, stderr: string }} CapturedResult
- * @typedef {{ cwd?: string, shell?: boolean }} CommandOptions
+ * @typedef {{ cwd?: string, shell?: boolean, env?: NodeJS.ProcessEnv }} CommandOptions
  * @typedef {{ git: (gitArguments: string[]) => Promise<string>, tryGit: (gitArguments: string[]) => Promise<string | null> }} GitReader
  * @typedef {{ sha: string, subject: string, body: string }} CommitRecord
  */
@@ -57,7 +57,7 @@ export function runCaptured(command, commandArguments, options = {}) {
  */
 export function runInherited(command, commandArguments, options = {}) {
   return new Promise((resolve) => {
-    const child = spawn(command, commandArguments, { cwd: options.cwd, shell: options.shell ?? false, stdio: "inherit" });
+    const child = spawn(command, commandArguments, { cwd: options.cwd, env: options.env, shell: options.shell ?? false, stdio: "inherit" });
     child.on("error", () => resolve(1));
     child.on("close", (status) => resolve(status ?? 1));
   });
@@ -131,6 +131,24 @@ export async function listCommits(reader, range) {
 }
 
 /**
+ * Reads `package.json` at a revision.
+ *
+ * @param {GitReader} reader - Git reader.
+ * @param {string} revision - Revision such as `HEAD`, `v1.2.0` or `origin/main`.
+ * @returns {Promise<Record<string, unknown> | null>} Parsed manifest, or `null` when missing, unreadable or not a JSON object.
+ */
+export async function readPackageManifestAt(reader, revision) {
+  const manifest = await reader.tryGit(["show", `${revision}:${PACKAGE_MANIFEST_FILE}`]);
+
+  try {
+    const parsed = manifest ? JSON.parse(manifest) : null;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Reads the `version` field of `package.json` at a revision.
  *
  * @param {GitReader} reader - Git reader.
@@ -138,11 +156,6 @@ export async function listCommits(reader, range) {
  * @returns {Promise<string | null>} Version, or `null` when unreadable.
  */
 export async function readPackageVersionAt(reader, revision) {
-  const manifest = await reader.tryGit(["show", `${revision}:${PACKAGE_MANIFEST_FILE}`]);
-
-  try {
-    return manifest ? (JSON.parse(manifest).version ?? null) : null;
-  } catch {
-    return null;
-  }
+  const manifest = await readPackageManifestAt(reader, revision);
+  return typeof manifest?.version === "string" ? manifest.version : null;
 }
