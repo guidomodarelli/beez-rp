@@ -116,10 +116,15 @@ export const NPM_OWNER_LIST_ARGUMENTS = Object.freeze(["owner", "ls", NPM_PLAIN_
 export const PROJECT_NPM_CONFIG_FILE = ".npmrc";
 
 /**
- * npm config fields that authenticate a registry, either bound to it (`//host/path/:_authToken`)
- * or unbound (`_authToken`); any of them in the project `.npmrc` overrides `NPM_TOKEN`.
+ * npm config fields that select the HTTP credential of a registry, either bound to it
+ * (`//host/path/:_authToken`) or unbound (`_authToken`); any of them in the project `.npmrc` or in an
+ * inherited `npm_config_*` variable overrides `NPM_TOKEN`. TLS client options such as `keyfile` or
+ * `certfile` are not listed: they do not replace the token.
  */
-export const NPM_CREDENTIAL_CONFIG_FIELDS = Object.freeze(["_authToken", "_auth", "_password", "username", "certfile", "keyfile"]);
+export const NPM_CREDENTIAL_CONFIG_FIELDS = Object.freeze(["_authToken", "_auth", "_password", "username"]);
+
+/** Prefix of the environment variables npm reads as config, in any casing (`npm_config_`, `NPM_CONFIG_`). */
+export const NPM_CONFIG_ENVIRONMENT_PREFIX = "npm_config_";
 
 /** Prefix of an npm config key bound to a registry: `//host[:port]/path/:field`. */
 export const NPM_REGISTRY_BOUND_KEY_PREFIX = "//";

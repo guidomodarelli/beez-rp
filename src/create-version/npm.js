@@ -20,6 +20,7 @@ import {
   DEFAULT_NPM_REGISTRY_URL,
   LOCAL_ENVIRONMENT_FILE,
   LOCAL_PATH_PREFIX,
+  NPM_CONFIG_ENVIRONMENT_PREFIX,
   NPM_CREDENTIAL_CONFIG_FIELDS,
   NPM_AUTH_DIRECTORY_PREFIX,
   NPM_AUTH_STATUS,
@@ -221,16 +222,39 @@ export function resolveNpmToken(repositoryRoot, { environment = process.env, hom
 }
 
 /**
+ * Tells whether an environment variable is an npm config credential (`npm_config_//host/:_authToken`,
+ * `NPM_CONFIG__AUTH`, ...): npm reads its config variables in any casing and ranks them above every
+ * npmrc file, so an inherited one would authenticate instead of the temporary config.
+ *
+ * @param {string} variableName - Environment variable name.
+ * @returns {boolean} Whether the variable sets one of {@link NPM_CREDENTIAL_CONFIG_FIELDS}.
+ */
+function isNpmCredentialEnvironmentVariable(variableName) {
+  const normalizedName = variableName.toLowerCase();
+  if (!normalizedName.startsWith(NPM_CONFIG_ENVIRONMENT_PREFIX)) {
+    return false;
+  }
+
+  const configKey = normalizedName.slice(NPM_CONFIG_ENVIRONMENT_PREFIX.length);
+  const configField = configKey.startsWith(NPM_REGISTRY_BOUND_KEY_PREFIX) ? configKey.slice(configKey.lastIndexOf(":") + 1) : configKey;
+  return NPM_CREDENTIAL_CONFIG_FIELDS.some((credentialField) => credentialField.toLowerCase() === configField);
+}
+
+/**
  * Builds the environment of an npm command that authenticates with the temporary config: the
- * publish environment ({@link buildNpmPublishEnvironment}) plus `NPM_TOKEN`, which npm expands
- * from `${NPM_TOKEN}` in that config. Only the child process receives the token.
+ * publish environment ({@link buildNpmPublishEnvironment}) without inherited npm credential
+ * variables, plus `NPM_TOKEN`, which npm expands from `${NPM_TOKEN}` in that config. Only the child
+ * process receives the token, and it is the only credential npm can use.
  *
  * @param {string} token - Token from {@link resolveNpmToken}.
  * @param {NodeJS.ProcessEnv} [environment] - Environment to copy; the current process by default.
  * @returns {NodeJS.ProcessEnv} Environment for npm.
  */
 export function buildNpmTokenEnvironment(token, environment = process.env) {
-  return { ...buildNpmPublishEnvironment(environment), [NPM_TOKEN_VARIABLE]: token };
+  const publishVariables = Object.entries(buildNpmPublishEnvironment(environment)).filter(
+    ([variableName]) => !isNpmCredentialEnvironmentVariable(variableName),
+  );
+  return { ...Object.fromEntries(publishVariables), [NPM_TOKEN_VARIABLE]: token };
 }
 
 /**

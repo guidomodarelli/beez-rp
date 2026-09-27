@@ -540,6 +540,46 @@ describe("npm publish access check", () => {
     NPM_PROCESS_TEST_TIMEOUT_MS
   );
 
+  it(
+    "authenticates with the selected NPM_TOKEN even when the environment inherits another credential for the registry",
+    async () => {
+      const registry = await startRegistry();
+
+      try {
+        const registryKey = registry.registryUrl.replace(/^http:/u, "");
+        const packageRoot = createPackageRoot({ name: PACKAGE_NAME });
+        const environment = { ...process.env, NPM_TOKEN: OWNER_TOKEN, [`npm_config_${registryKey}:_authToken`]: "inherited-invalid-token" };
+
+        expect(await checkNpmPublishAccess(PACKAGE_NAME, packageRoot, registry.registryUrl, { environment })).toMatchObject({
+          status: NPM_AUTH_STATUS.ok,
+          user: "fixture-owner",
+          source: NPM_TOKEN_SOURCE.environment,
+        });
+      } finally {
+        await registry.close();
+      }
+    },
+    NPM_PROCESS_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "keeps a registry-scoped TLS keyfile in the project .npmrc usable alongside NPM_TOKEN",
+    async () => {
+      const registry = await startRegistry();
+
+      try {
+        const registryKey = registry.registryUrl.replace(/^http:/u, "");
+        const packageRoot = createPackageRoot({ name: PACKAGE_NAME }, `${registryKey}:keyfile=client-key.pem\n`);
+        process.env.NPM_TOKEN = OWNER_TOKEN;
+
+        expect(await checkNpmPublishAccess(PACKAGE_NAME, packageRoot, registry.registryUrl)).toMatchObject({ status: NPM_AUTH_STATUS.ok, user: "fixture-owner" });
+      } finally {
+        await registry.close();
+      }
+    },
+    NPM_PROCESS_TEST_TIMEOUT_MS
+  );
+
   it("fails the lookup and leaves the access check unverified, naming the .env it could not read", async () => {
     const packageRoot = createPackageRoot({ name: PACKAGE_NAME });
     const environmentFilePath = path.join(packageRoot, ".env");
