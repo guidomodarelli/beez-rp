@@ -187,6 +187,15 @@ export const LOCAL_PATH_PREFIX = "./";
  */
 export const NPM_PACK_DRY_RUN_ARGUMENTS = Object.freeze(["pack", "--dry-run", "--json", "--ignore-scripts"]);
 
+/**
+ * Prefix of the temporary directory, outside the package root, that holds the prepared archive
+ * while `npm pack --dry-run` runs, so npm never packs the archive into the package it describes.
+ */
+export const ARTIFACT_HOLDING_DIRECTORY_PREFIX = "beez-rp-artifact-";
+
+/** Node.js error code of a `rename` across file systems, retried as copy and delete. */
+export const CROSS_DEVICE_RENAME_ERROR_CODE = "EXDEV";
+
 /** Hash algorithm of the npm `integrity` string (`sha512-<base64>`). */
 export const NPM_INTEGRITY_ALGORITHM = "sha512";
 
@@ -238,8 +247,23 @@ export const PUBLISHED_DEPENDENCY_FIELDS = Object.freeze(["dependencies", "peerD
 /** Dependency specifiers only `pnpm pack` replaces with a resolved version range (`workspace:^`, `catalog:`). */
 export const PNPM_PACK_REWRITTEN_SPECIFIER_PATTERN = /^(?:workspace|catalog):/u;
 
-/** Registry `npm publish` uses when `publishConfig.registry` is not set. */
+/** Registry `npm publish` uses when `publishConfig` sets neither `@scope:registry` nor `registry`. */
 export const DEFAULT_NPM_REGISTRY_URL = "https://registry.npmjs.org/";
+
+/** `publishConfig` key of the registry for every package, used when no scope-specific registry applies. */
+export const PUBLISH_CONFIG_REGISTRY_KEY = "registry";
+
+/** Suffix of the scope-specific `publishConfig` registry key, as in `@scope:registry`. */
+export const SCOPED_REGISTRY_KEY_SUFFIX = ":registry";
+
+/**
+ * Registry URL allowed on the `npm view` command line built for the Windows shell: only characters
+ * without shell meaning (no `%`, `&`, `|`, `^`, quotes or spaces), after URL normalization.
+ */
+export const SHELL_SAFE_REGISTRY_URL_PATTERN = /^https?:\/\/[\w.~:/@+-]+$/u;
+
+/** npm option that selects the registry `npm view` queries. */
+export const NPM_REGISTRY_OPTION = "--registry";
 
 /** Protocols a publish registry URL may use. */
 export const NPM_REGISTRY_PROTOCOLS = Object.freeze(["http:", "https:"]);

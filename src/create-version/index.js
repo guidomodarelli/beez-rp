@@ -17,6 +17,7 @@ export {
   findPreparedArtifact,
   isSafeArtifactPath,
   verifyPreparedArtifact,
+  withArtifactOutsidePackageRoot,
 } from "./artifact.js";
 export { defineCreateVersionConfig, loadCreateVersionConfig, resolveCreateVersionConfig } from "./config.js";
 export { ReleaseStepError } from "./errors.js";
@@ -24,6 +25,7 @@ export {
   buildNpmAuthConfigLine,
   buildNpmPublishArguments,
   buildNpmPublishEnvironment,
+  buildNpmViewArguments,
   lookupPublishedVersions,
   parseNpmPackDryRunOutput,
   publishToNpm,

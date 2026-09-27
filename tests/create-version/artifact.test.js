@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -12,6 +12,7 @@ import {
   findPreparedArtifact,
   isSafeArtifactPath,
   verifyPreparedArtifact,
+  withArtifactOutsidePackageRoot,
 } from "../../src/create-version/artifact.js";
 import { parseNpmPackDryRunOutput, readNpmPackIntegrity } from "../../src/create-version/npm.js";
 
@@ -254,6 +255,80 @@ describe("prepared artifact verification against npm pack", () => {
     expect(parseNpmPackDryRunOutput("npm notice")).toEqual({ pack: null, problem: expect.stringContaining("no es JSON válido") });
     expect(parseNpmPackDryRunOutput("[]")).toEqual({ pack: null, problem: expect.stringContaining("único paquete") });
     expect(parseNpmPackDryRunOutput(JSON.stringify([{ integrity: "sha1-abc" }]))).toEqual({ pack: null, problem: expect.stringContaining("sha512") });
+  });
+});
+
+describe("prepared artifact inside a package without a files allowlist", () => {
+  /** Manifest without `files`: npm packs every file of the root that no ignore rule excludes. */
+  const UNFILTERED_MANIFEST = { name: "fixture-pkg", version: "1.2.0" };
+
+  /** Where release preparation leaves the archive, inside the package root. */
+  const ARCHIVE_PATH = "releases/fixture-pkg-1.2.0.tgz";
+
+  /**
+   * Packs an unfiltered checkout into `releases/` with the real `npm pack --ignore-scripts`.
+   *
+   * @returns {string} Package root holding the archive at {@link ARCHIVE_PATH}.
+   */
+  function packUnfilteredCheckout() {
+    const root = createPackageCheckout(UNFILTERED_MANIFEST);
+    mkdirSync(path.join(root, "releases"), { recursive: true });
+    const result = USES_SHELL_FOR_NPM
+      ? spawnSync("npm pack --ignore-scripts --pack-destination releases", { cwd: root, encoding: "utf8", shell: true })
+      : spawnSync("npm", ["pack", "--ignore-scripts", "--pack-destination", "releases"], { cwd: root, encoding: "utf8" });
+    if (result.status !== 0) throw new Error(`npm pack failed: ${result.stderr}`);
+    return root;
+  }
+
+  it(
+    "should verify the archive with it outside the package root, and leave it where prepare wrote it",
+    async () => {
+      const root = packUnfilteredCheckout();
+      const archiveIntegrity = computeNpmIntegrity(path.join(root, ARCHIVE_PATH));
+
+      const packedWithArchive = await readNpmPackIntegrity(root);
+      const packedWithoutArchive = await withArtifactOutsidePackageRoot(root, ARCHIVE_PATH, async () => {
+        expect(existsSync(path.join(root, ARCHIVE_PATH))).toBe(false);
+        return readNpmPackIntegrity(root);
+      });
+
+      // Left in place, npm counts the archive as package content and reports another integrity.
+      expect(packedWithArchive.pack?.integrity).not.toBe(archiveIntegrity);
+      expect(packedWithoutArchive.pack?.integrity).toBe(archiveIntegrity);
+      expect(verifyPreparedArtifact(root, { path: ARCHIVE_PATH, expectedSha256: null }, packedWithoutArchive.pack?.integrity ?? "")).toEqual([]);
+      expect(computeNpmIntegrity(path.join(root, ARCHIVE_PATH))).toBe(archiveIntegrity);
+    },
+    NPM_COMMAND_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should put the archive back when the npm dry run fails or the operation throws",
+    async () => {
+      const root = packUnfilteredCheckout();
+      const archiveIntegrity = computeNpmIntegrity(path.join(root, ARCHIVE_PATH));
+      writeFileSync(path.join(root, "package.json"), "{ not json");
+
+      const failedDryRun = await withArtifactOutsidePackageRoot(root, ARCHIVE_PATH, () => readNpmPackIntegrity(root));
+
+      expect(failedDryRun.pack).toBeNull();
+      expect(failedDryRun.problem).toMatch(/npm pack --dry-run/u);
+      expect(computeNpmIntegrity(path.join(root, ARCHIVE_PATH))).toBe(archiveIntegrity);
+
+      await expect(
+        withArtifactOutsidePackageRoot(root, ARCHIVE_PATH, async () => {
+          throw new Error("npm crashed");
+        })
+      ).rejects.toThrow("npm crashed");
+      expect(computeNpmIntegrity(path.join(root, ARCHIVE_PATH))).toBe(archiveIntegrity);
+    },
+    NPM_COMMAND_TEST_TIMEOUT_MS
+  );
+
+  it("should fail without touching anything when the archive is missing", async () => {
+    const root = createRoot();
+
+    await expect(withArtifactOutsidePackageRoot(root, ARCHIVE_PATH, async () => "unreachable")).rejects.toThrow(`no se pudo apartar ${ARCHIVE_PATH}`);
+    expect(readdirSync(root)).toEqual([]);
   });
 });
 

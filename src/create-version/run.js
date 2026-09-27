@@ -61,7 +61,14 @@ import {
   startSpinner,
 } from "../terminal-ui.js";
 import { listNextVersions, resolveRequestedVersion, suggestReleaseType, toReleaseTag } from "../versions.js";
-import { expandArtifactPattern, findPnpmPackRewrites, findPreparedArtifact, isSafeArtifactPath, verifyPreparedArtifact } from "./artifact.js";
+import {
+  expandArtifactPattern,
+  findPnpmPackRewrites,
+  findPreparedArtifact,
+  isSafeArtifactPath,
+  verifyPreparedArtifact,
+  withArtifactOutsidePackageRoot,
+} from "./artifact.js";
 import { loadCreateVersionConfig } from "./config.js";
 import { ReleaseStepError } from "./errors.js";
 import { buildNpmAuthConfigLine, lookupPublishedVersions, publishToNpm, readNpmPackIntegrity, resolvePublishRegistry } from "./npm.js";
@@ -629,7 +636,9 @@ async function resolvePublishedArtifact(context, version, workingManifest) {
     throw new ReleaseStepError(`La ruta del artefacto ${prepared.path} tiene caracteres no permitidos.`, "Usá rutas con letras, números, ., -, _, @, +, ~ y /.");
   }
 
-  const npmPack = await readNpmPackIntegrity(context.repositoryRoot);
+  // Without a `files` allowlist or an ignore rule, npm would pack the archive into the package it
+  // describes; it is moved out of the root during the dry run and published later from its path.
+  const npmPack = await withArtifactOutsidePackageRoot(context.repositoryRoot, prepared.path, () => readNpmPackIntegrity(context.repositoryRoot));
 
   if (!npmPack.pack) {
     throw new ReleaseStepError(
@@ -659,21 +668,20 @@ async function resolvePublishedArtifact(context, version, workingManifest) {
 }
 
 /**
- * Builds the temporary npm credential line for the registry the release is published to.
+ * Resolves the registry the release is published to: `publishConfig["@scope:registry"]` for a
+ * scoped package, else `publishConfig.registry`, else npm's default registry.
  *
  * @param {Record<string, unknown>} manifest - Working tree `package.json`.
- * @returns {string} Config line that only references `${NPM_TOKEN}`.
- * @throws {ReleaseStepError} When `publishConfig.registry` is not a valid http(s) URL.
+ * @returns {string} Registry URL, already checked to be a plain http(s) URL.
+ * @throws {ReleaseStepError} When the registry `publishConfig` declares is not a valid http(s) URL.
  */
-function buildPublishAuthConfigLine(manifest) {
-  const registryUrl = resolvePublishRegistry(manifest);
-
+function resolveReleaseRegistry(manifest) {
   try {
-    return buildNpmAuthConfigLine(registryUrl);
+    return resolvePublishRegistry(manifest);
   } catch (error) {
     throw new ReleaseStepError(
-      `No se puede publicar en el registry ${registryUrl}: ${error instanceof Error ? error.message : String(error)}.`,
-      "No se publicó nada. Corregí publishConfig.registry en package.json (una URL http(s) sin credenciales) y volvé a correr pnpm create-version."
+      `No se puede publicar: ${error instanceof Error ? error.message : String(error)}.`,
+      "No se publicó nada. Corregí publishConfig.registry o publishConfig[\"@scope:registry\"] en package.json (una URL http(s) sin credenciales) y volvé a correr pnpm create-version."
     );
   }
 }
@@ -693,7 +701,8 @@ async function publishReleaseStep(context) {
     const manifest = readWorkingManifest(context.repositoryRoot);
     const packageName = String(manifest.name);
     context.packageName = packageName;
-    const authConfigLine = buildPublishAuthConfigLine(manifest);
+    const registryUrl = resolveReleaseRegistry(manifest);
+    const authConfigLine = buildNpmAuthConfigLine(registryUrl);
     const artifactPath = await resolvePublishedArtifact(context, version, manifest);
     if (artifactPath) {
       print(paint("gray", `Publicando ${artifactPath}; npm puede pedir la confirmación 2FA en el navegador o un código.`));
@@ -714,7 +723,8 @@ async function publishReleaseStep(context) {
       );
     }
 
-    const npm = await lookupPublishedVersions(packageName, context.repositoryRoot);
+    // npm view ignores publishConfig, so the registry the release went to is queried explicitly.
+    const npm = await lookupPublishedVersions(packageName, context.repositoryRoot, registryUrl);
     if (!npm.publishedVersions.includes(version)) {
       print(`${ICON.warning} ${paint("yellow", `npm todavía no muestra ${version}; puede tardar unos segundos en propagarse.`)}`);
     }

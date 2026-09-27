@@ -4,7 +4,13 @@ import os from "node:os";
 import path from "node:path";
 
 import { NPM_DIST_TAG } from "../../src/constants/create-version.js";
-import { buildNpmAuthConfigLine, buildNpmPublishArguments, resolvePublishRegistry, withNpmAuthConfig } from "../../src/create-version/npm.js";
+import {
+  buildNpmAuthConfigLine,
+  buildNpmPublishArguments,
+  buildNpmViewArguments,
+  resolvePublishRegistry,
+  withNpmAuthConfig,
+} from "../../src/create-version/npm.js";
 
 /** Options every `npm publish` call carries after the publish target. */
 const PUBLISH_OPTIONS = ["--access", "public", "--tag", NPM_DIST_TAG];
@@ -59,6 +65,36 @@ describe("publish registry credentials", () => {
     expect(buildNpmAuthConfigLine("http://localhost:4873/")).toBe("//localhost:4873/:_authToken=${NPM_TOKEN}\n");
   });
 
+  it("binds the token to the scope-specific registry of a scoped package, as npm publish resolves it", () => {
+    const registryUrl = resolvePublishRegistry({
+      name: "@team/pkg",
+      publishConfig: { "@team:registry": "https://npm.example.test/team/", registry: "https://fallback.example.test/" },
+    });
+
+    expect(registryUrl).toBe("https://npm.example.test/team/");
+    expect(buildNpmAuthConfigLine(registryUrl)).toBe("//npm.example.test/team/:_authToken=${NPM_TOKEN}\n");
+    expect(resolvePublishRegistry({ name: "@team/pkg", publishConfig: { "@team:registry": "https://npm.example.test/team/" } })).toBe(
+      "https://npm.example.test/team/"
+    );
+  });
+
+  it("ignores the registry of another scope and falls back to publishConfig.registry or npm's default", () => {
+    const otherScope = { "@other:registry": "https://other.example.test/" };
+
+    expect(resolvePublishRegistry({ name: "@team/pkg", publishConfig: otherScope })).toBe("https://registry.npmjs.org/");
+    expect(resolvePublishRegistry({ name: "@team/pkg", publishConfig: { ...otherScope, registry: "https://fallback.example.test/" } })).toBe(
+      "https://fallback.example.test/"
+    );
+    expect(resolvePublishRegistry({ name: "pkg", publishConfig: { "@team:registry": "https://npm.example.test/team/" } })).toBe("https://registry.npmjs.org/");
+    expect(resolvePublishRegistry({ name: "pkg", publishConfig: { registry: "https://plain.example.test/" } })).toBe("https://plain.example.test/");
+    expect(resolvePublishRegistry({ name: "pkg" })).toBe("https://registry.npmjs.org/");
+  });
+
+  it("rejects an invalid registry while resolving it, scoped or not", () => {
+    expect(() => resolvePublishRegistry({ name: "@team/pkg", publishConfig: { "@team:registry": "npm.example.test" } })).toThrow("no es una URL válida");
+    expect(() => resolvePublishRegistry({ name: "pkg", publishConfig: { registry: "ftp://registry.example.test/" } })).toThrow("http(s)");
+  });
+
   it("rejects registries that are not plain http(s) URLs", () => {
     expect(() => buildNpmAuthConfigLine("registry.example.test")).toThrow("no es una URL válida");
     expect(() => buildNpmAuthConfigLine("ftp://registry.example.test/")).toThrow("http(s)");
@@ -95,5 +131,27 @@ describe("publish registry credentials", () => {
     ).rejects.toThrow("npm failed");
     expect(seenPaths).toHaveLength(2);
     expect(seenPaths.some((userConfigPath) => existsSync(userConfigPath))).toBe(false);
+  });
+});
+
+describe("npm view arguments", () => {
+  it("queries the registry the package is published to, because npm view ignores publishConfig", () => {
+    const registryUrl = resolvePublishRegistry({ name: "@team/pkg", publishConfig: { "@team:registry": "https://npm.example.test/team/" } });
+
+    expect(buildNpmViewArguments("@team/pkg", registryUrl)).toEqual(["view", "@team/pkg", "versions", "--json", "--registry", "https://npm.example.test/team/"]);
+    expect(buildNpmViewArguments("pkg", resolvePublishRegistry({ name: "pkg" }))).toEqual([
+      "view",
+      "pkg",
+      "versions",
+      "--json",
+      "--registry",
+      "https://registry.npmjs.org/",
+    ]);
+  });
+
+  it("rejects registries that are invalid or unsafe on the Windows shell command line", () => {
+    expect(() => buildNpmViewArguments("pkg", "not a url")).toThrow("no es una URL válida");
+    expect(() => buildNpmViewArguments("pkg", "https://npm.example.test/a&b/")).toThrow("caracteres no permitidos");
+    expect(() => buildNpmViewArguments("pkg", "https://npm.example.test/a%20b/")).toThrow("caracteres no permitidos");
   });
 });

@@ -1,8 +1,8 @@
 /**
- * npm adapter of `beez-rp create-version`: lists the published versions of a
- * package, reads the integrity npm would pack from the release checkout, and
- * publishes the working tree or a prepared archive with `NPM_TOKEN` bound to
- * the publish registry.
+ * npm adapter of `beez-rp create-version`: resolves the registry a package is
+ * published to, lists the versions published there, reads the integrity npm
+ * would pack from the release checkout, and publishes the working tree or a
+ * prepared archive with `NPM_TOKEN` bound to the publish registry.
  *
  * @module create-version/npm
  */
@@ -23,9 +23,14 @@ import {
   NPM_NOT_FOUND_CODE,
   NPM_PACK_DRY_RUN_ARGUMENTS,
   NPM_PACKAGE_NAME_PATTERN,
+  NPM_REGISTRY_OPTION,
   NPM_REGISTRY_PROTOCOLS,
   NPM_TOKEN_VARIABLE,
+  PACKAGE_SCOPE_PATTERN,
   PUBLISH_CONFIG_FIELD,
+  PUBLISH_CONFIG_REGISTRY_KEY,
+  SCOPED_REGISTRY_KEY_SUFFIX,
+  SHELL_SAFE_REGISTRY_URL_PATTERN,
   UNSAFE_QUOTED_PATH_PATTERN,
 } from "../constants/create-version.js";
 import { PACKAGE_MANAGER_USER_AGENT_VARIABLE } from "../constants/guard-publish.js";
@@ -39,21 +44,48 @@ import { USES_SHELL_FOR_PACKAGE_MANAGERS, runCaptured, runInherited } from "./pr
  */
 
 /**
- * Lists the versions of a package published on npm.
+ * Builds the `npm view` arguments that list the published versions of a package on a registry.
+ * `npm view` ignores the manifest `publishConfig`, so the registry is always passed explicitly.
+ *
+ * @param {string} packageName - npm package name, already checked with `NPM_PACKAGE_NAME_PATTERN`.
+ * @param {string} registryUrl - Registry resolved by {@link resolvePublishRegistry}.
+ * @returns {string[]} Arguments that follow `npm`.
+ * @throws {Error} When the registry is not a valid http(s) URL or has characters unsafe on the Windows shell.
+ */
+export function buildNpmViewArguments(packageName, registryUrl) {
+  const { href } = parseRegistryUrl(registryUrl);
+  if (!SHELL_SAFE_REGISTRY_URL_PATTERN.test(href)) {
+    throw new Error(`beez-rp create-version: el registry "${registryUrl}" tiene caracteres no permitidos en la línea de comandos de npm view`);
+  }
+  return ["view", packageName, "versions", "--json", NPM_REGISTRY_OPTION, href];
+}
+
+/**
+ * Lists the versions of a package published on a registry.
  *
  * @param {string} packageName - npm package name.
  * @param {string} repositoryRoot - Directory whose `.npmrc` npm reads.
+ * @param {string} [registryUrl] - Registry the package is published to, from {@link resolvePublishRegistry};
+ *   defaults to npm's default registry.
  * @returns {Promise<NpmLookup>} Published versions; a never-published package has none.
  */
-export async function lookupPublishedVersions(packageName, repositoryRoot) {
+export async function lookupPublishedVersions(packageName, repositoryRoot, registryUrl = DEFAULT_NPM_REGISTRY_URL) {
   if (!NPM_PACKAGE_NAME_PATTERN.test(packageName)) {
     return { status: NPM_LOOKUP_STATUS.failed, publishedVersions: [], reason: `nombre de paquete inválido: ${packageName}` };
   }
 
-  // The name is validated above, so the command line built for the Windows shell keeps a fixed shape.
+  /** @type {string[]} */
+  let viewArguments;
+  try {
+    viewArguments = buildNpmViewArguments(packageName, registryUrl);
+  } catch (error) {
+    return { status: NPM_LOOKUP_STATUS.failed, publishedVersions: [], reason: error instanceof Error ? error.message : String(error) };
+  }
+
+  // The name and registry are validated above, so the command line built for the Windows shell keeps a fixed shape.
   const result = USES_SHELL_FOR_PACKAGE_MANAGERS
-    ? await runCaptured(`npm view ${packageName} versions --json`, [], { cwd: repositoryRoot, shell: true })
-    : await runCaptured("npm", ["view", packageName, "versions", "--json"], { cwd: repositoryRoot });
+    ? await runCaptured(`npm ${viewArguments.join(" ")}`, [], { cwd: repositoryRoot, shell: true })
+    : await runCaptured("npm", viewArguments, { cwd: repositoryRoot });
 
   if (result.status !== 0) {
     return `${result.stdout}\n${result.stderr}`.includes(NPM_NOT_FOUND_CODE)
@@ -117,26 +149,13 @@ export async function readNpmPackIntegrity(repositoryRoot) {
 }
 
 /**
- * Returns the registry `npm publish` sends the package to: `publishConfig.registry`, or npm's default.
+ * Parses a publish registry URL, accepting only plain http(s) URLs.
  *
- * @param {Record<string, unknown>} manifest - `package.json` being published.
- * @returns {string} Registry URL as written in the manifest.
- */
-export function resolvePublishRegistry(manifest) {
-  const publishConfig = manifest[PUBLISH_CONFIG_FIELD];
-  const registry = publishConfig && typeof publishConfig === "object" ? /** @type {Record<string, unknown>} */ (publishConfig).registry : undefined;
-  return typeof registry === "string" && registry !== "" ? registry : DEFAULT_NPM_REGISTRY_URL;
-}
-
-/**
- * Builds the npm config line that binds `${NPM_TOKEN}` to a registry, in the form npm matches
- * credentials with: `//<host>[:port]<path>/:_authToken=${NPM_TOKEN}` (no protocol, trailing `/`).
- *
- * @param {string} registryUrl - Registry `npm publish` uses.
- * @returns {string} Config line ending with a newline; the token itself is never written.
+ * @param {string} registryUrl - Registry URL as written in the manifest.
+ * @returns {URL} Parsed URL.
  * @throws {Error} When the registry is not a plain http(s) URL (credentials, query and fragment are rejected).
  */
-export function buildNpmAuthConfigLine(registryUrl) {
+function parseRegistryUrl(registryUrl) {
   /** @type {URL} */
   let registry;
   try {
@@ -149,6 +168,40 @@ export function buildNpmAuthConfigLine(registryUrl) {
     throw new Error(`beez-rp create-version: el registry de publicación "${registryUrl}" tiene que ser una URL http(s) sin credenciales, query ni fragmento`);
   }
 
+  return registry;
+}
+
+/**
+ * Returns the registry `npm publish` sends the package to, as npm resolves it from the manifest:
+ * `publishConfig["@scope:registry"]` for a scoped package that declares it, else
+ * `publishConfig.registry`, else npm's default registry.
+ *
+ * @param {Record<string, unknown>} manifest - `package.json` being published.
+ * @returns {string} Registry URL as written in the manifest.
+ * @throws {Error} When the resolved registry is not a plain http(s) URL.
+ */
+export function resolvePublishRegistry(manifest) {
+  const publishConfig = manifest[PUBLISH_CONFIG_FIELD];
+  const registries = publishConfig && typeof publishConfig === "object" ? /** @type {Record<string, unknown>} */ (publishConfig) : {};
+  const scope = typeof manifest.name === "string" ? PACKAGE_SCOPE_PATTERN.exec(manifest.name)?.groups?.scope : undefined;
+  const candidates = [scope ? registries[`@${scope}${SCOPED_REGISTRY_KEY_SUFFIX}`] : undefined, registries[PUBLISH_CONFIG_REGISTRY_KEY]];
+  const declared = candidates.find((candidate) => typeof candidate === "string" && candidate !== "");
+  const registryUrl = typeof declared === "string" ? declared : DEFAULT_NPM_REGISTRY_URL;
+
+  parseRegistryUrl(registryUrl);
+  return registryUrl;
+}
+
+/**
+ * Builds the npm config line that binds `${NPM_TOKEN}` to a registry, in the form npm matches
+ * credentials with: `//<host>[:port]<path>/:_authToken=${NPM_TOKEN}` (no protocol, trailing `/`).
+ *
+ * @param {string} registryUrl - Registry `npm publish` uses.
+ * @returns {string} Config line ending with a newline; the token itself is never written.
+ * @throws {Error} When the registry is not a plain http(s) URL (credentials, query and fragment are rejected).
+ */
+export function buildNpmAuthConfigLine(registryUrl) {
+  const registry = parseRegistryUrl(registryUrl);
   const registryPath = registry.pathname.endsWith("/") ? registry.pathname : `${registry.pathname}/`;
   return `//${registry.host}${registryPath}:_authToken=${NPM_AUTH_TOKEN_REFERENCE}\n`;
 }

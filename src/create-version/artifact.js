@@ -15,19 +15,24 @@
  * checkout always yields the same bytes. So the archive is verified by comparing
  * its SHA-512 integrity with the one `npm pack --dry-run` reports for the release
  * checkout, and the manifest must not rely on rewrites only pnpm applies when packing.
+ * The archive is moved out of the package root during that dry run, so npm never
+ * counts it as part of the package it describes.
  *
  * @module create-version/artifact
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 import {
+  ARTIFACT_HOLDING_DIRECTORY_PREFIX,
   ARTIFACT_NAME_PLACEHOLDER,
   ARTIFACT_SEGMENT_WILDCARD,
   ARTIFACT_SHA256_PLACEHOLDER,
   ARTIFACT_VERSION_PLACEHOLDER,
+  CROSS_DEVICE_RENAME_ERROR_CODE,
   NPM_INTEGRITY_ALGORITHM,
   PACKAGE_SCOPE_PATTERN,
   PACKED_SCOPE_REPLACEMENT,
@@ -224,6 +229,68 @@ export function findPnpmPackRewrites(manifest) {
   }
 
   return problems;
+}
+
+/**
+ * Moves a file, falling back to copy and delete when the destination is on another file system
+ * (`rename` fails with `EXDEV`, for example when the OS temp directory is another drive).
+ *
+ * @param {string} sourcePath - Absolute path of the file to move.
+ * @param {string} destinationPath - Absolute destination path.
+ * @returns {void}
+ */
+function moveFile(sourcePath, destinationPath) {
+  try {
+    renameSync(sourcePath, destinationPath);
+  } catch (error) {
+    if (!(error instanceof Error) || /** @type {NodeJS.ErrnoException} */ (error).code !== CROSS_DEVICE_RENAME_ERROR_CODE) {
+      throw error;
+    }
+    copyFileSync(sourcePath, destinationPath);
+    unlinkSync(sourcePath);
+  }
+}
+
+/**
+ * Runs an operation with the prepared archive moved out of the package root, and always puts it
+ * back afterwards, also when the operation fails.
+ *
+ * `npm pack --dry-run` describes every file npm would pack now. When the package has no `files`
+ * allowlist and neither `.npmignore` nor `.gitignore` excludes the archive directory, the archive
+ * written by `prepare` (for example `releases/pkg-1.0.0.tgz`) would be packed into the package it
+ * is compared with, changing the integrity and rejecting a valid artifact. Hiding it reproduces the
+ * package root `prepare` packed: a directory left empty is ignored by npm, as it was then.
+ *
+ * @template T
+ * @param {string} repositoryRoot - Package root.
+ * @param {string} artifactPath - Archive relative to the root, found by {@link findPreparedArtifact}.
+ * @param {() => Promise<T>} operation - Runs while the archive is outside the package root.
+ * @param {string} [parentDirectory] - Where the holding directory is created; defaults to the OS temp directory.
+ * @returns {Promise<T>} The operation result.
+ */
+export async function withArtifactOutsidePackageRoot(repositoryRoot, artifactPath, operation, parentDirectory = tmpdir()) {
+  const archivePath = path.join(repositoryRoot, artifactPath);
+  const holdingDirectory = mkdtempSync(path.join(parentDirectory, ARTIFACT_HOLDING_DIRECTORY_PREFIX));
+  const heldArchivePath = path.join(holdingDirectory, path.basename(archivePath));
+
+  try {
+    moveFile(archivePath, heldArchivePath);
+  } catch (error) {
+    rmSync(holdingDirectory, { recursive: true, force: true });
+    throw new Error(`beez-rp create-version: no se pudo apartar ${artifactPath} para verificarlo`, { cause: error });
+  }
+
+  try {
+    return await operation();
+  } finally {
+    try {
+      moveFile(heldArchivePath, archivePath);
+    } catch (error) {
+      // The holding directory is kept so the archive is never lost.
+      throw new Error(`beez-rp create-version: no se pudo devolver ${artifactPath} a su lugar; quedó en ${heldArchivePath}`, { cause: error });
+    }
+    rmSync(holdingDirectory, { recursive: true, force: true });
+  }
 }
 
 /**

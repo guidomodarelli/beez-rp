@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -151,6 +151,53 @@ describe("create-version state", () => {
     },
     GIT_FIXTURE_TEST_TIMEOUT_MS
   );
+
+  it(
+    "should look up published versions on the registry the working-tree package.json publishes to",
+    async () => {
+      const { repositoryRoot } = createReleasedRepository();
+      const scopedManifest = { name: "@team/fixture-app", version: "0.1.0", publishConfig: { "@team:registry": "https://npm.example.test/team/" } };
+      writeFileSync(path.join(repositoryRoot, "package.json"), `${JSON.stringify(scopedManifest, null, 2)}\n`);
+      /** @type {unknown[][]} */
+      const lookups = [];
+
+      const state = await collectReleaseState({
+        repositoryRoot,
+        trackNpm: true,
+        lookupNpm: async (...lookupArguments) => {
+          lookups.push(lookupArguments);
+          return { status: NPM_LOOKUP_STATUS.ok, publishedVersions: ["0.1.0"], reason: null };
+        },
+      });
+
+      expect(lookups).toEqual([["@team/fixture-app", repositoryRoot, "https://npm.example.test/team/"]]);
+      expect(state.npm?.publishedVersions).toEqual(["0.1.0"]);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should report a failed npm lookup instead of querying npmjs when the declared registry is invalid",
+    async () => {
+      const { repositoryRoot } = createReleasedRepository();
+      const invalidRegistryManifest = { name: "fixture-app", version: "0.1.0", publishConfig: { registry: "ftp://npm.example.test/" } };
+      writeFileSync(path.join(repositoryRoot, "package.json"), `${JSON.stringify(invalidRegistryManifest, null, 2)}\n`);
+      let lookupCount = 0;
+
+      const state = await collectReleaseState({
+        repositoryRoot,
+        trackNpm: true,
+        lookupNpm: async () => {
+          lookupCount += 1;
+          return { status: NPM_LOOKUP_STATUS.ok, publishedVersions: [], reason: null };
+        },
+      });
+
+      expect(lookupCount).toBe(0);
+      expect(state.npm).toEqual({ status: NPM_LOOKUP_STATUS.failed, publishedVersions: [], reason: expect.stringContaining("http(s)") });
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
 });
 
 describe("beez-rp create-version command", () => {
@@ -219,9 +266,10 @@ describe("beez-rp create-version command", () => {
    *
    * @param {string} repositoryRoot - Checkout.
    * @param {string} [extraPrepare] - Statement run after packing, with `repositoryRoot` in scope.
+   * @param {{ ignoreReleases?: boolean }} [options] - Whether `.gitignore` excludes `releases/` (and so npm skips it too).
    */
-  function configureNpmPackArtifact(repositoryRoot, extraPrepare = "") {
-    writeFileSync(path.join(repositoryRoot, ".gitignore"), "releases/\n");
+  function configureNpmPackArtifact(repositoryRoot, extraPrepare = "", { ignoreReleases = true } = {}) {
+    if (ignoreReleases) writeFileSync(path.join(repositoryRoot, ".gitignore"), "releases/\n");
     writeFileSync(
       path.join(repositoryRoot, "beez-rp.config.js"),
       [
@@ -277,6 +325,21 @@ describe("beez-rp create-version command", () => {
       expect(output).toContain("releases/fixture-app-renamed-0.2.0.tgz verificado (integrity de npm pack)");
       expect(output).not.toContain("No hay un artefacto preparado");
       expect(output).toContain("Falta NPM_TOKEN para publicar 0.2.0.");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should verify an artifact that npm would otherwise pack into itself, and keep it at its path",
+    () => {
+      const { repositoryRoot } = createReleasedRepository();
+      configureNpmPackArtifact(repositoryRoot, "", { ignoreReleases: false });
+
+      const output = runReleaseWithoutToken(repositoryRoot);
+
+      expect(output).toContain("releases/fixture-app-0.2.0.tgz verificado (integrity de npm pack)");
+      expect(output).toContain("Falta NPM_TOKEN para publicar 0.2.0.");
+      expect(existsSync(path.join(repositoryRoot, "releases", "fixture-app-0.2.0.tgz"))).toBe(true);
     },
     GIT_FIXTURE_TEST_TIMEOUT_MS
   );

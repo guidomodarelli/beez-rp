@@ -18,6 +18,7 @@ import { CHANGELOG_FILE } from "../constants/changelog.js";
 import {
   MAIN_BRANCH,
   MIGRATION_STATUS,
+  NPM_LOOKUP_STATUS,
   NO_PULL_REQUEST_MESSAGE_PATTERN,
   PACKAGE_MANIFEST_FILE,
   PULL_REQUEST_JSON_FIELDS,
@@ -25,7 +26,7 @@ import {
   REMOTE_MAIN_REF,
   VERSION_FIELD_CHANGE_PATTERN,
 } from "../constants/create-version.js";
-import { lookupPublishedVersions } from "./npm.js";
+import { lookupPublishedVersions, resolvePublishRegistry } from "./npm.js";
 import { createGitReader, listCommits, readPackageVersionAt, runCaptured } from "./process.js";
 
 /**
@@ -133,6 +134,27 @@ async function readMigrations(checkMigrations) {
 }
 
 /**
+ * Lists the published versions on the registry the working-tree manifest publishes to, so the
+ * diagnosis sees the same versions `npm publish` would conflict with.
+ *
+ * @param {typeof lookupPublishedVersions} lookupNpm - npm lookup adapter.
+ * @param {Record<string, unknown>} manifest - Working-tree `package.json`.
+ * @param {string} repositoryRoot - Repository root.
+ * @returns {Promise<import("./npm.js").NpmLookup>} Published versions, or a failed lookup when the registry is invalid.
+ */
+async function lookupNpmOnPublishRegistry(lookupNpm, manifest, repositoryRoot) {
+  /** @type {string} */
+  let registryUrl;
+  try {
+    registryUrl = resolvePublishRegistry(manifest);
+  } catch (error) {
+    return { status: NPM_LOOKUP_STATUS.failed, publishedVersions: [], reason: error instanceof Error ? error.message : String(error) };
+  }
+
+  return lookupNpm(String(manifest.name), repositoryRoot, registryUrl);
+}
+
+/**
  * Gathers the complete release snapshot.
  *
  * @param {{
@@ -188,7 +210,7 @@ export async function collectReleaseState({
 
   if (trackNpm) {
     onProgress("Consultando npm");
-    npm = await lookupNpm(manifest.name, repositoryRoot);
+    npm = await lookupNpmOnPublishRegistry(lookupNpm, manifest, repositoryRoot);
   }
 
   if (checkMigrations) {
