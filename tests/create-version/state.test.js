@@ -744,9 +744,10 @@ describe("beez-rp create-version command", () => {
       const output = flattenOutput(release.output);
 
       expect(release.status, release.output).toBe(1);
-      expect(output).toContain(`npm auth ${OWNER_USER} (~/.config/beez-rp/.env)`);
+      expect(output).toContain(`npm auth ${OWNER_USER} (~/.config/beez-rp/.env), dueño de fixture-app; permiso de escritura del token no verificable antes de publicar`);
       expect(output).toContain("npm publish terminó con código");
-      expect(output).toContain(`autentican como ${OWNER_USER} y pueden publicar fixture-app`);
+      expect(output).toContain(`autentican como ${OWNER_USER}, dueño de fixture-app`);
+      expect(output).toContain("El token puede ser read-only o granular sin permiso de escritura sobre el paquete");
       expect(output).toContain("Un 404 Not Found de npm en el PUT suele significar falta de permisos");
       expect(output).toContain("v0.2.0 ya está en origin (main + tag); falta publicar en npm. Corré pnpm create-version para reintentar solo la publicación.");
       expect(runGit(["tag", "--list"], remoteRoot)).toBe("v0.2.0");

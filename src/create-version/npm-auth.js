@@ -13,6 +13,7 @@ import {
   NPM_NOT_FOUND_CODE,
   NPM_PUBLISH_RETRY_ACTION,
   NPM_PUT_NOT_FOUND_NOTE,
+  NPM_READ_ONLY_TOKEN_NOTE,
   NPM_TOKEN_LOCATIONS,
   NPM_TOKEN_SOURCE_LABEL,
   NPM_TOKEN_VARIABLE,
@@ -102,7 +103,8 @@ export function describeNpmFirstPublicationWarning(npmAuth) {
 
 /**
  * Explains a failed `npm publish` from the credential check re-run after it: an invalid token, a
- * user without permission on the package or, when the credentials are fine, the generic failure.
+ * user without permission on the package or, when the user can publish, the generic failure, which
+ * still names a read-only or granular token without write permission as a possible cause.
  *
  * @param {NpmAuthCheck} npmAuth - Result of `checkNpmPublishAccess` after the failure.
  * @param {{ exitCode: number, version: string }} publication - npm exit code and version being published.
@@ -119,7 +121,7 @@ export function describeNpmPublishFailure(npmAuth, { exitCode, version }) {
 
   const credentials =
     npmAuth.status === NPM_AUTH_STATUS.ok
-      ? `Las credenciales (${describeNpmTokenSource(npmAuth)}) autentican como ${npmAuth.user} y pueden publicar ${npmAuth.packageName}.`
+      ? `Las credenciales (${describeNpmTokenSource(npmAuth)}) autentican como ${npmAuth.user}${npmAuth.firstPublication ? "" : `, dueño de ${npmAuth.packageName}`}. ${NPM_READ_ONLY_TOKEN_NOTE}`
       : `No se pudieron verificar las credenciales (${npmAuth.reason ?? "motivo desconocido"}).`;
   return { message: `${failed}.`, hint: `Comprobá en npm si ${version} llegó; si no, ${NPM_PUBLISH_RETRY_ACTION}. ${credentials} ${NPM_PUT_NOT_FOUND_NOTE}` };
 }

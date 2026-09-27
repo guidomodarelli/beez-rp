@@ -239,12 +239,14 @@ function describeNpmFailure(result, commandName) {
 }
 
 /**
- * Checks, before anything is touched, that `NPM_TOKEN` can publish the package: resolves the token
+ * Checks, before anything is touched, the credential `npm publish` will use: resolves the token
  * ({@link resolveNpmToken}), asks the registry who it authenticates as (`npm whoami`) and whether
  * that user owns the package (`npm owner ls`). A package the registry does not show (E404) passes as
  * `firstPublication`; registries also hide private packages from users without access, so the
  * snapshot confirms it against the versions `npm view` lists (see `state.js`). Both commands use the same temporary config and registry as
- * `npm publish`, so a passing check means npm accepts the credential.
+ * `npm publish`. A passing check proves that the token authenticates as an owner, not that it can
+ * write: a read-only or granular token without write permission passes too, and npm offers no
+ * side-effect-free way to tell before publishing.
  *
  * @param {string} packageName - npm package name.
  * @param {string} repositoryRoot - Repository root, where npm reads its project config.

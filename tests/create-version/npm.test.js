@@ -522,12 +522,21 @@ describe("npm publish failure translation", () => {
     expect(notOwner.hint).toContain("404 Not Found");
   });
 
-  it("keeps the generic failure when the credentials can publish", () => {
+  it("keeps the generic failure for an owner and names a read-only or granular token as a possible cause", () => {
     const generic = describeNpmPublishFailure(PASSING_CHECK, { exitCode: 1, version: "1.1.0" });
 
     expect(generic.message).toBe("npm publish terminó con código 1.");
     expect(generic.hint).toContain("Comprobá en npm si 1.1.0 llegó");
-    expect(generic.hint).toContain("autentican como fixture-owner");
+    expect(generic.hint).toContain("autentican como fixture-owner, dueño de fixture-published");
+    expect(generic.hint).toContain("El token puede ser read-only o granular sin permiso de escritura sobre el paquete");
     expect(generic.hint).toContain("404 Not Found");
+  });
+
+  it("does not call the user an owner when the failed publication was the first one", () => {
+    const firstPublication = describeNpmPublishFailure({ ...PASSING_CHECK, owners: [], firstPublication: true }, { exitCode: 1, version: "1.0.0" });
+
+    expect(firstPublication.hint).toContain("autentican como fixture-owner.");
+    expect(firstPublication.hint).not.toContain("dueño de");
+    expect(firstPublication.hint).toContain("read-only o granular");
   });
 });

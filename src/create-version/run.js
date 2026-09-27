@@ -37,6 +37,7 @@ import {
   NPM_PUBLISHER,
   NPM_TOKEN_LOCATIONS,
   NPM_TOKEN_VARIABLE,
+  NPM_WRITE_ACCESS_UNVERIFIED_NOTE,
   PACKAGE_MANIFEST_FILE,
   PACKAGE_VERSION_FIELD_PATTERN,
   PINNED_NODE_VERSION_FILE,
@@ -269,6 +270,7 @@ function renderDiagnosis(state, repositoryRoot) {
 
 /**
  * Renders the npm credential row of the diagnosis: the user and where the token came from, or the problem.
+ * An owner passes without claiming that the token can write, which npm cannot check before publishing.
  *
  * @param {import("./npm.js").NpmAuthCheck} npmAuth - Credential check.
  * @returns {string} Row.
@@ -278,7 +280,9 @@ function renderNpmAuthRow(npmAuth) {
 
   switch (npmAuth.status) {
     case NPM_AUTH_STATUS.ok:
-      return renderRow(ICON.success, "npm auth", `${npmAuth.user} (${source})${npmAuth.firstPublication ? paint("gray", " · primera publicación") : ""}`);
+      return npmAuth.firstPublication
+        ? renderRow(ICON.success, "npm auth", `${npmAuth.user} (${source})${paint("gray", " · primera publicación")}`)
+        : renderRow(ICON.success, "npm auth", `${npmAuth.user} (${source}), dueño de ${npmAuth.packageName}${paint("gray", `; ${NPM_WRITE_ACCESS_UNVERIFIED_NOTE}`)}`);
     case NPM_AUTH_STATUS.missingToken:
       return renderRow(ICON.failure, "npm auth", paint("red", `falta ${NPM_TOKEN_VARIABLE}`));
     case NPM_AUTH_STATUS.invalidToken:

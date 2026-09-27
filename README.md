@@ -140,14 +140,16 @@ El token nunca se escribe en disco ni en la línea de comandos, ni se carga en e
 
 ### Credenciales antes de publicar
 
-Cuando el plan incluiría la publicación con `publish: "npm"` (release nuevo o retomado), el diagnóstico verifica las credenciales antes de tocar nada, con la misma config temporal y el mismo registry que `npm publish`, y las muestra en la fila `npm auth` (por ejemplo `guidomodarelli (.env del repo)`):
+Cuando el plan incluiría la publicación con `publish: "npm"` (release nuevo o retomado), el diagnóstico verifica las credenciales antes de tocar nada, con la misma config temporal y el mismo registry que `npm publish`, y las muestra en la fila `npm auth` (por ejemplo `guidomodarelli (.env del repo), dueño de <paquete>; permiso de escritura del token no verificable antes de publicar`):
 
 - Sin token: bloquea y explica dónde definir `NPM_TOKEN`.
 - `npm whoami --registry <registry>` responde 401/403: bloquea porque el token (de la fuente que corresponda) es inválido o venció.
 - `npm owner ls <paquete> --registry <registry>`: si el paquete no existe (E404) es la primera publicación y sigue; si existe y el usuario no está entre los dueños, bloquea con el usuario y los dueños. En un paquete con scope de organización solo advierte, porque el acceso puede venir de un equipo.
 - Si la verificación no puede decidir (red, registry sin `npm owner ls`), advierte y publica igual.
 
-`npm publish` hereda la terminal (para el 2FA), así que su salida no se puede leer. Si termina con error, el comando vuelve a verificar las credenciales y explica el motivo: token inválido, usuario sin permisos sobre el paquete o, si las credenciales están bien, el error genérico. Un `404 Not Found` de npm en el PUT suele significar falta de permisos.
+Límite: que el usuario sea dueño del paquete no prueba que el token pueda escribir. Un token read-only o granular sin permiso de escritura sobre el paquete pasa `npm whoami` y `npm owner ls`, y npm no ofrece una forma sin efectos de verificarlo antes de publicar (`npm publish --dry-run` no autentica). Por eso la fila lo aclara sin bloquear, y ese caso recién falla en `npm publish`, después de pushear el commit y el tag.
+
+`npm publish` hereda la terminal (para el 2FA), así que su salida no se puede leer. Si termina con error, el comando vuelve a verificar las credenciales y explica el motivo: token inválido, usuario sin permisos sobre el paquete o, si el usuario es dueño, el error genérico, que menciona que el token puede ser read-only o granular sin permiso de escritura. Un `404 Not Found` de npm en el PUT suele significar falta de permisos.
 
 ### Versiones sin publicar
 

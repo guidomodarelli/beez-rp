@@ -59,7 +59,8 @@ export const NPM_TOKEN_SOURCE_LABEL = Object.freeze({
 
 /**
  * Result of checking the npm credentials before publishing:
- * - `ok`: the token authenticates and the user can publish the package (or it was never published);
+ * - `ok`: the token authenticates and its user owns the package (or it was never published); npm
+ *   cannot tell beforehand whether the token itself can write (read-only or granular tokens);
  * - `missingToken`: no source defines `NPM_TOKEN`;
  * - `invalidToken`: the registry rejects the token (`npm whoami` answers 401/403);
  * - `notOwner`: the token authenticates as a user that is not an owner of the package;
@@ -82,6 +83,13 @@ export const NPM_TOKEN_LOCATIONS = `la variable de entorno ${NPM_TOKEN_VARIABLE}
 
 /** Why npm answers 404 to a publication the token cannot make. */
 export const NPM_PUT_NOT_FOUND_NOTE = "Un 404 Not Found de npm en el PUT suele significar falta de permisos sobre el paquete (npm responde 404 en vez de 403).";
+
+/** Diagnosis note of an owner token: npm exposes no side-effect-free way to check its write permission. */
+export const NPM_WRITE_ACCESS_UNVERIFIED_NOTE = "permiso de escritura del token no verificable antes de publicar";
+
+/** Why a failed publication can still be the token when its user owns the package. */
+export const NPM_READ_ONLY_TOKEN_NOTE =
+  "El token puede ser read-only o granular sin permiso de escritura sobre el paquete (npm no permite verificarlo antes de publicar): revisalo en npm → Access Tokens.";
 
 /** Next action after fixing the npm credentials reported by the diagnosis. */
 export const NPM_AUTH_RERUN_ACTION = "volvé a correr pnpm create-version";
