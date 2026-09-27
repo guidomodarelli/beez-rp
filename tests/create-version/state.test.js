@@ -329,6 +329,62 @@ describe("beez-rp create-version command", () => {
     GIT_FIXTURE_TEST_TIMEOUT_MS
   );
 
+  /**
+   * Commits and pushes a configuration, so a later commit on `origin/main` can replace it.
+   *
+   * @param {string} repositoryRoot - Checkout.
+   * @param {string[]} configLines - Lines of `beez-rp.config.js`.
+   */
+  function pushConfiguration(repositoryRoot, configLines) {
+    writeFileSync(path.join(repositoryRoot, "beez-rp.config.js"), [...configLines, ""].join("\n"));
+    runGit(["add", "-A"], repositoryRoot);
+    runGit(["commit", "--quiet", "-m", "chore: configure releases"], repositoryRoot);
+    runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+  }
+
+  it(
+    "should verify the artifact that origin/main configures when local main was behind with a configuration without artifact",
+    () => {
+      const { repositoryRoot } = createReleasedRepository();
+      pushConfiguration(repositoryRoot, [
+        "export default {",
+        '  changelog: { audience: "equipo" },',
+        '  publish: "npm",',
+        "  registry: null,",
+        "  prepare: () => {},",
+        "};",
+      ]);
+      configureNpmPackArtifact(repositoryRoot);
+      runGit(["reset", "--quiet", "--hard", "HEAD~1"], repositoryRoot);
+
+      const output = runReleaseWithoutToken(repositoryRoot);
+
+      expect(output).toContain("releases/fixture-app-0.2.0.tgz verificado (integrity de npm pack)");
+      expect(output).toContain("Falta NPM_TOKEN para publicar 0.2.0.");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should stop before touching the version when the configuration brought by syncing main changes the plan",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "};"]);
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', '  checks: ["node --version"],', "};"]);
+      runGit(["reset", "--quiet", "--hard", "HEAD~1"], repositoryRoot);
+
+      const release = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(release.status, release.output).toBe(1);
+      expect(release.output).toContain("origin/main cambió beez-rp.config.js");
+      expect(release.output).toContain("Volvé a correr pnpm create-version");
+      expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+      expect(JSON.parse(readFileSync(path.join(repositoryRoot, "package.json"), "utf8")).version).toBe("0.1.0");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
   it(
     "should verify an artifact that npm would otherwise pack into itself, and keep it at its path",
     () => {

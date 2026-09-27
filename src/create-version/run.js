@@ -340,10 +340,43 @@ function requireReleaseVersion(context) {
 }
 
 /**
- * Fast-forwards local `main` to `origin/main`.
+ * Steps a configuration adds to the release plan.
+ *
+ * @param {ResolvedCreateVersionConfig} config - Resolved configuration.
+ * @returns {import("./plan.js").ReleaseCapabilities} Capabilities for `buildReleasePlan`.
+ */
+function describeReleaseCapabilities(config) {
+  return {
+    checks: config.checks.length > 0,
+    prepare: config.prepare !== null,
+    publish: config.publish !== null,
+    publishTitle: config.publish === NPM_PUBLISHER ? "Publicar en npm" : "Publicar el release",
+  };
+}
+
+/**
+ * Settings the diagnosis and the plan were built from: the plan steps, the tracked registry and
+ * whether pending migrations were checked. Anything else is read by each step when it runs.
+ *
+ * @param {ResolvedCreateVersionConfig} config - Resolved configuration.
+ * @returns {string} Comparable description.
+ */
+function describePlanInputs(config) {
+  return JSON.stringify({ ...describeReleaseCapabilities(config), registry: config.registry, migrations: config.migrations !== null });
+}
+
+/**
+ * Fast-forwards local `main` to `origin/main` and reloads `beez-rp.config.(m)js` from the updated
+ * checkout, because the configuration imported at startup is the one `main` had before syncing.
+ * The following steps use the reloaded configuration (artifact, prepare, checks commands,
+ * publication...). When it changes what the plan was built from (which steps run, the registry or
+ * the migrations adapter), the release stops before touching the version: the diagnosis and the
+ * plan would be stale, and running `pnpm create-version` again builds both from the new file.
  *
  * @param {ReleaseContext} context - Release context.
  * @returns {Promise<void>}
+ * @throws {ReleaseStepError} When the fast-forward fails, the updated configuration cannot be
+ *   loaded or it changes the plan.
  */
 async function syncMainStep(context) {
   await runGitStep(
@@ -353,6 +386,27 @@ async function syncMainStep(context) {
     `Revisá git status y git log ${REMOTE_MAIN_REF}..${MAIN_BRANCH}.`
   );
   print(`${ICON.success} ${MAIN_BRANCH} quedó igual a ${REMOTE_MAIN_REF}.`);
+
+  const headSha = await context.reader.git(["rev-parse", "HEAD"]);
+  let updatedConfig;
+  try {
+    updatedConfig = await loadCreateVersionConfig(context.repositoryRoot, { reloadKey: headSha });
+  } catch (error) {
+    throw new ReleaseStepError(
+      `No se pudo cargar la configuración de ${MAIN_BRANCH} actualizado (${headSha.slice(0, SHORT_SHA_LENGTH)}): ${error instanceof Error ? error.message : String(error)}`,
+      "Corregí beez-rp.config.js en main y volvé a correr pnpm create-version.",
+      { cause: error }
+    );
+  }
+
+  if (describePlanInputs(updatedConfig) !== describePlanInputs(context.config)) {
+    throw new ReleaseStepError(
+      `${REMOTE_MAIN_REF} cambió beez-rp.config.js y el plan ya no corresponde (pasos de validación, preparación o publicación, registry o migraciones).`,
+      "No se tocó la versión. Volvé a correr pnpm create-version para diagnosticar con la configuración nueva."
+    );
+  }
+
+  context.config = updatedConfig;
 }
 
 /**
@@ -618,7 +672,7 @@ async function resolvePublishedArtifact(context, version, workingManifest) {
   if (pnpmRewrites.length > 0) {
     throw new ReleaseStepError(
       `Este paquete depende de reescrituras de pnpm al empaquetar y beez-rp publica con npm: ${pnpmRewrites.slice(0, MAX_LISTED_ITEMS).join("; ")}.`,
-      "No se publicó nada. Reemplazá los especificadores workspace:/catalog: por rangos de versión y sacá de publishConfig los campos del manifest que solo pnpm aplica al empaquetar (exports, main, bin, types...): declaralos en la raíz de package.json."
+      "No se publicó nada. Reemplazá los especificadores workspace:/catalog:/jsr: por rangos de versión y sacá de publishConfig los campos del manifest que solo pnpm aplica al empaquetar (exports, main, bin, types...): declaralos en la raíz de package.json."
     );
   }
 
@@ -851,12 +905,7 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   print(renderBanner({ projectName: config.projectName ?? state.packageName, publishedLabel }));
   print(renderDiagnosis(state, repositoryRoot));
 
-  const plan = buildReleasePlan(state, {
-    checks: config.checks.length > 0,
-    prepare: config.prepare !== null,
-    publish: config.publish !== null,
-    publishTitle: config.publish === NPM_PUBLISHER ? "Publicar en npm" : "Publicar el release",
-  });
+  const plan = buildReleasePlan(state, describeReleaseCapabilities(config));
 
   if (plan.mode === RELEASE_MODE.upToDate) {
     const since = state.lastRelease?.version ? toReleaseTag(state.lastRelease.version) : "el inicio";

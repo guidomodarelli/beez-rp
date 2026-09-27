@@ -22,6 +22,13 @@ export const CREATE_VERSION_CONFIG_FILE = "beez-rp.config.js";
  */
 export const CREATE_VERSION_CONFIG_FILES = Object.freeze(["beez-rp.config.mjs", CREATE_VERSION_CONFIG_FILE]);
 
+/**
+ * Query parameter that makes Node evaluate the configuration again: the ES module cache is keyed
+ * by URL, so importing `beez-rp.config.js?reload=<commit>` runs the file the checkout holds now
+ * instead of returning the module imported before `main` was synchronized.
+ */
+export const CONFIG_RELOAD_QUERY_PARAMETER = "reload";
+
 /** Manifest whose `version` is released; shared with the build gate. */
 export { PACKAGE_MANIFEST_FILE } from "./build-gate.js";
 
@@ -244,8 +251,22 @@ export const PNPM_HOISTED_PUBLISH_CONFIG_KEYS = Object.freeze([
 /** Dependency maps npm publishes as they are written in `package.json`. */
 export const PUBLISHED_DEPENDENCY_FIELDS = Object.freeze(["dependencies", "peerDependencies", "optionalDependencies"]);
 
-/** Dependency specifiers only `pnpm pack` replaces with a resolved version range (`workspace:^`, `catalog:`). */
-export const PNPM_PACK_REWRITTEN_SPECIFIER_PATTERN = /^(?:workspace|catalog):/u;
+/**
+ * Dependency specifiers only `pnpm pack` rewrites and npm publishes verbatim, which npm then
+ * cannot install (`EUNSUPPORTEDPROTOCOL`):
+ * - `catalog:` (dereferenced to the catalog entry);
+ * - `workspace:` (resolved to the linked package version), as the whole specifier or, in
+ *   `peerDependencies`, as a segment of a compound range (`^1.0.0 || workspace:>=1.0.0`);
+ * - `jsr:` (turned into an `npm:@jsr/<scope>__<name>` alias).
+ *
+ * Source: `convert_dependency_for_publish` (catalog → workspace → jsr replacers) in pnpm v12.6.0
+ * `pnpm/crates/exportable-manifest/src/create.rs`, and `replace_workspace_protocol_peer_dependency`
+ * in `pnpm/crates/exportable-manifest/src/replace.rs`. No other protocol is rewritten there.
+ *
+ * @see https://github.com/pnpm/pnpm/blob/v12.6.0/pnpm/crates/exportable-manifest/src/create.rs
+ * @see https://github.com/pnpm/pnpm/blob/v12.6.0/pnpm/crates/exportable-manifest/src/replace.rs
+ */
+export const PNPM_PACK_REWRITTEN_SPECIFIER_PATTERN = /^(?:workspace|catalog|jsr):|\|\|\s*workspace:/u;
 
 /** Registry `npm publish` uses when `publishConfig` sets neither `@scope:registry` nor `registry`. */
 export const DEFAULT_NPM_REGISTRY_URL = "https://registry.npmjs.org/";

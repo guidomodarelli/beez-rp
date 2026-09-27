@@ -83,6 +83,22 @@ describe("create-version config", () => {
     writeFileSync(path.join(repositoryRoot, "beez-rp.config.mjs"), 'export default { changelog: { audience: "equipo" }, checks: ["pnpm lint"] };\n');
     await expect(loadCreateVersionConfig(repositoryRoot)).resolves.toMatchObject({ checks: ["pnpm lint"] });
   });
+
+  it("should evaluate the file again only when a reload key is given", async () => {
+    const repositoryRoot = mkdtempSync(path.join(os.tmpdir(), "beez-rp-config-"));
+    temporaryDirectories.push(repositoryRoot);
+    const configPath = path.join(repositoryRoot, "beez-rp.config.mjs");
+
+    writeFileSync(configPath, 'export default { changelog: { audience: "equipo" }, checks: ["pnpm test"] };\n');
+    await expect(loadCreateVersionConfig(repositoryRoot)).resolves.toMatchObject({ checks: ["pnpm test"], artifact: null });
+
+    writeFileSync(configPath, 'export default { changelog: { audience: "equipo" }, checks: ["pnpm check"], publish: "npm", artifact: "releases/{name}-{version}.tgz" };\n');
+    await expect(loadCreateVersionConfig(repositoryRoot)).resolves.toMatchObject({ checks: ["pnpm test"], artifact: null });
+    await expect(loadCreateVersionConfig(repositoryRoot, { reloadKey: "0123abc" })).resolves.toMatchObject({
+      checks: ["pnpm check"],
+      artifact: "releases/{name}-{version}.tgz",
+    });
+  });
 });
 
 describe("changelog prompt language", () => {

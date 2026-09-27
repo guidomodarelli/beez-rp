@@ -359,6 +359,37 @@ describe("pnpm-only pack rewrites", () => {
     ]);
   });
 
+  it("should reject jsr: specifiers, which pnpm turns into npm: aliases and npm cannot install", () => {
+    expect(
+      findPnpmPackRewrites({
+        ...MANIFEST,
+        dependencies: { "@std/path": "jsr:^1.0.0" },
+        optionalDependencies: { "@luca/cases": "jsr:@luca/cases@1" },
+      })
+    ).toEqual([
+      expect.stringContaining('dependencies.@std/path usa "jsr:^1.0.0", que solo pnpm reescribe al empaquetar'),
+      expect.stringContaining('optionalDependencies.@luca/cases usa "jsr:@luca/cases@1", que solo pnpm reescribe al empaquetar'),
+    ]);
+  });
+
+  it("should reject a workspace: segment inside a compound peer range", () => {
+    expect(
+      findPnpmPackRewrites({
+        ...MANIFEST,
+        peerDependencies: { "internal-lib": "^1.0.0 || workspace:>=1.0.0" },
+      })
+    ).toEqual([expect.stringContaining('peerDependencies.internal-lib usa "^1.0.0 || workspace:>=1.0.0", que solo pnpm reescribe al empaquetar')]);
+  });
+
+  it("should accept registry, alias and git specifiers that only mention a protocol name", () => {
+    expect(
+      findPnpmPackRewrites({
+        ...MANIFEST,
+        dependencies: { jsr: "^1.0.0", "catalog-lib": "npm:catalog@^2.0.0", tool: "github:owner/workspace" },
+      })
+    ).toEqual([]);
+  });
+
   it("should accept any npm configuration key in publishConfig", () => {
     expect(
       findPnpmPackRewrites({

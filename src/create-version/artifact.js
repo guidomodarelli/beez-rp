@@ -197,8 +197,8 @@ function isRecord(value) {
 }
 
 /**
- * Lists what a manifest needs from `pnpm pack` and npm would publish as it is: `workspace:` or
- * `catalog:` specifiers in published dependency maps, and `publishConfig` keys pnpm hoists onto the
+ * Lists what a manifest needs from `pnpm pack` and npm would publish as it is: `workspace:`,
+ * `catalog:` or `jsr:` specifiers in published dependency maps, and `publishConfig` keys pnpm hoists onto the
  * manifest (such as `exports`, `main` or `bin`; npm only reads `publishConfig` as configuration).
  * Every other `publishConfig` key is npm configuration and is accepted.
  *
