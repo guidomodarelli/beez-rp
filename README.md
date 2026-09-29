@@ -158,7 +158,7 @@ export default {
 ```
 
 - Paquetes: los workspaces con `name` que no son `private`. Un paquete tiene cambios cuando un commit toca su carpeta, o la de un paquete `private` del que depende (directa o transitivamente, en cualquier campo de dependencias): los paquetes internos suelen ir bundleados en quien los usa, así que un cambio ahí sale con un release de cada consumidor.
-- Último release de cada paquete: el último commit de `origin/main` que cambió el `version` de su `package.json`.
+- Último release de cada paquete: el último commit de `origin/main` que cambió el `version` de su `package.json`. Un paquete en `0.0.0` (el placeholder de release-please) nunca salió: se agrega con esa versión y todos sus commits van en su primer release, cuya sugerida no baja con `preMajorShift` (un `feat` da `0.1.0`).
 - Versión: por cada paquete con cambios pregunta patch, minor o major (la sugerida por sus commits lleva una estrella) o "No publicar ahora". `--bump` aplica el mismo tipo a todos y `--accept-suggested` toma la sugerida de cada uno; `--set-version` no aplica.
 - `[Unreleased]` vacío: Codex lo completa en la carpeta del paquete, solo con sus commits.
 - Un solo commit de release (`release: @scope/a@1.2.0, @scope/b@0.3.1`) con un tag anotado por paquete; `main` y los tags suben con `git push --atomic`.

@@ -25,6 +25,13 @@ export const PRE_MAJOR_SHIFTED_RELEASE_TYPE = Object.freeze({
 /** Major version of the `0.x` line, where `preMajorShift` applies. */
 export const PRE_MAJOR_VERSION = 0;
 
+/**
+ * Version of a package that was never released (the release-please placeholder): the commit that
+ * sets it is not a release, and its first release keeps the unshifted suggestion (a feature gives
+ * `0.1.0`, not `0.0.1`).
+ */
+export const UNRELEASED_PLACEHOLDER_VERSION = "0.0.0";
+
 /** Release types in the order they are offered: patch, minor, major. */
 export const RELEASE_TYPE_ORDER = Object.freeze([RELEASE_TYPE.patch, RELEASE_TYPE.minor, RELEASE_TYPE.major]);
 

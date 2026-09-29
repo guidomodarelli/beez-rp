@@ -15,6 +15,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 
 import { RELEASE_REMOTE, REMOTE_MAIN_REF, VERSION_FIELD_CHANGE_PATTERN } from "../constants/create-version.js";
+import { UNRELEASED_PLACEHOLDER_VERSION } from "../constants/versions.js";
 import { checkNpmPublishAccess, lookupPublishedVersions } from "../create-version/npm.js";
 import { createGitReader, listCommits, readPackageVersionAt } from "../create-version/process.js";
 import {
@@ -81,7 +82,8 @@ async function readRemoteTags(reader) {
 }
 
 /**
- * Finds the last release of a package on a revision: the newest commit that changed its `version`.
+ * Finds the last release of a package on a revision: the newest commit that changed its `version`,
+ * unless that version is the `0.0.0` placeholder of a package that was never released.
  *
  * @param {GitReader} reader - Git reader.
  * @param {string} revision - Revision such as `origin/main`.
@@ -98,6 +100,10 @@ export async function findLastPackageRelease(reader, revision, unit, tagFormat, 
   }
 
   const version = await readPackageVersionAt(reader, sha, unit.manifestPath);
+  if (version === UNRELEASED_PLACEHOLDER_VERSION) {
+    return null;
+  }
+
   const subject = await reader.tryGit(["log", "-1", "--format=%s", sha]);
   const tag = version ? formatPackageTag(tagFormat, unit, version) : null;
   const taggedSha = tag ? await reader.tryGit(["rev-parse", "--verify", "--quiet", `refs/tags/${tag}^{commit}`]) : null;

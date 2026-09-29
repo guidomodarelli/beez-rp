@@ -110,6 +110,27 @@ const npmEnvironment = (registryUrl) => ({ NPM_TOKEN: OWNER_TOKEN, npm_config_re
 
 describe("create-version in monorepo mode", () => {
   it(
+    "releases a package added at the 0.0.0 placeholder for the first time, since adding it was not a release",
+    async () => {
+      const { repositoryRoot, remoteRoot } = createReleasedMonorepo();
+      writeJson(repositoryRoot, "packages/server/package.json", { name: "@acme/server", version: "0.0.0" });
+      writeFileSync(path.join(repositoryRoot, "packages/server/CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Server.\n");
+      commitAll(repositoryRoot, "feat(server): add the server package");
+      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+      const registry = await startRegistry();
+
+      const release = await runCliAsync(repositoryRoot, ["--accept-suggested"], npmEnvironment(registry.registryUrl));
+
+      expect(release.status, release.output).toBe(0);
+      // preMajorShift leaves the first release alone: a feature on 0.0.0 gives 0.1.0.
+      expect(runGit(["log", "-1", "--format=%s", "main"], remoteRoot)).toBe("release: @acme/server@0.1.0");
+      expect(runGit(["tag", "--list", "--points-at", "main"], remoteRoot)).toBe("server-v0.1.0");
+      expect(registry.publications).toEqual([{ packageName: "@acme/server", version: "0.1.0", user: OWNER_USER }]);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
     "releases only the package whose paths changed (a private bundled dependency included), with its own tag, changelog and publication",
     async () => {
       const { repositoryRoot, remoteRoot } = createReleasedMonorepo();

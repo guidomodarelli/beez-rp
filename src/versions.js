@@ -19,6 +19,7 @@ import {
   RELEASE_TYPE_ORDER,
   RELEASE_VERSION_PATTERN,
   SEMVER_PATTERN,
+  UNRELEASED_PLACEHOLDER_VERSION,
 } from "./constants/versions.js";
 
 /**
@@ -269,7 +270,8 @@ export function suggestReleaseType(commits) {
 /**
  * Suggests the release type of the next version after `currentVersion`: {@link suggestReleaseType},
  * shifted one level down while the version is `0.x` when `preMajorShift` is on (breaking changes
- * suggest `minor` and features `patch`, so a suggestion never jumps to `1.0.0`).
+ * suggest `minor` and features `patch`, so a suggestion never jumps to `1.0.0`). The first release
+ * of a `0.0.0` package is not shifted.
  *
  * @param {{ subject: string, body?: string }[]} commits - Commits since the last release.
  * @param {string} currentVersion - Current `X.Y.Z` version.
@@ -278,7 +280,7 @@ export function suggestReleaseType(commits) {
  */
 export function suggestNextReleaseType(commits, currentVersion, { preMajorShift = false } = {}) {
   const suggestion = suggestReleaseType(commits);
-  if (!preMajorShift || parseReleaseVersion(currentVersion)[0] !== PRE_MAJOR_VERSION) {
+  if (!preMajorShift || currentVersion === UNRELEASED_PLACEHOLDER_VERSION || parseReleaseVersion(currentVersion)[0] !== PRE_MAJOR_VERSION) {
     return suggestion;
   }
 

@@ -109,6 +109,8 @@ describe("release commits and tags", () => {
     expect(suggestNextReleaseType(breaking, "1.2.3", shifted).releaseType).toBe("major");
     expect(suggestNextReleaseType(feature, "0.10.10").releaseType).toBe("minor");
     expect(suggestNextReleaseType(breaking, "0.10.10").releaseType).toBe("major");
+    // The first release of a never-released package is not shifted: a feature gives 0.1.0.
+    expect(suggestNextReleaseType(feature, "0.0.0", shifted).releaseType).toBe("minor");
   });
 });
 
