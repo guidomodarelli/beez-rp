@@ -8,20 +8,22 @@
  */
 
 import {
-  NPM_AUTH_RERUN_ACTION,
   NPM_AUTH_STATUS,
   NPM_NOT_FOUND_CODE,
-  NPM_PUBLISH_RETRY_ACTION,
   NPM_PUT_NOT_FOUND_NOTE,
   NPM_READ_ONLY_TOKEN_NOTE,
   NPM_TOKEN_LOCATIONS,
   NPM_TOKEN_SOURCE_LABEL,
   NPM_TOKEN_VARIABLE,
   PROJECT_NPM_CONFIG_FILE,
+  buildNpmAuthRerunAction,
+  buildNpmPublishRetryAction,
 } from "../constants/create-version.js";
+import { DEFAULT_PROJECT_COMMANDS } from "../package-manager.js";
 
 /**
  * @typedef {import("./npm.js").NpmAuthCheck} NpmAuthCheck
+ * @typedef {import("../package-manager.js").ProjectCommands} ProjectCommands
  * @typedef {{ title: string, details: string[] }} NpmAuthProblem
  */
 
@@ -85,10 +87,11 @@ function describeCredentialProblem(npmAuth, nextAction) {
  * Explains an npm credential check that must stop the release before anything is touched.
  *
  * @param {NpmAuthCheck} npmAuth - Result of `checkNpmPublishAccess`.
+ * @param {ProjectCommands} [commands] - Project commands quoted by the fix (pnpm when omitted).
  * @returns {NpmAuthProblem | null} Blocker, or `null` when the check passed or could not decide (`unknown`).
  */
-export function describeNpmAuthProblem(npmAuth) {
-  const problem = describeCredentialProblem(npmAuth, NPM_AUTH_RERUN_ACTION);
+export function describeNpmAuthProblem(npmAuth, commands = DEFAULT_PROJECT_COMMANDS) {
+  const problem = describeCredentialProblem(npmAuth, buildNpmAuthRerunAction(commands.createVersion));
   return problem ? { title: problem.title, details: [...(problem.reason ? [problem.reason] : []), problem.fix] } : null;
 }
 
@@ -115,11 +118,13 @@ export function describeNpmFirstPublicationWarning(npmAuth) {
  *
  * @param {NpmAuthCheck} npmAuth - Result of `checkNpmPublishAccess` after the failure.
  * @param {{ exitCode: number, version: string }} publication - npm exit code and version being published.
+ * @param {ProjectCommands} [commands] - Project commands quoted by the hint (pnpm when omitted).
  * @returns {{ message: string, hint: string }} Spanish message and next action for `ReleaseStepError`.
  */
-export function describeNpmPublishFailure(npmAuth, { exitCode, version }) {
+export function describeNpmPublishFailure(npmAuth, { exitCode, version }, commands = DEFAULT_PROJECT_COMMANDS) {
   const failed = `npm publish terminó con código ${exitCode}`;
-  const problem = describeCredentialProblem(npmAuth, NPM_PUBLISH_RETRY_ACTION);
+  const retryAction = buildNpmPublishRetryAction(commands.createVersion);
+  const problem = describeCredentialProblem(npmAuth, retryAction);
 
   if (problem) {
     const notFoundNote = npmAuth.status === NPM_AUTH_STATUS.notOwner ? `${NPM_PUT_NOT_FOUND_NOTE} ` : "";
@@ -130,5 +135,5 @@ export function describeNpmPublishFailure(npmAuth, { exitCode, version }) {
     npmAuth.status === NPM_AUTH_STATUS.ok
       ? `Las credenciales (${describeNpmTokenSource(npmAuth)}) autentican como ${npmAuth.user}${npmAuth.firstPublication ? "" : `, dueño de ${npmAuth.packageName}`}. ${NPM_READ_ONLY_TOKEN_NOTE}`
       : `No se pudieron verificar las credenciales (${npmAuth.reason ?? "motivo desconocido"}).`;
-  return { message: `${failed}.`, hint: `Comprobá en npm si ${version} llegó; si no, ${NPM_PUBLISH_RETRY_ACTION}. ${credentials} ${NPM_PUT_NOT_FOUND_NOTE}` };
+  return { message: `${failed}.`, hint: `Comprobá en npm si ${version} llegó; si no, ${retryAction}. ${credentials} ${NPM_PUT_NOT_FOUND_NOTE}` };
 }

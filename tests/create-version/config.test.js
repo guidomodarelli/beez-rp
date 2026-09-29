@@ -5,6 +5,7 @@ import path from "node:path";
 
 import { buildChangelogPrompt } from "../../src/changelog-ai.js";
 import { loadCreateVersionConfig, resolveCreateVersionConfig } from "../../src/create-version/config.js";
+import { describeProjectCommands } from "../../src/package-manager.js";
 
 /** @type {string[]} */
 const temporaryDirectories = [];
@@ -16,6 +17,28 @@ afterEach(() => {
 });
 
 describe("create-version config", () => {
+  it("should run the default ci checks with the project's package manager", () => {
+    const config = resolveCreateVersionConfig(
+      { changelog: { audience: "quien usa la app" } },
+      { packageScripts: { ci: "bun test" }, commands: describeProjectCommands("bun") }
+    );
+
+    expect(config.checks).toEqual(["bun run ci"]);
+    expect(config.commands.createVersion).toBe("bun run create-version");
+  });
+
+  it("should detect bun from packageManager when loading the configuration", async () => {
+    const repositoryRoot = mkdtempSync(path.join(os.tmpdir(), "beez-rp-config-bun-"));
+    temporaryDirectories.push(repositoryRoot);
+    writeFileSync(path.join(repositoryRoot, "package.json"), JSON.stringify({ name: "app", packageManager: "bun@1.3.11", scripts: { ci: "bun test" } }));
+    writeFileSync(path.join(repositoryRoot, "beez-rp.config.mjs"), 'export default { changelog: { audience: "quien usa la app" } };');
+
+    const config = await loadCreateVersionConfig(repositoryRoot);
+
+    expect(config.checks).toEqual(["bun run ci"]);
+    expect(config.commands.packageManager).toBe("bun");
+  });
+
   it("should fill defaults and derive npm tracking from the npm publisher", () => {
     const config = resolveCreateVersionConfig({ changelog: { audience: "quien usa la app" }, publish: "npm" });
 

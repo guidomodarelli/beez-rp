@@ -4,6 +4,8 @@
  * @module constants/create-version
  */
 
+import { DEFAULT_CREATE_VERSION_COMMAND } from "./package-manager.js";
+
 /** Branch that receives releases. */
 export const MAIN_BRANCH = "main";
 
@@ -94,11 +96,27 @@ export const NPM_WRITE_ACCESS_UNVERIFIED_NOTE = "permiso de escritura del token 
 export const NPM_READ_ONLY_TOKEN_NOTE =
   "El token puede ser read-only o granular sin permiso de escritura sobre el paquete (npm no permite verificarlo antes de publicar): revisalo en npm → Access Tokens.";
 
-/** Next action after fixing the npm credentials reported by the diagnosis. */
-export const NPM_AUTH_RERUN_ACTION = "volvé a correr pnpm create-version";
+/**
+ * Next action after fixing the npm credentials reported by the diagnosis.
+ *
+ * @param {string} createVersionCommand - How the project runs create-version (`pnpm create-version`, `bun run create-version`…).
+ * @returns {string} Spanish next action.
+ */
+export const buildNpmAuthRerunAction = (createVersionCommand) => `volvé a correr ${createVersionCommand}`;
 
-/** Next action after fixing the npm credentials once `npm publish` failed. */
-export const NPM_PUBLISH_RETRY_ACTION = "corré pnpm create-version para reintentar solo la publicación";
+/**
+ * Next action after fixing the npm credentials once `npm publish` failed.
+ *
+ * @param {string} createVersionCommand - How the project runs create-version.
+ * @returns {string} Spanish next action.
+ */
+export const buildNpmPublishRetryAction = (createVersionCommand) => `corré ${createVersionCommand} para reintentar solo la publicación`;
+
+/** {@link buildNpmAuthRerunAction} of a pnpm project. */
+export const NPM_AUTH_RERUN_ACTION = buildNpmAuthRerunAction(DEFAULT_CREATE_VERSION_COMMAND);
+
+/** {@link buildNpmPublishRetryAction} of a pnpm project. */
+export const NPM_PUBLISH_RETRY_ACTION = buildNpmPublishRetryAction(DEFAULT_CREATE_VERSION_COMMAND);
 
 /**
  * Option that keeps the plain text output of `npm whoami` and `npm owner ls` even when the project
@@ -181,7 +199,7 @@ export const RELEASE_REGISTRY = Object.freeze({
 /** `package.json` script run as the release checks when the configuration does not set `checks`. */
 export const DEFAULT_CHECKS_SCRIPT = "ci";
 
-/** Command line of the default release checks. */
+/** Command line of the default release checks in a pnpm project (other package managers run `<pm> run ci`). */
 export const DEFAULT_CHECKS_COMMAND = `pnpm run ${DEFAULT_CHECKS_SCRIPT}`;
 
 /** Built-in publisher selected with `publish: "npm"`. */
@@ -422,8 +440,15 @@ export const SUMMARY_VERSION_PLACEHOLDER = "{version}";
 /**
  * Shown when syncing `main` brought new commits: the run ends (exit code 0, it is not a failure)
  * so the next one loads the updated configuration and diagnoses again.
+ *
+ * @param {string} createVersionCommand - How the project runs create-version.
+ * @returns {string} Spanish message.
  */
-export const MAIN_SYNCED_RESTART_MESSAGE = `${MAIN_BRANCH} se actualizó desde origin: volvé a correr pnpm create-version para diagnosticar con el código y la configuración nuevos.`;
+export const buildMainSyncedRestartMessage = (createVersionCommand) =>
+  `${MAIN_BRANCH} se actualizó desde origin: volvé a correr ${createVersionCommand} para diagnosticar con el código y la configuración nuevos.`;
+
+/** {@link buildMainSyncedRestartMessage} of a pnpm project. */
+export const MAIN_SYNCED_RESTART_MESSAGE = buildMainSyncedRestartMessage(DEFAULT_CREATE_VERSION_COMMAND);
 
 /** Exit code of a release stopped by a failed step, invalid arguments or configuration. */
 export const FAILURE_EXIT_CODE = 1;

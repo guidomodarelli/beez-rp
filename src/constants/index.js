@@ -9,6 +9,7 @@ export * from "./changelog.js";
 export * from "./changelog-ai.js";
 export * from "./cli.js";
 export * from "./guard-publish.js";
+export * from "./package-manager.js";
 export * from "./terminal-ui.js";
 export * from "./versions.js";
 export * from "./create-version.js";

@@ -22,7 +22,6 @@ import { parseArgs } from "node:util";
 import { CHANGE_TYPES, CHANGELOG_FILE, UNRELEASED_HEADING } from "../constants/changelog.js";
 import {
   CREATE_VERSION_FLAG,
-  DEFAULT_CHECKS_COMMAND,
   DEFAULT_CHECKS_SCRIPT,
   MAIN_BRANCH,
   MAX_LISTED_ITEMS,
@@ -38,6 +37,7 @@ import {
 } from "../constants/create-version.js";
 import { RELEASE_TYPE } from "../constants/versions.js";
 import { compareReleaseVersions, findHighestStableVersion, isReleaseCommitSubject, isStableReleaseVersion, isStableVersionAbove, toReleaseTag } from "../versions.js";
+import { DEFAULT_PROJECT_COMMANDS } from "../package-manager.js";
 import { describeNpmAuthProblem, describeNpmFirstPublicationWarning } from "./npm-auth.js";
 
 /**
@@ -70,9 +70,11 @@ import { describeNpmAuthProblem, describeNpmFirstPublicationWarning } from "./np
  *   migrations: MigrationCheck | null,
  *   changelog: { exists: boolean, entryCount: number, unknownSections: string[] },
  * }} ReleaseState
- * @typedef {{ checks: boolean, checksMissing?: boolean, prepare: boolean, publish: boolean, publishTitle: string }} ReleaseCapabilities
+ * @typedef {import("../package-manager.js").ProjectCommands} ProjectCommands
+ * @typedef {{ checks: boolean, checksMissing?: boolean, prepare: boolean, publish: boolean, publishTitle: string, commands?: ProjectCommands }} ReleaseCapabilities
  *   `checksMissing` means the project configures no checks, has no `ci` script and did not skip
- *   them with `checks: false`: a new release is blocked.
+ *   them with `checks: false`: a new release is blocked. `commands` are the project's package
+ *   manager commands quoted by every hint (pnpm when omitted).
  * @typedef {{ id: string, title: string, detail?: string }} ReleasePlanStep
  * @typedef {{ title: string, details: string[] }} ReleaseBlocker
  * @typedef {{ mode: string, steps: ReleasePlanStep[], blockers: ReleaseBlocker[], warnings: string[], pendingVersion: string | null }} ReleasePlan
@@ -84,9 +86,16 @@ import { describeNpmAuthProblem, describeNpmFirstPublicationWarning } from "./np
  */
 
 /** Capabilities of a project without checks, preparation or publication. */
-export const DEFAULT_CAPABILITIES = Object.freeze({ checks: false, checksMissing: false, prepare: false, publish: false, publishTitle: "Publicar el release" });
+export const DEFAULT_CAPABILITIES = Object.freeze({
+  checks: false,
+  checksMissing: false,
+  prepare: false,
+  publish: false,
+  publishTitle: "Publicar el release",
+  commands: DEFAULT_PROJECT_COMMANDS,
+});
 
-/** Usage printed by `create-version --help`. */
+/** Usage printed by `create-version --help` in a pnpm project. */
 export const RELEASE_USAGE = [
   "Uso: pnpm create-version [opciones]",
   "",
@@ -97,6 +106,17 @@ export const RELEASE_USAGE = [
   "  --ignore-local-changes     Publica aunque haya cambios sin commitear: se apartan (git stash) y se restauran al final.",
   "  --help                     Muestra esta ayuda.",
 ].join("\n");
+
+/**
+ * Builds the usage printed by `create-version --help` for the project's package manager.
+ *
+ * @param {ProjectCommands} [commands] - Project commands (pnpm when omitted).
+ * @returns {string} Usage.
+ */
+export function buildReleaseUsage(commands = DEFAULT_PROJECT_COMMANDS) {
+  const [, ...options] = RELEASE_USAGE.split("\n");
+  return [`Uso: ${commands.createVersion} [opciones]`, ...options].join("\n");
+}
 
 /**
  * Parses the command-line arguments of `create-version`.
@@ -154,9 +174,10 @@ export function parseReleaseArguments(argv) {
  * @param {FeatureBranchSnapshot} branch - Branch snapshot.
  * @param {PullRequestSnapshot | null} pullRequest - Pull request of the branch.
  * @param {string | null} githubError - Why the pull request could not be read.
+ * @param {ProjectCommands} [commands] - Project commands quoted by the hints (pnpm when omitted).
  * @returns {string[]} Spanish lines, most urgent first.
  */
-export function describeFeatureBranchGaps(branch, pullRequest, githubError) {
+export function describeFeatureBranchGaps(branch, pullRequest, githubError, commands = DEFAULT_PROJECT_COMMANDS) {
   if (pullRequest?.state === PULL_REQUEST_STATE.merged && branch.headSha === pullRequest.headRefOid) {
     return [`El PR #${pullRequest.number} ya está mergeado: hacé git switch ${MAIN_BRANCH}.`];
   }
@@ -184,7 +205,7 @@ export function describeFeatureBranchGaps(branch, pullRequest, githubError) {
     gaps.push(`Falta abrir el PR contra ${MAIN_BRANCH}: gh pr create --fill.`);
   }
 
-  gaps.push(`Después hacé git switch ${MAIN_BRANCH} y corré pnpm create-version.`);
+  gaps.push(`Después hacé git switch ${MAIN_BRANCH} y corré ${commands.createVersion}.`);
 
   return gaps;
 }
@@ -196,14 +217,15 @@ export function describeFeatureBranchGaps(branch, pullRequest, githubError) {
  * not the connection. A missing token never reached the registry, so it does not explain the lookup.
  *
  * @param {NpmAuthCheck | null | undefined} npmAuth - Credential check, when it ran.
+ * @param {ProjectCommands} commands - Project commands quoted by the fix.
  * @returns {ReleaseBlocker | null} Credential blocker, or `null` to keep the generic lookup blocker.
  */
-function describeRejectedNpmCredential(npmAuth) {
+function describeRejectedNpmCredential(npmAuth, commands) {
   if (!npmAuth || npmAuth.status === NPM_AUTH_STATUS.missingToken) {
     return null;
   }
 
-  return describeNpmAuthProblem(npmAuth);
+  return describeNpmAuthProblem(npmAuth, commands);
 }
 
 /**
@@ -211,15 +233,16 @@ function describeRejectedNpmCredential(npmAuth) {
  *
  * @param {ReleaseState} state - Snapshot.
  * @param {boolean} ignoreLocalChanges - Whether uncommitted changes are set aside instead of blocking.
+ * @param {ProjectCommands} commands - Project commands quoted by the hints.
  * @returns {ReleaseBlocker[]} Blockers, most urgent first.
  */
-function findBlockers(state, ignoreLocalChanges) {
+function findBlockers(state, ignoreLocalChanges, commands) {
   if (!state.currentBranch && !findDetachedReleaseVersion(state)) {
     return [
       {
         title: "HEAD está desacoplado (detached)",
         details: [
-          `Hacé git switch ${MAIN_BRANCH} y volvé a correr pnpm create-version.`,
+          `Hacé git switch ${MAIN_BRANCH} y volvé a correr ${commands.createVersion}.`,
           "Desacoplado solo se puede publicar un release que falta en npm: HEAD tiene que ser el commit X.Y.Z de su tag vX.Y.Z.",
         ],
       },
@@ -233,8 +256,8 @@ function findBlockers(state, ignoreLocalChanges) {
     blockers.push({
       title: `Estás en ${state.currentBranch}: los releases salen solo desde ${MAIN_BRANCH}`,
       details: state.branch
-        ? describeFeatureBranchGaps(state.branch, state.pullRequest ?? null, state.githubError ?? null)
-        : [`Hacé git switch ${MAIN_BRANCH} y volvé a correr pnpm create-version.`],
+        ? describeFeatureBranchGaps(state.branch, state.pullRequest ?? null, state.githubError ?? null, commands)
+        : [`Hacé git switch ${MAIN_BRANCH} y volvé a correr ${commands.createVersion}.`],
     });
   }
 
@@ -247,16 +270,16 @@ function findBlockers(state, ignoreLocalChanges) {
       title: `Hay ${blockingChanges.length} archivo(s) sin commitear`,
       details: [
         ...blockingChanges.slice(0, MAX_LISTED_ITEMS),
-        `Commitealos en una rama (o git stash) y volvé a correr pnpm create-version, o corré pnpm create-version --${CREATE_VERSION_FLAG.ignoreLocalChanges} para apartarlos durante el release.`,
+        `Commitealos en una rama (o git stash) y volvé a correr ${commands.createVersion}, o corré ${commands.createVersion} --${CREATE_VERSION_FLAG.ignoreLocalChanges} para apartarlos durante el release.`,
       ],
     });
   }
 
   if (state.npm && state.npm.status !== NPM_LOOKUP_STATUS.ok) {
     blockers.push(
-      describeRejectedNpmCredential(state.npmAuth) ?? {
+      describeRejectedNpmCredential(state.npmAuth, commands) ?? {
         title: "No se pudo consultar npm",
-        details: [`${state.npm.reason ?? "npm no respondió"}.`, "Revisá la conexión y volvé a correr pnpm create-version."],
+        details: [`${state.npm.reason ?? "npm no respondió"}.`, `Revisá la conexión y volvé a correr ${commands.createVersion}.`],
       }
     );
   }
@@ -317,9 +340,10 @@ function warnAboutSetAsideChanges(plan, state, ignoreLocalChanges) {
  *
  * @param {ReleasePlan} plan - Resume plan (from `main` or from a detached release tag).
  * @param {ReleaseState} state - Snapshot.
+ * @param {ProjectCommands} commands - Project commands quoted by the hints.
  * @returns {ReleasePlan} The same plan, or a blocked plan when `CHANGELOG.md` is dirty.
  */
-function requireCleanChangelog(plan, state) {
+function requireCleanChangelog(plan, state, commands) {
   const changelogChanges = state.workingTreeChanges.filter(isChangelogChange);
 
   if (plan.mode !== RELEASE_MODE.resume || changelogChanges.length === 0) {
@@ -334,7 +358,7 @@ function requireCleanChangelog(plan, state) {
         title: `${CHANGELOG_FILE} tiene cambios sin commitear y el release ${plan.pendingVersion} ya está commiteado`,
         details: [
           ...changelogChanges,
-          `Retomar un release usa el ${CHANGELOG_FILE} de su commit: descartá los cambios (git restore ${CHANGELOG_FILE}) o guardalos (git stash) y volvé a correr pnpm create-version.`,
+          `Retomar un release usa el ${CHANGELOG_FILE} de su commit: descartá los cambios (git restore ${CHANGELOG_FILE}) o guardalos (git stash) y volvé a correr ${commands.createVersion}.`,
         ],
       },
     ],
@@ -434,11 +458,12 @@ function findDetachedReleaseVersion(state) {
  *
  * @param {string} version - Version found by {@link findDetachedReleaseVersion}.
  * @param {ReleaseState} state - Snapshot.
+ * @param {ProjectCommands} commands - Project commands quoted by the hints.
  * @returns {ReleaseBlocker[]} Blockers, empty when the tag can be published.
  */
-function findDetachedReleaseBlockers(version, state) {
+function findDetachedReleaseBlockers(version, state, commands) {
   const tag = toReleaseTag(version);
-  const returnToMain = `Volvé con git switch ${MAIN_BRANCH} y corré pnpm create-version, que retoma el push de ${MAIN_BRANCH} y ${tag} antes de publicar.`;
+  const returnToMain = `Volvé con git switch ${MAIN_BRANCH} y corré ${commands.createVersion}, que retoma el push de ${MAIN_BRANCH} y ${tag} antes de publicar.`;
   /** @type {ReleaseBlocker[]} */
   const blockers = [];
 
@@ -497,7 +522,7 @@ function planDetachedResume(version, capabilities, state) {
     };
   }
 
-  const blockers = findDetachedReleaseBlockers(version, state);
+  const blockers = findDetachedReleaseBlockers(version, state, capabilities.commands ?? DEFAULT_PROJECT_COMMANDS);
 
   if (blockers.length > 0) {
     return { mode: RELEASE_MODE.blocked, steps: [], blockers, warnings: [], pendingVersion: null };
@@ -556,21 +581,22 @@ function findUnpublishedLastRelease(state) {
  * Explains why no new release is planned while the last one is missing from npm, and how to publish it.
  *
  * @param {UnpublishedRelease} unpublished - Unpublished release.
+ * @param {ProjectCommands} commands - Project commands quoted by the hints.
  * @returns {ReleaseBlocker} Blocker.
  */
-function unpublishedReleaseBlocker({ version, latestPublished, resumable }) {
+function unpublishedReleaseBlocker({ version, latestPublished, resumable }, commands) {
   const tag = toReleaseTag(version);
   const published = latestPublished ? `npm llega hasta ${latestPublished}` : "npm no tiene ninguna versión publicada";
   const howToPublish = resumable
     ? [
-        `Para publicarla: git switch --detach ${tag} y pnpm create-version, que retoma solo la preparación y la publicación desde el tag (sin tocar ${MAIN_BRANCH}).`,
-        `Después volvé con git switch ${MAIN_BRANCH} y corré pnpm create-version para el release nuevo.`,
+        `Para publicarla: git switch --detach ${tag} y ${commands.createVersion}, que retoma solo la preparación y la publicación desde el tag (sin tocar ${MAIN_BRANCH}).`,
+        `Después volvé con git switch ${MAIN_BRANCH} y corré ${commands.createVersion} para el release nuevo.`,
       ]
     : [`Su commit no es un commit ${version} con el tag ${tag}, así que create-version no puede retomarlo: publicala a mano desde ese commit.`];
 
   return {
     title: `La versión ${version} (último release, tag ${tag}) no está en npm`,
-    details: [`${published}; un release nuevo la saltearía.`, ...howToPublish, "Para saltearla a propósito: pnpm create-version --skip-unpublished."],
+    details: [`${published}; un release nuevo la saltearía.`, ...howToPublish, `Para saltearla a propósito: ${commands.createVersion} --skip-unpublished.`],
   };
 }
 
@@ -591,9 +617,10 @@ function skippedReleaseWarning({ version }) {
  * @param {ReleasePlan} resume - Plan built by {@link planResume}.
  * @param {ReleaseState} state - Snapshot.
  * @param {boolean} skipUnpublished - Whether `--skip-unpublished` was chosen.
+ * @param {ProjectCommands} commands - Project commands quoted by the hints.
  * @returns {ReleasePlan} The same plan, blocked, or with a warning when the release is skipped.
  */
-function checkUnpublishedBeforeResume(resume, state, skipUnpublished) {
+function checkUnpublishedBeforeResume(resume, state, skipUnpublished, commands) {
   const unpublished = resume.mode === RELEASE_MODE.resume ? findUnpublishedLastRelease(state) : null;
 
   if (!unpublished || unpublished.version === resume.pendingVersion) {
@@ -602,7 +629,7 @@ function checkUnpublishedBeforeResume(resume, state, skipUnpublished) {
 
   return skipUnpublished
     ? { ...resume, warnings: [...resume.warnings, skippedReleaseWarning(unpublished)] }
-    : { mode: RELEASE_MODE.blocked, steps: [], blockers: [unpublishedReleaseBlocker(unpublished)], warnings: [], pendingVersion: null };
+    : { mode: RELEASE_MODE.blocked, steps: [], blockers: [unpublishedReleaseBlocker(unpublished, commands)], warnings: [], pendingVersion: null };
 }
 
 /**
@@ -611,14 +638,15 @@ function checkUnpublishedBeforeResume(resume, state, skipUnpublished) {
  *
  * @param {ReleasePlan} plan - Plan built from the rest of the snapshot.
  * @param {NpmAuthCheck | null | undefined} npmAuth - Credential check, when the project publishes to npm.
+ * @param {ProjectCommands} commands - Project commands quoted by the fix.
  * @returns {ReleasePlan} The same plan, blocked or with a warning when needed.
  */
-function applyNpmAuth(plan, npmAuth) {
+function applyNpmAuth(plan, npmAuth, commands) {
   if (!npmAuth || !plan.steps.some((planStep) => planStep.id === RELEASE_STEP.publishRelease)) {
     return plan;
   }
 
-  const problem = describeNpmAuthProblem(npmAuth);
+  const problem = describeNpmAuthProblem(npmAuth, commands);
 
   if (problem) {
     return { mode: RELEASE_MODE.blocked, steps: [], blockers: [problem], warnings: [], pendingVersion: null };
@@ -632,14 +660,21 @@ function applyNpmAuth(plan, npmAuth) {
   return firstPublicationWarning ? { ...plan, warnings: [...plan.warnings, firstPublicationWarning] } : plan;
 }
 
-/** Stops a new release that nothing would validate before the version is touched. */
-const MISSING_CHECKS_BLOCKER = Object.freeze({
-  title: "El proyecto no valida nada antes de publicar",
-  details: [
-    `Agregá un script ${DEFAULT_CHECKS_SCRIPT} en package.json (se corre ${DEFAULT_CHECKS_COMMAND}) o checks en beez-rp.config.(m)js.`,
-    "Para saltear la validación a propósito: checks: false.",
-  ],
-});
+/**
+ * Stops a new release that nothing would validate before the version is touched.
+ *
+ * @param {ProjectCommands} commands - Project commands quoted by the hints.
+ * @returns {ReleaseBlocker} Blocker.
+ */
+function missingChecksBlocker(commands) {
+  return {
+    title: "El proyecto no valida nada antes de publicar",
+    details: [
+      `Agregá un script ${DEFAULT_CHECKS_SCRIPT} en package.json (se corre ${commands.runScript(DEFAULT_CHECKS_SCRIPT)}) o checks en beez-rp.config.(m)js.`,
+      "Para saltear la validación a propósito: checks: false.",
+    ],
+  };
+}
 
 /**
  * Decides what is still missing to publish a release from `main` (or, from a detached `HEAD` on
@@ -651,7 +686,8 @@ const MISSING_CHECKS_BLOCKER = Object.freeze({
  * @returns {ReleasePlan} Ordered plan.
  */
 export function buildReleasePlan(state, capabilities = DEFAULT_CAPABILITIES, planOptions = {}) {
-  return warnAboutSetAsideChanges(applyNpmAuth(planRelease(state, capabilities, planOptions), state.npmAuth), state, planOptions.ignoreLocalChanges ?? false);
+  const plan = planRelease(state, capabilities, planOptions);
+  return warnAboutSetAsideChanges(applyNpmAuth(plan, state.npmAuth, capabilities.commands ?? DEFAULT_PROJECT_COMMANDS), state, planOptions.ignoreLocalChanges ?? false);
 }
 
 /**
@@ -663,7 +699,8 @@ export function buildReleasePlan(state, capabilities = DEFAULT_CAPABILITIES, pla
  * @returns {ReleasePlan} Ordered plan.
  */
 function planRelease(state, capabilities, { skipUnpublished = false, ignoreLocalChanges = false }) {
-  const blockers = findBlockers(state, ignoreLocalChanges);
+  const commands = capabilities.commands ?? DEFAULT_PROJECT_COMMANDS;
+  const blockers = findBlockers(state, ignoreLocalChanges, commands);
 
   if (blockers.length > 0) {
     return { mode: RELEASE_MODE.blocked, steps: [], blockers, warnings: [], pendingVersion: null };
@@ -673,14 +710,14 @@ function planRelease(state, capabilities, { skipUnpublished = false, ignoreLocal
 
   if (detachedVersion) {
     const detachedPlan = planDetachedResume(detachedVersion, capabilities, state);
-    return ignoreLocalChanges ? detachedPlan : requireCleanChangelog(detachedPlan, state);
+    return ignoreLocalChanges ? detachedPlan : requireCleanChangelog(detachedPlan, state, commands);
   }
 
   const resume = planResume(state, capabilities);
 
   if (resume) {
-    const resumePlan = checkUnpublishedBeforeResume(resume, state, skipUnpublished);
-    return ignoreLocalChanges ? resumePlan : requireCleanChangelog(resumePlan, state);
+    const resumePlan = checkUnpublishedBeforeResume(resume, state, skipUnpublished, commands);
+    return ignoreLocalChanges ? resumePlan : requireCleanChangelog(resumePlan, state, commands);
   }
 
   if (state.main.aheadCommits.length > 0) {
@@ -690,7 +727,7 @@ function planRelease(state, capabilities, { skipUnpublished = false, ignoreLocal
   const unpublished = findUnpublishedLastRelease(state);
 
   if (unpublished && !skipUnpublished) {
-    return { mode: RELEASE_MODE.blocked, steps: [], blockers: [unpublishedReleaseBlocker(unpublished)], warnings: [], pendingVersion: null };
+    return { mode: RELEASE_MODE.blocked, steps: [], blockers: [unpublishedReleaseBlocker(unpublished, commands)], warnings: [], pendingVersion: null };
   }
 
   if (state.unreleasedCommits.length === 0) {
@@ -704,7 +741,7 @@ function planRelease(state, capabilities, { skipUnpublished = false, ignoreLocal
       blockers: [
         {
           title: `CHANGELOG.md ${UNRELEASED_HEADING} usa secciones no válidas: ${state.changelog.unknownSections.join(", ")}`,
-          details: [`Usá solo ${CHANGE_TYPES.map((type) => `### ${type}`).join(", ")} y volvé a correr pnpm create-version.`],
+          details: [`Usá solo ${CHANGE_TYPES.map((type) => `### ${type}`).join(", ")} y volvé a correr ${commands.createVersion}.`],
         },
       ],
       warnings: [],
@@ -723,13 +760,13 @@ function planRelease(state, capabilities, { skipUnpublished = false, ignoreLocal
     steps.push({
       id: RELEASE_STEP.syncMain,
       title: `Actualizar ${MAIN_BRANCH} desde origin`,
-      detail: `${state.main.behindCount} commit(s) nuevos. Después hay que volver a correr pnpm create-version, que diagnostica con el código nuevo.`,
+      detail: `${state.main.behindCount} commit(s) nuevos. Después hay que volver a correr ${commands.createVersion}, que diagnostica con el código nuevo.`,
     });
     return { mode: RELEASE_MODE.newRelease, steps, blockers: [], warnings, pendingVersion: null };
   }
 
   if (capabilities.checksMissing) {
-    return { mode: RELEASE_MODE.blocked, steps: [], blockers: [MISSING_CHECKS_BLOCKER], warnings: [], pendingVersion: null };
+    return { mode: RELEASE_MODE.blocked, steps: [], blockers: [missingChecksBlocker(commands)], warnings: [], pendingVersion: null };
   }
 
   if (state.migrations?.status === MIGRATION_STATUS.pending) {
