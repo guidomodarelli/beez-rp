@@ -449,6 +449,42 @@ describe("beez-rp create-version command", () => {
   );
 
   it(
+    "should write the new version into the marked versionFiles within the release commit, and stop before bumping when a file has no marker",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      mkdirSync(path.join(repositoryRoot, "src"));
+      writeFileSync(path.join(repositoryRoot, "src", "cli.js"), 'program.version("0.1.0"); // x-release-please-version\nconst untouched = "0.1.0";\n');
+      writeFileSync(path.join(repositoryRoot, "src", "plain.js"), 'export const VERSION = "0.1.0";\n');
+      writeFileSync(
+        path.join(repositoryRoot, "beez-rp.config.js"),
+        ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", '  versionFiles: ["src/cli.js", "src/plain.js"],', "};", ""].join("\n")
+      );
+      runGit(["add", "-A"], repositoryRoot);
+      runGit(["commit", "--quiet", "-m", "chore: configure releases"], repositoryRoot);
+      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+
+      const blocked = runCli(repositoryRoot, ["--bump", "minor"]);
+      expect(blocked.status, blocked.output).toBe(1);
+      expect(flattenOutput(blocked.output)).toContain("src/plain.js (versionFiles) no tiene ninguna versión marcada para actualizar.");
+      expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+      expect(JSON.parse(readFileSync(path.join(repositoryRoot, "package.json"), "utf8")).version).toBe("0.1.0");
+
+      writeFileSync(path.join(repositoryRoot, "src", "plain.js"), 'export const VERSION = "0.1.0"; // beez-rp-version\n');
+      runGit(["add", "-A"], repositoryRoot);
+      runGit(["commit", "--quiet", "-m", "chore: mark the version"], repositoryRoot);
+      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+
+      const release = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(release.status, release.output).toBe(0);
+      expect(runGit(["show", "--name-only", "--format=", "main"], remoteRoot).split("\n").toSorted()).toEqual(["CHANGELOG.md", "package.json", "src/cli.js", "src/plain.js"]);
+      expect(runGit(["show", "main:src/cli.js"], remoteRoot)).toBe('program.version("0.2.0"); // x-release-please-version\nconst untouched = "0.1.0";');
+      expect(runGit(["show", "main:src/plain.js"], remoteRoot)).toBe('export const VERSION = "0.2.0"; // beez-rp-version');
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
     "should require --bump or --set-version without an interactive terminal, since the version prompt has no default",
     () => {
       const { repositoryRoot, remoteRoot } = createReleasedRepository();

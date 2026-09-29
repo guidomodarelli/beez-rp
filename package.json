@@ -54,6 +54,10 @@
       "types": "./types/package-manager.d.ts",
       "default": "./src/package-manager.js"
     },
+    "./version-files": {
+      "types": "./types/version-files.d.ts",
+      "default": "./src/version-files.js"
+    },
     "./create-version": {
       "types": "./types/create-version/index.d.ts",
       "default": "./src/create-version/index.js"

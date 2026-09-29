@@ -17,6 +17,7 @@ Proceso de release compartido por los proyectos Beez (beez-ui, TuTribu, Control 
 | `beez-rp/changelog` | Lectura y release del bloque `## [Unreleased]` de `CHANGELOG.md` (Keep a Changelog). |
 | `beez-rp/changelog-ai` | Prompt e invocación de Codex para completar `[Unreleased]` vacío. |
 | `beez-rp/guard-publish` | `decidePublishGuard(userAgent)` del `prepublishOnly` que bloquea publicaciones con pnpm, yarn o bun. |
+| `beez-rp/version-files` | `updateVersionMarkers(content, version)`: reescribe las versiones de las líneas marcadas de `versionFiles`. |
 | `beez-rp/package-manager` | `detectPackageManager(root)` (pnpm, bun, npm o yarn) y `describeProjectCommands(packageManager)`: los comandos que beez-rp corre y muestra en ese proyecto. |
 | `beez-rp/terminal-ui` | Cajas, filas, banner, spinner y selector interactivo sin dependencias. |
 | `beez-rp/create-version` | Comando compartido de release: `runCreateVersion`, el planificador puro `buildReleasePlan`, el lector de estado y los tipos de `beez-rp.config.js`. |
@@ -111,10 +112,17 @@ export default {
   publish: "npm",                               // npm publish con NPM_TOKEN, o una función
   artifact: "releases/{version}-{sha256}/{name}-{version}.tgz", // con "npm": publica ese tarball verificado
   summary: ["Vercel buildea {version}."],       // líneas extra del resumen final
+  versionFiles: ["src/cli.ts"],                 // otros archivos con la versión, en el commit de release
 };
 ```
 
 Solo `changelog.audience` es obligatorio. Sin `checks`, un release nuevo corre `<package manager> run ci` (`pnpm run ci`, `bun run ci`…) si el `package.json` declara el script `ci`; si no lo declara, el plan se bloquea para no publicar sin validar. `checks: false` saltea la validación a propósito (por ejemplo, cuando `prepare` ya corre lint, typecheck, tests y build) y una lista vacía no es válida. Los hooks (`migrations.check`, `migrations.apply`, `prepare`, `publish`) reciben `{ repositoryRoot, version, git, run, print, fail }`: `git` lee Git, `run("pnpm x")` corre un comando visible y devuelve su exit code, y `fail(mensaje, qué hacer)` corta el paso con una explicación. El config no necesita importar `beez-rp`.
+
+`versionFiles` lista archivos (relativos a la raíz) que también llevan la versión, como el `--version` de una CLI o una constante. En el commit de release solo cambian sus líneas marcadas: una línea con el comentario `beez-rp-version`, o todas las líneas entre `beez-rp-start-version` y `beez-rp-end`. También se aceptan los marcadores de release-please (`x-release-please-version`, `x-release-please-start-version` … `x-release-please-end`), así que un proyecto que viene de release-please no toca sus archivos. Si un archivo no existe o no tiene ninguna versión marcada, el release se corta antes de tocar la versión (release-please lo ignoraría en silencio).
+
+```ts
+program.version("1.4.0"); // beez-rp-version
+```
 
 `migrations.check` devuelve `{ status: "up-to-date" | "pending" | "unknown", pending, target, reason }`; después de `apply`, el comando vuelve a llamar a `check` y falla si siguen pendientes. `publish: "npm"` toma `NPM_TOKEN` de una sola búsqueda, compartida por el diagnóstico, `npm view` y la publicación (ver [Token de npm](#token-de-npm)). No hace falta `.npmrc`: el comando escribe una config de npm temporal fuera del repo que asocia `${NPM_TOKEN}` al registry donde realmente se publica, resuelto como npm: `publishConfig["@scope:registry"]` si el paquete tiene ese scope, si no `publishConfig.registry` y, si el `package.json` no declara ninguno, lo que devuelve `npm config get @scope:registry` (paquete con scope) o `npm config get registry` en la raíz del repo, que incluye el `.npmrc` del proyecto, las variables `npm_config_*` y la config global (como la publicación, no lee `~/.npmrc`, que se reemplaza por la config temporal); tiene que ser una URL http(s) válida o no se publica. Con `NPM_TOKEN` disponible, el diagnóstico también consulta `npm view` con esa config temporal, así que funciona con paquetes privados; sin token consulta sin autenticar. El resumen final enlaza a npmjs.com solo si el registry es `https://registry.npmjs.org/`; si no, muestra `Registro: <url>` con el paquete y la versión. Solo guarda esa referencia: npm la expande, el token nunca queda en disco ni en la línea de comandos, y la config se borra al terminar. npm hereda la terminal, así que la confirmación 2FA (navegador o código) funciona igual.
 

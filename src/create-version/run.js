@@ -66,6 +66,7 @@ import {
   select,
   startSpinner,
 } from "../terminal-ui.js";
+import { updateVersionMarkers } from "../version-files.js";
 import { listNextVersions, resolveRequestedVersion, suggestReleaseType, toReleaseTag } from "../versions.js";
 import {
   expandArtifactPattern,
@@ -569,6 +570,36 @@ async function runChecksStep(context) {
 }
 
 /**
+ * Computes the new content of every configured `versionFiles` entry, before anything is written,
+ * so a missing file or a file without markers stops the release with the version untouched.
+ *
+ * @param {ReleaseContext} context - Release context.
+ * @param {string} version - Version being released.
+ * @returns {{ filePath: string, content: string }[]} Files to write, relative to the root.
+ * @throws {ReleaseStepError} When a file is missing or none of its lines is marked.
+ */
+function prepareVersionFileUpdates(context, version) {
+  return context.config.versionFiles.map((filePath) => {
+    const absolutePath = path.join(context.repositoryRoot, filePath);
+
+    if (!existsSync(absolutePath)) {
+      throw new ReleaseStepError(`${filePath} (versionFiles) no existe.`, `Corregí versionFiles en beez-rp.config.(m)js y volvé a correr ${context.commands.createVersion}; no se tocó la versión.`);
+    }
+
+    const update = updateVersionMarkers(readFileSync(absolutePath, "utf8"), version);
+
+    if (update.replacements === 0) {
+      throw new ReleaseStepError(
+        `${filePath} (versionFiles) no tiene ninguna versión marcada para actualizar.`,
+        `Marcá la línea con un comentario beez-rp-version (o x-release-please-version), o el bloque con beez-rp-start-version … beez-rp-end, y volvé a correr ${context.commands.createVersion}; no se tocó la versión.`
+      );
+    }
+
+    return { filePath, content: update.content };
+  });
+}
+
+/**
  * Chooses the next version (flags or prompt), releases the CHANGELOG
  * `[Unreleased]` block and creates the release commit and annotated tag.
  *
@@ -622,17 +653,22 @@ async function bumpVersionStep(context) {
     );
   }
 
+  const versionFileUpdates = prepareVersionFileUpdates(context, nextRelease.version);
   print(renderBox({ title: `CHANGELOG · ${UNRELEASED_HEADING} → [${nextRelease.version}]`, lines: readWorkingUnreleased(context.repositoryRoot).body.split("\n"), tone: BOX_TONE.info }));
   writeFileSync(manifestPath, manifest.replace(PACKAGE_VERSION_FIELD_PATTERN, `$1${nextRelease.version}$2`));
   writeFileSync(changelogPath, releasedChangelog);
+  for (const { filePath, content } of versionFileUpdates) {
+    writeFileSync(path.join(context.repositoryRoot, filePath), content);
+  }
 
   const tag = toReleaseTag(nextRelease.version);
-  await runGitStep(context, ["add", PACKAGE_MANIFEST_FILE, CHANGELOG_FILE], "No se pudo stagear package.json y CHANGELOG.md", "Revisá git status.");
+  const versionFilePaths = versionFileUpdates.map(({ filePath }) => filePath);
+  await runGitStep(context, ["add", PACKAGE_MANIFEST_FILE, CHANGELOG_FILE, ...versionFilePaths], "No se pudo stagear package.json, CHANGELOG.md y versionFiles", "Revisá git status.");
   await runGitStep(
     context,
     ["commit", "--quiet", "-m", nextRelease.version],
     "El commit de versión falló",
-    `Corregí el error, descartá el cambio con git checkout package.json CHANGELOG.md y volvé a correr ${context.commands.createVersion}.`
+    `Corregí el error, descartá el cambio con git checkout -- ${[PACKAGE_MANIFEST_FILE, CHANGELOG_FILE, ...versionFilePaths].join(" ")} y volvé a correr ${context.commands.createVersion}.`
   );
   await runGitStep(context, ["tag", "-a", tag, "-m", nextRelease.version], `No se pudo crear el tag ${tag}`, `Si ya existe, revisalo con git show ${tag}.`);
 

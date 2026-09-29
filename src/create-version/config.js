@@ -58,10 +58,14 @@ import { DEFAULT_PROJECT_COMMANDS, describeProjectCommands, detectPackageManager
  *   publish?: "npm" | ReleaseHook | null,
  *   artifact?: string | null,
  *   summary?: string[],
+ *   versionFiles?: string[],
  * }} CreateVersionConfig
  *   `summary` lines replace `{version}` with the released version. Without `checks`, the release
  *   runs `<package manager> run ci` (pnpm, bun, npm or yarn, detected from `packageManager` or the
  *   lockfile) when `package.json` declares a `ci` script; `false` skips the checks on purpose.
+ *   `versionFiles` lists files (relative to the root) whose marked lines get the new version in the
+ *   release commit: `beez-rp-version` / `x-release-please-version` lines and
+ *   `beez-rp-start-version`…`beez-rp-end` blocks.
  * @typedef {{
  *   projectName: string | null,
  *   changelog: { audience: string, language: "es" | "en" },
@@ -74,6 +78,7 @@ import { DEFAULT_PROJECT_COMMANDS, describeProjectCommands, detectPackageManager
  *   publish: "npm" | ReleaseHook | null,
  *   artifact: string | null,
  *   summary: string[],
+ *   versionFiles: string[],
  *   commands: ProjectCommands,
  * }} ResolvedCreateVersionConfig
  *   `checks` is empty when they are skipped on purpose and `null` when none are configured nor
@@ -232,6 +237,11 @@ export function resolveCreateVersionConfig(rawConfig, { packageScripts = {}, com
     throw invalidField("publishedLabel", "a string");
   }
 
+  const versionFiles = config.versionFiles ?? [];
+  if (!isStringList(versionFiles) || versionFiles.some((filePath) => !isPathInsideRoot(filePath))) {
+    throw invalidField("versionFiles", "a list of file paths relative to the project root, inside it");
+  }
+
   return {
     projectName: /** @type {string | undefined} */ (config.projectName) ?? null,
     changelog: { audience: changelog.audience, language: /** @type {"es" | "en"} */ (language) },
@@ -244,8 +254,19 @@ export function resolveCreateVersionConfig(rawConfig, { packageScripts = {}, com
     publish: /** @type {"npm" | ReleaseHook | null} */ (publish),
     artifact: /** @type {string | null} */ (artifact),
     summary,
+    versionFiles,
     commands,
   };
+}
+
+/**
+ * Tells whether a configured path stays inside the project root: relative, without `..` segments.
+ *
+ * @param {string} filePath - Configured path.
+ * @returns {boolean} Whether it is a relative path that cannot escape the root.
+ */
+function isPathInsideRoot(filePath) {
+  return !path.isAbsolute(filePath) && !filePath.split(/[\\/]/u).includes("..");
 }
 
 /**

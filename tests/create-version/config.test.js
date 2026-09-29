@@ -17,6 +17,16 @@ afterEach(() => {
 });
 
 describe("create-version config", () => {
+  it("should accept versionFiles inside the project root and reject paths that escape it", () => {
+    const base = { changelog: { audience: "equipo" } };
+
+    expect(resolveCreateVersionConfig({ ...base, versionFiles: ["src/cli.ts", "docs/install.md"] }).versionFiles).toEqual(["src/cli.ts", "docs/install.md"]);
+    expect(resolveCreateVersionConfig(base).versionFiles).toEqual([]);
+    for (const versionFiles of [["../outside.ts"], ["src/../../outside.ts"], [path.resolve("absolute.ts")], [""], "src/cli.ts"]) {
+      expect(() => resolveCreateVersionConfig({ ...base, versionFiles })).toThrow(/versionFiles must be a list of file paths relative to the project root/);
+    }
+  });
+
   it("should run the default ci checks with the project's package manager", () => {
     const config = resolveCreateVersionConfig(
       { changelog: { audience: "quien usa la app" } },
