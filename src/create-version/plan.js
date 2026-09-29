@@ -78,7 +78,8 @@ import { describeNpmAuthProblem, describeNpmFirstPublicationWarning } from "./np
  * @typedef {{ id: string, title: string, detail?: string }} ReleasePlanStep
  * @typedef {{ title: string, details: string[] }} ReleaseBlocker
  * @typedef {{ mode: string, steps: ReleasePlanStep[], blockers: ReleaseBlocker[], warnings: string[], pendingVersion: string | null }} ReleasePlan
- * @typedef {{ bump: "patch" | "minor" | "major" | null, setVersion: string | null, dryRun: boolean, skipUnpublished: boolean, ignoreLocalChanges: boolean, help: boolean }} ReleaseOptions
+ * @typedef {{ bump: "patch" | "minor" | "major" | null, setVersion: string | null, dryRun: boolean, skipUnpublished: boolean, ignoreLocalChanges: boolean, acceptSuggested: boolean, help: boolean }} ReleaseOptions
+ *   `acceptSuggested` takes the release type the commits suggest instead of asking.
  * @typedef {{ version: string, latestPublished: string | null, resumable: boolean }} UnpublishedRelease
  * @typedef {{ skipUnpublished?: boolean, ignoreLocalChanges?: boolean }} PlanOptions
  *   `skipUnpublished` plans a new release even when the last release is missing from npm.
@@ -104,6 +105,7 @@ export const RELEASE_USAGE = [
   "  --dry-run                  Diagnostica y muestra el plan sin cambiar nada.",
   "  --skip-unpublished         Crea un release nuevo aunque el último release no esté en npm (lo saltea).",
   "  --ignore-local-changes     Publica aunque haya cambios sin commitear: se apartan (git stash) y se restauran al final.",
+  "  --accept-suggested         Toma la versión sugerida por los commits sin preguntar (en un monorepo, la de cada paquete).",
   "  --help                     Muestra esta ayuda.",
 ].join("\n");
 
@@ -137,6 +139,7 @@ export function parseReleaseArguments(argv) {
         [CREATE_VERSION_FLAG.dryRun]: { type: "boolean", default: false },
         [CREATE_VERSION_FLAG.skipUnpublished]: { type: "boolean", default: false },
         [CREATE_VERSION_FLAG.ignoreLocalChanges]: { type: "boolean", default: false },
+        [CREATE_VERSION_FLAG.acceptSuggested]: { type: "boolean", default: false },
         [CREATE_VERSION_FLAG.help]: { type: "boolean", short: CREATE_VERSION_FLAG.helpShort, default: false },
       },
     }));
@@ -156,6 +159,10 @@ export function parseReleaseArguments(argv) {
     throw new Error("Usá --bump o --set-version, no los dos a la vez.");
   }
 
+  if (values[CREATE_VERSION_FLAG.acceptSuggested] && (bump !== undefined || setVersion !== undefined)) {
+    throw new Error("--accept-suggested elige la versión sugerida: no se combina con --bump ni con --set-version.");
+  }
+
   return {
     bump: /** @type {ReleaseOptions["bump"]} */ (bump ?? null),
     // A typed `v1.2.0` means `1.2.0`; the version rules validate the rest.
@@ -163,6 +170,7 @@ export function parseReleaseArguments(argv) {
     dryRun: Boolean(values[CREATE_VERSION_FLAG.dryRun]),
     skipUnpublished: Boolean(values[CREATE_VERSION_FLAG.skipUnpublished]),
     ignoreLocalChanges: Boolean(values[CREATE_VERSION_FLAG.ignoreLocalChanges]),
+    acceptSuggested: Boolean(values[CREATE_VERSION_FLAG.acceptSuggested]),
     help: Boolean(values[CREATE_VERSION_FLAG.help]),
   };
 }
@@ -373,7 +381,7 @@ function requireCleanChangelog(plan, state, commands) {
  * @param {ReleaseCommit[]} commits - Foreign commits.
  * @returns {ReleaseBlocker} Blocker.
  */
-function foreignCommitsBlocker(commits) {
+export function foreignCommitsBlocker(commits) {
   return {
     title: `${MAIN_BRANCH} local tiene ${commits.length} commit(s) que no están en origin`,
     details: [
@@ -666,7 +674,7 @@ function applyNpmAuth(plan, npmAuth, commands) {
  * @param {ProjectCommands} commands - Project commands quoted by the hints.
  * @returns {ReleaseBlocker} Blocker.
  */
-function missingChecksBlocker(commands) {
+export function missingChecksBlocker(commands) {
   return {
     title: "El proyecto no valida nada antes de publicar",
     details: [

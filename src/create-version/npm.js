@@ -712,14 +712,14 @@ export function buildNpmPublishEnvironment(environment = process.env) {
  * also why its output cannot be parsed, and a failure is explained afterwards
  * with {@link checkNpmPublishAccess}.
  *
- * @param {string} repositoryRoot - Package root.
- * @param {{ authConfigLine: string, artifactPath?: string | null }} publication - Registry credential line from
- *   {@link buildNpmAuthConfigLine}, and the archive relative to the root (already checked with `isSafeArtifactPath`);
- *   without `artifactPath` the working tree is published.
+ * @param {string} repositoryRoot - Repository root, where `NPM_TOKEN` is looked up; also the package root unless `packageRoot` is given.
+ * @param {{ authConfigLine: string, artifactPath?: string | null, packageRoot?: string }} publication - Registry credential
+ *   line from {@link buildNpmAuthConfigLine}, the archive relative to the package root (already checked with
+ *   `isSafeArtifactPath`; without it the working tree is published) and the directory of a workspace package.
  * @returns {Promise<{ exitCode: number, missingToken: boolean }>} npm exit code, or a missing-token result without running npm.
  * @throws {Error} When the temporary config path could break out of its shell quotes.
  */
-export async function publishToNpm(repositoryRoot, { authConfigLine, artifactPath = null }) {
+export async function publishToNpm(repositoryRoot, { authConfigLine, artifactPath = null, packageRoot = repositoryRoot }) {
   const { token } = resolveNpmToken(repositoryRoot);
 
   if (!token) {
@@ -735,8 +735,8 @@ export async function publishToNpm(repositoryRoot, { authConfigLine, artifactPat
     const publishArguments = buildNpmPublishArguments(artifactPath);
     const env = buildNpmTokenEnvironment(token);
     return USES_SHELL_FOR_PACKAGE_MANAGERS
-      ? runInherited(`npm ${publishArguments.join(" ")} --userconfig "${userConfigPath}"`, [], { cwd: repositoryRoot, shell: true, env })
-      : runInherited("npm", [...publishArguments, "--userconfig", userConfigPath], { cwd: repositoryRoot, env });
+      ? runInherited(`npm ${publishArguments.join(" ")} --userconfig "${userConfigPath}"`, [], { cwd: packageRoot, shell: true, env })
+      : runInherited("npm", [...publishArguments, "--userconfig", userConfigPath], { cwd: packageRoot, env });
   });
 
   return { exitCode, missingToken: false };

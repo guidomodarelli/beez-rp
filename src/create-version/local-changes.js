@@ -24,9 +24,9 @@ import { ReleaseStepError } from "./errors.js";
 
 /**
  * @typedef {import("./process.js").GitReader} GitReader
- * @typedef {{ sha: string, keepChangelog: boolean }} SetAsideChanges
+ * @typedef {{ sha: string, keptPaths: string[] }} SetAsideChanges
  *   Stash entry holding the changes, identified by its commit so a later stash does not shift it;
- *   `keepChangelog` when `CHANGELOG.md` stayed in the working tree (the release commits it).
+ *   `keptPaths` stayed in the working tree (the release commits them: its `CHANGELOG.md` files).
  * @typedef {{ restored: true } | { restored: false, reason: string }} LocalChangesRestore
  */
 
@@ -37,27 +37,30 @@ const STASH_REFERENCE_PREFIX = "stash@";
 const RESTORE_DIRECTORY_PREFIX = "beez-rp-local-changes-";
 
 /**
- * Builds the pathspec of the set-aside changes: `CHANGELOG.md` is left out when it stayed in the
- * working tree, because a stash made with a pathspec still records it in its index and tree.
+ * Builds the pathspec of the set-aside changes: the kept files are left out, because a stash made
+ * with a pathspec still records them in its index and tree.
  *
- * @param {boolean} keepChangelog - Whether `CHANGELOG.md` stayed in the working tree.
+ * @param {readonly string[]} keptPaths - Files that stayed in the working tree, relative to the root.
  * @returns {string[]} Pathspec arguments, after `--`.
  */
-function buildPathspec(keepChangelog) {
-  return keepChangelog ? [".", `:(exclude)${CHANGELOG_FILE}`] : ["."];
+function buildPathspec(keptPaths) {
+  return [".", ...keptPaths.map((keptPath) => `:(exclude,literal)${keptPath}`)];
 }
 
 /**
  * Sets the uncommitted changes aside in a new stash entry.
  *
  * @param {GitReader} reader - Git reader of the repository root.
- * @param {{ keepChangelog: boolean, createVersionCommand?: string }} options - Whether `CHANGELOG.md` stays in the
- *   working tree (a new release commits it), and how the project runs create-version (for the hints).
+ * @param {{ keepChangelog?: boolean, keptPaths?: readonly string[], createVersionCommand?: string }} options - Files
+ *   that stay in the working tree because a new release commits them (`keepChangelog` keeps the root
+ *   `CHANGELOG.md`; a monorepo passes every released package's `keptPaths`), and how the project
+ *   runs create-version (for the hints).
  * @returns {Promise<SetAsideChanges>} Stash entry holding the changes.
  * @throws {ReleaseStepError} When Git cannot create the stash entry; nothing was changed then.
  */
-export async function setAsideLocalChanges(reader, { keepChangelog, createVersionCommand = DEFAULT_PROJECT_COMMANDS.createVersion }) {
-  if ((await reader.tryGit(["stash", "push", "--include-untracked", "--message", LOCAL_CHANGES_STASH_MESSAGE, "--", ...buildPathspec(keepChangelog)])) === null) {
+export async function setAsideLocalChanges(reader, { keepChangelog = false, keptPaths: configuredKeptPaths, createVersionCommand = DEFAULT_PROJECT_COMMANDS.createVersion }) {
+  const keptPaths = [...(configuredKeptPaths ?? (keepChangelog ? [CHANGELOG_FILE] : []))];
+  if ((await reader.tryGit(["stash", "push", "--include-untracked", "--message", LOCAL_CHANGES_STASH_MESSAGE, "--", ...buildPathspec(keptPaths)])) === null) {
     throw new ReleaseStepError("No se pudieron apartar los cambios sin commitear (git stash push falló).", `No se tocó nada: revisá git status y volvé a correr ${createVersionCommand}.`);
   }
 
@@ -67,7 +70,7 @@ export async function setAsideLocalChanges(reader, { keepChangelog, createVersio
     throw new ReleaseStepError("Se apartaron los cambios pero no se encontró la entrada de git stash.", `Buscalos con git stash list y recuperalos con git stash pop --index antes de volver a correr ${createVersionCommand}.`);
   }
 
-  return { sha, keepChangelog };
+  return { sha, keptPaths };
 }
 
 /**
@@ -116,7 +119,7 @@ async function listStashedUntrackedFiles(reader, sha) {
  * @returns {Promise<LocalChangesRestore>} Whether the changes are back, and why not otherwise.
  */
 export async function restoreLocalChanges(reader, repositoryRoot, setAside) {
-  const { sha, keepChangelog } = setAside;
+  const { sha, keptPaths } = setAside;
   const stashShas = ((await reader.tryGit(["stash", "list", "--format=%H"])) ?? "").split("\n").map((line) => line.trim());
   const stashIndex = stashShas.indexOf(sha);
 
@@ -126,7 +129,7 @@ export async function restoreLocalChanges(reader, repositoryRoot, setAside) {
 
   const stashReference = `${STASH_REFERENCE_PREFIX}{${stashIndex}}`;
   const keptReason = (/** @type {string} */ detail) => ({ restored: /** @type {const} */ (false), reason: `${detail}; no se tocó nada y siguen en ${stashReference}` });
-  const pathspec = buildPathspec(keepChangelog);
+  const pathspec = buildPathspec(keptPaths);
   const patchDirectory = mkdtempSync(path.join(os.tmpdir(), RESTORE_DIRECTORY_PREFIX));
   const stagedPatch = path.join(patchDirectory, "staged.patch");
   const workingTreePatch = path.join(patchDirectory, "working-tree.patch");

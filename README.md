@@ -75,6 +75,7 @@ pnpm cv --set-version X.Y.Z    # solo la siguiente patch, minor o major
 pnpm cv --dry-run              # diagnóstico y plan, sin cambiar nada
 pnpm cv --skip-unpublished     # release nuevo aunque el último no esté en npm (lo saltea)
 pnpm cv --ignore-local-changes # publica aunque haya cambios sin commitear (se apartan y se restauran)
+pnpm cv --accept-suggested     # toma la versión sugerida por los commits sin preguntar
 ```
 
 Sin `--bump` ni `--set-version`, el comando pregunta la versión sin ninguna opción preseleccionada: se elige con su número, o con `↑`/`k` y `↓`/`j`/`Tab` más Enter (Enter no hace nada hasta marcar una). La opción que sugieren los commits lleva una estrella, pero no se elige sola. Sin terminal interactiva (CI) hay que pasar `--bump` o `--set-version`.
@@ -137,6 +138,31 @@ Sin `artifact`, `publish: "npm"` publica el working tree. Con `artifact` publica
 Ejemplo de `prepare` que deja `releases/{version}-{sha256}/{name}-{version}.tgz`: `pnpm build`, `npm pack --ignore-scripts --pack-destination releases/<version>-tmp/` y renombrar la carpeta con el SHA-256 del tarball.
 
 Si no hay tarball o la verificación falla, no se publica nada y volver a correr el comando retoma preparación y publicación.
+
+### Monorepo
+
+Con `packages` en el config, cada paquete publicable del monorepo tiene su propia versión, su `CHANGELOG.md`, su tag y su publicación:
+
+```js
+export default {
+  changelog: { audience: "quien consume {name}" }, // {name}: el paquete de cada CHANGELOG
+  packages: "workspaces",                          // los workspaces del package.json raíz, o ["packages/*", "!packages/internal"]
+  tagFormat: "{component}-v{version}",             // por defecto: widget-v1.2.0 ({component} es la carpeta; también {name})
+  checks: ["bun run ci"],
+  prepare: ["bun install --frozen-lockfile", "bun run build"], // una vez para todos los paquetes
+  publish: "npm",
+};
+```
+
+- Paquetes: los workspaces con `name` que no son `private`. Un paquete tiene cambios cuando un commit toca su carpeta, o la de un paquete `private` del que depende (directa o transitivamente, en cualquier campo de dependencias): los paquetes internos suelen ir bundleados en quien los usa, así que un cambio ahí sale con un release de cada consumidor.
+- Último release de cada paquete: el último commit de `origin/main` que cambió el `version` de su `package.json`.
+- Versión: por cada paquete con cambios pregunta patch, minor o major (la sugerida por sus commits lleva una estrella) o "No publicar ahora". `--bump` aplica el mismo tipo a todos y `--accept-suggested` toma la sugerida de cada uno; `--set-version` no aplica.
+- `[Unreleased]` vacío: Codex lo completa en la carpeta del paquete, solo con sus commits.
+- Un solo commit de release (`release: @scope/a@1.2.0, @scope/b@0.3.1`) con un tag anotado por paquete; `main` y los tags suben con `git push --atomic`.
+- `versionFiles` sigue siendo relativo a la raíz: cada archivo toma la versión del paquete que lo contiene y solo cambia cuando ese paquete sale.
+- `prepare` corre una vez (su contexto trae `releases` con nombre, versión y carpeta); `publish: "npm"` publica cada paquete desde su carpeta, en orden de dependencias (primero los que otros instalan). `artifact`, si se usa, es relativo a la carpeta de cada paquete. Un `publish` propio corre una vez por paquete.
+- Retoma: si el commit de release quedó solo en local, retoma el push y la publicación. Si un release ya está en origin con su tag y falta en npm, lo publica antes de cualquier release nuevo, preparándolo desde su propio commit en un worktree temporal (no hace falta desacoplar HEAD) aunque `main` haya avanzado. Una versión menor que la más alta de npm no se publica (movería `latest` hacia atrás) y se avisa.
+- No aplican `ignore-build` ni la publicación desde HEAD desacoplado.
 
 ### Token de npm
 

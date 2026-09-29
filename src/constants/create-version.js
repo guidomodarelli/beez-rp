@@ -233,6 +233,7 @@ export const CREATE_VERSION_FLAG = Object.freeze({
   dryRun: "dry-run",
   skipUnpublished: "skip-unpublished",
   ignoreLocalChanges: "ignore-local-changes",
+  acceptSuggested: "accept-suggested",
   help: "help",
   helpShort: "h",
   endOfOptions: "--",

@@ -24,6 +24,7 @@ import {
   PACKAGE_MANIFEST_FILE,
   RELEASE_REGISTRY,
 } from "../constants/create-version.js";
+import { DEFAULT_MONOREPO_TAG_FORMAT, TAG_FORMAT_PLACEHOLDER, WORKSPACES_PACKAGES } from "../constants/monorepo.js";
 import { RELEASE_TYPE_ORDER } from "../constants/versions.js";
 import { DEFAULT_PROJECT_COMMANDS, describeProjectCommands, detectPackageManager } from "../package-manager.js";
 
@@ -39,7 +40,11 @@ import { DEFAULT_PROJECT_COMMANDS, describeProjectCommands, detectPackageManager
  *   run: (commandLine: string) => Promise<number>,
  *   print: (text?: string) => void,
  *   fail: (message: string, hint: string) => never,
+ *   releases?: { name: string, version: string, directory: string }[],
  * }} HookContext
+ *   In monorepo mode `version` is `null` for the steps that cover several packages (`prepare`) and
+ *   `releases` lists them; `publish` hooks run once per package with its `version` and `releases`
+ *   holding only that package.
  * @typedef {(context: HookContext) => Promise<void> | void} ReleaseHook
  * @typedef {{
  *   check: (context: HookContext) => Promise<MigrationCheck> | MigrationCheck,
@@ -59,13 +64,18 @@ import { DEFAULT_PROJECT_COMMANDS, describeProjectCommands, detectPackageManager
  *   artifact?: string | null,
  *   summary?: string[],
  *   versionFiles?: string[],
+ *   packages?: "workspaces" | string[],
+ *   tagFormat?: string,
  * }} CreateVersionConfig
  *   `summary` lines replace `{version}` with the released version. Without `checks`, the release
  *   runs `<package manager> run ci` (pnpm, bun, npm or yarn, detected from `packageManager` or the
  *   lockfile) when `package.json` declares a `ci` script; `false` skips the checks on purpose.
  *   `versionFiles` lists files (relative to the root) whose marked lines get the new version in the
  *   release commit: `beez-rp-version` / `x-release-please-version` lines and
- *   `beez-rp-start-version`…`beez-rp-end` blocks.
+ *   `beez-rp-start-version`…`beez-rp-end` blocks. `packages` turns on the monorepo mode: every
+ *   non-private workspace package (`"workspaces"`: the ones the root `package.json` declares; or
+ *   explicit patterns such as `["packages/*"]`) gets its own version, CHANGELOG and tag, formatted
+ *   with `tagFormat` (`{component}-v{version}` by default).
  * @typedef {{
  *   projectName: string | null,
  *   changelog: { audience: string, language: "es" | "en" },
@@ -79,6 +89,8 @@ import { DEFAULT_PROJECT_COMMANDS, describeProjectCommands, detectPackageManager
  *   artifact: string | null,
  *   summary: string[],
  *   versionFiles: string[],
+ *   packages: "workspaces" | string[] | null,
+ *   tagFormat: string | null,
  *   commands: ProjectCommands,
  * }} ResolvedCreateVersionConfig
  *   `checks` is empty when they are skipped on purpose and `null` when none are configured nor
@@ -237,6 +249,21 @@ export function resolveCreateVersionConfig(rawConfig, { packageScripts = {}, com
     throw invalidField("publishedLabel", "a string");
   }
 
+  const packages = config.packages ?? null;
+  if (packages !== null && packages !== WORKSPACES_PACKAGES && (!isStringList(packages) || packages.length === 0)) {
+    throw invalidField("packages", `"${WORKSPACES_PACKAGES}" or a non-empty list of workspace patterns such as packages/*`);
+  }
+
+  const tagFormat = config.tagFormat ?? (packages === null ? null : DEFAULT_MONOREPO_TAG_FORMAT);
+  if (tagFormat !== null) {
+    if (packages === null) {
+      throw invalidField("tagFormat", "used only with packages (the single-package mode tags vX.Y.Z)");
+    }
+    if (typeof tagFormat !== "string" || !tagFormat.includes(TAG_FORMAT_PLACEHOLDER.version)) {
+      throw invalidField("tagFormat", `a string containing ${TAG_FORMAT_PLACEHOLDER.version}, such as ${DEFAULT_MONOREPO_TAG_FORMAT}`);
+    }
+  }
+
   const versionFiles = config.versionFiles ?? [];
   if (!isStringList(versionFiles) || versionFiles.some((filePath) => !isPathInsideRoot(filePath))) {
     throw invalidField("versionFiles", "a list of file paths relative to the project root, inside it");
@@ -255,6 +282,8 @@ export function resolveCreateVersionConfig(rawConfig, { packageScripts = {}, com
     artifact: /** @type {string | null} */ (artifact),
     summary,
     versionFiles,
+    packages: /** @type {"workspaces" | string[] | null} */ (packages),
+    tagFormat: /** @type {string | null} */ (tagFormat),
     commands,
   };
 }
