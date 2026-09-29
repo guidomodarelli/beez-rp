@@ -63,6 +63,8 @@ describe("create-version config", () => {
       summary: [],
     });
     expect(Object.keys(config.releaseTypeDescriptions)).toEqual(["patch", "minor", "major"]);
+    expect(config.preMajorShift).toBe(false);
+    expect(resolveCreateVersionConfig({ changelog: { audience: "x" }, preMajorShift: true }).preMajorShift).toBe(true);
   });
 
   it("should keep project descriptions, commands and hooks", () => {
@@ -107,6 +109,7 @@ describe("create-version config", () => {
     [{ changelog: { audience: "x" }, migrations: { check: () => {} } }, /migrations/],
     [{ changelog: { audience: "x" }, releaseTypeDescriptions: { huge: "x" } }, /releaseTypeDescriptions.huge/],
     [{ changelog: { audience: "x" }, registry: "pypi" }, /registry/],
+    [{ changelog: { audience: "x" }, preMajorShift: "yes" }, /preMajorShift/],
     [{ changelog: { audience: "x" }, publish: "npm", artifact: "releases/pkg.tgz" }, /artifact/],
     [{ changelog: { audience: "x" }, artifact: "releases/{version}.tgz" }, /artifact.*publish/],
   ])("should reject %j", (rawConfig, message) => {

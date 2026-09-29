@@ -65,7 +65,7 @@ import {
   syncMainStep,
 } from "../create-version/run.js";
 import { BOX_TONE, ICON, formatDuration, measureActiveMs, paint, print, renderBanner, renderBox, renderRow, renderStepHeader, select, startSpinner } from "../terminal-ui.js";
-import { bumpReleaseVersion, isStableReleaseVersion, suggestReleaseType } from "../versions.js";
+import { bumpReleaseVersion, isStableReleaseVersion, suggestNextReleaseType } from "../versions.js";
 import { buildMonorepoPlan, listMonorepoChangesToSetAside, listPackagesToAuthenticate } from "./plan.js";
 import { buildMonorepoReleaseSubject } from "./release-commit.js";
 import { collectMonorepoState } from "./state.js";
@@ -197,7 +197,7 @@ async function chooseVersionsStep(context) {
     const packageSnapshot = requirePackage(context, name);
     const { unit, unreleasedCommits } = packageSnapshot;
     const currentVersion = readWorkingVersion(context, unit);
-    const suggestion = suggestReleaseType(unreleasedCommits);
+    const suggestion = suggestNextReleaseType(unreleasedCommits, currentVersion, { preMajorShift: context.config.preMajorShift });
     print(renderCommitList(unreleasedCommits, `${unit.name} · ${unreleasedCommits.length} commit(s) sin publicar`));
 
     /** @type {string} */

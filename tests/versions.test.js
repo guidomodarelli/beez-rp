@@ -12,6 +12,7 @@ import {
   listNextVersions,
   parseReleaseVersion,
   resolveRequestedVersion,
+  suggestNextReleaseType,
   suggestReleaseType,
   toReleaseTag,
 } from "../src/versions.js";
@@ -91,6 +92,23 @@ describe("release commits and tags", () => {
     expect(suggestReleaseType([{ subject: "refactor!: drop legacy routes" }]).releaseType).toBe("major");
     expect(suggestReleaseType([{ subject: "feat: new auth", body: "BREAKING CHANGE: sessions reset" }]).releaseType).toBe("major");
     expect(suggestReleaseType([{ subject: "0.94.0" }]).releaseType).toBe("minor");
+  });
+
+  it("should lower the suggestion one level on 0.x only when preMajorShift is on", () => {
+    const breaking = [{ subject: "feat!: redesign payload" }];
+    const feature = [{ subject: "feat(panel): dark mode" }];
+    const fix = [{ subject: "fix: double submit" }];
+    const shifted = { preMajorShift: true };
+
+    expect(suggestNextReleaseType(breaking, "0.10.10", shifted)).toEqual({
+      releaseType: "minor",
+      reason: "hay cambios incompatibles (breaking change); antes de 1.0.0 baja un nivel",
+    });
+    expect(suggestNextReleaseType(feature, "0.10.10", shifted).releaseType).toBe("patch");
+    expect(suggestNextReleaseType(fix, "0.10.10", shifted)).toEqual(suggestReleaseType(fix));
+    expect(suggestNextReleaseType(breaking, "1.2.3", shifted).releaseType).toBe("major");
+    expect(suggestNextReleaseType(feature, "0.10.10").releaseType).toBe("minor");
+    expect(suggestNextReleaseType(breaking, "0.10.10").releaseType).toBe("major");
   });
 });
 

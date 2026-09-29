@@ -404,6 +404,22 @@ describe("beez-rp create-version command", () => {
   );
 
   it(
+    "should suggest one level less on 0.x with preMajorShift",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", "  preMajorShift: true,", "};"]);
+
+      const release = runCli(repositoryRoot, ["--accept-suggested"]);
+
+      expect(release.status, release.output).toBe(0);
+      // "feat: add gate" suggests a minor release, a patch before 1.0.0.
+      expect(runGit(["log", "-1", "--format=%s", "main"], remoteRoot)).toBe("0.1.1");
+      expect(flattenOutput(release.output)).toContain("Versión sugerida aceptada: 0.1.1 (patch: hay funcionalidades nuevas; antes de 1.0.0 baja un nivel)");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
     "should require --bump or --set-version without an interactive terminal, since the version prompt has no default",
     () => {
       const { repositoryRoot, remoteRoot } = createReleasedRepository();

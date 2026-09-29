@@ -67,7 +67,7 @@ import {
   startSpinner,
 } from "../terminal-ui.js";
 import { updateVersionMarkers } from "../version-files.js";
-import { listNextVersions, resolveRequestedVersion, suggestReleaseType, toReleaseTag } from "../versions.js";
+import { listNextVersions, resolveRequestedVersion, suggestNextReleaseType, toReleaseTag } from "../versions.js";
 import {
   expandArtifactPattern,
   findPnpmPackRewrites,
@@ -626,15 +626,14 @@ async function bumpVersionStep(context) {
   print(renderCommitList(commits, `Qué se publica (${commits.length} commit(s))`));
 
   let nextRelease = resolveRequestedVersion(currentVersion, context.options);
+  const suggestion = suggestNextReleaseType(commits, currentVersion, { preMajorShift: context.config.preMajorShift });
 
   if (!nextRelease && context.options.acceptSuggested) {
-    const suggestion = suggestReleaseType(commits);
     nextRelease = resolveRequestedVersion(currentVersion, { bump: suggestion.releaseType, setVersion: null });
     print(`${ICON.info} Versión sugerida aceptada: ${paint(["bold", "cyan"], nextRelease?.version ?? "")} (${suggestion.releaseType}: ${suggestion.reason})`);
   } else if (nextRelease) {
     print(`${ICON.info} Versión elegida por flag: ${paint(["bold", "cyan"], nextRelease.version)} (${nextRelease.releaseType})`);
   } else {
-    const suggestion = suggestReleaseType(commits);
     const nextVersions = listNextVersions(currentVersion);
     const chosenVersion = await select({
       message: `¿Qué versión publicamos? (actual ${currentVersion})`,

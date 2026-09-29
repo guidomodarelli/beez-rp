@@ -55,6 +55,7 @@ import { DEFAULT_PROJECT_COMMANDS, describeProjectCommands, detectPackageManager
  *   projectName?: string,
  *   changelog: { audience: string, language?: "es" | "en" },
  *   releaseTypeDescriptions?: Partial<Record<ReleaseType, string>>,
+ *   preMajorShift?: boolean,
  *   registry?: "npm" | null,
  *   publishedLabel?: string,
  *   checks?: string[] | false,
@@ -75,11 +76,13 @@ import { DEFAULT_PROJECT_COMMANDS, describeProjectCommands, detectPackageManager
  *   `beez-rp-start-version`…`beez-rp-end` blocks. `packages` turns on the monorepo mode: every
  *   non-private workspace package (`"workspaces"`: the ones the root `package.json` declares; or
  *   explicit patterns such as `["packages/*"]`) gets its own version, CHANGELOG and tag, formatted
- *   with `tagFormat` (`{component}-v{version}` by default).
+ *   with `tagFormat` (`{component}-v{version}` by default). `preMajorShift` lowers the suggested
+ *   release type one level while a version is `0.x` (breaking → minor, features → patch).
  * @typedef {{
  *   projectName: string | null,
  *   changelog: { audience: string, language: "es" | "en" },
  *   releaseTypeDescriptions: Record<ReleaseType, string>,
+ *   preMajorShift: boolean,
  *   registry: "npm" | null,
  *   publishedLabel: string,
  *   checks: string[] | null,
@@ -205,6 +208,11 @@ export function resolveCreateVersionConfig(rawConfig, { packageScripts = {}, com
     }
   }
 
+  const preMajorShift = config.preMajorShift ?? false;
+  if (typeof preMajorShift !== "boolean") {
+    throw invalidField("preMajorShift", "a boolean");
+  }
+
   const publish = config.publish ?? null;
   if (publish !== null && publish !== NPM_PUBLISHER && typeof publish !== "function") {
     throw invalidField("publish", `"${NPM_PUBLISHER}", a function or null`);
@@ -273,6 +281,7 @@ export function resolveCreateVersionConfig(rawConfig, { packageScripts = {}, com
     projectName: /** @type {string | undefined} */ (config.projectName) ?? null,
     changelog: { audience: changelog.audience, language: /** @type {"es" | "en"} */ (language) },
     releaseTypeDescriptions: { ...DEFAULT_RELEASE_TYPE_DESCRIPTIONS, .../** @type {Partial<Record<ReleaseType, string>>} */ (descriptions) },
+    preMajorShift,
     registry: /** @type {"npm" | null} */ (registry),
     publishedLabel: /** @type {string | undefined} */ (config.publishedLabel) ?? DEFAULT_PUBLISHED_LABEL,
     checks,

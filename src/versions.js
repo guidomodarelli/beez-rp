@@ -12,6 +12,8 @@ import {
   CONVENTIONAL_HEADER_PATTERN,
   FEATURE_COMMIT_TYPE,
   LEGACY_FEATURE_SUBJECT_PATTERN,
+  PRE_MAJOR_SHIFTED_RELEASE_TYPE,
+  PRE_MAJOR_VERSION,
   RELEASE_TAG_PREFIX,
   RELEASE_TYPE,
   RELEASE_TYPE_ORDER,
@@ -262,4 +264,26 @@ export function suggestReleaseType(commits) {
   }
 
   return { releaseType: RELEASE_TYPE.patch, reason: "solo hay arreglos y mantenimiento" };
+}
+
+/**
+ * Suggests the release type of the next version after `currentVersion`: {@link suggestReleaseType},
+ * shifted one level down while the version is `0.x` when `preMajorShift` is on (breaking changes
+ * suggest `minor` and features `patch`, so a suggestion never jumps to `1.0.0`).
+ *
+ * @param {{ subject: string, body?: string }[]} commits - Commits since the last release.
+ * @param {string} currentVersion - Current `X.Y.Z` version.
+ * @param {{ preMajorShift?: boolean }} [options] - Project versioning options.
+ * @returns {{ releaseType: ReleaseType, reason: string }} Suggested type and a Spanish explanation.
+ */
+export function suggestNextReleaseType(commits, currentVersion, { preMajorShift = false } = {}) {
+  const suggestion = suggestReleaseType(commits);
+  if (!preMajorShift || parseReleaseVersion(currentVersion)[0] !== PRE_MAJOR_VERSION) {
+    return suggestion;
+  }
+
+  const shiftedReleaseType = PRE_MAJOR_SHIFTED_RELEASE_TYPE[suggestion.releaseType];
+  return shiftedReleaseType === suggestion.releaseType
+    ? suggestion
+    : { releaseType: shiftedReleaseType, reason: `${suggestion.reason}; antes de 1.0.0 baja un nivel` };
 }

@@ -69,7 +69,7 @@ function createReleasedMonorepo() {
   }
   writeFileSync(
     path.join(repositoryRoot, "beez-rp.config.js"),
-    ['export default {', '  changelog: { audience: "quien usa {name}" },', '  packages: "workspaces",', "  checks: false,", '  publish: "npm",', "};", ""].join("\n")
+    ['export default {', '  changelog: { audience: "quien usa {name}" },', '  packages: "workspaces",', "  preMajorShift: true,", "  checks: false,", '  publish: "npm",', "};", ""].join("\n")
   );
   commitAll(repositoryRoot, "release: @acme/widget@1.0.0, @acme/adapter@0.3.0");
   runGit(["tag", "-a", "widget-v1.0.0", "-m", "@acme/widget@1.0.0"], repositoryRoot);
@@ -148,8 +148,9 @@ describe("create-version in monorepo mode", () => {
 
       // The adapter changes after the release: HEAD is no longer the widget's release commit.
       writeFileSync(path.join(repositoryRoot, "packages/adapter/index.js"), "export {};\n");
-      writeFileSync(path.join(repositoryRoot, "packages/adapter/CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n- Arreglo.\n");
-      commitAll(repositoryRoot, "fix(adapter): patch");
+      writeFileSync(path.join(repositoryRoot, "packages/adapter/CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Opción nueva.\n");
+      // A feature on the 0.x adapter suggests a patch with preMajorShift; the 1.x widget above still took a minor.
+      commitAll(repositoryRoot, "feat(adapter): add an option");
       runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
 
       const registry = await startRegistry();

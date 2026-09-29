@@ -105,6 +105,7 @@ export default {
   projectName: "TuTribu",                       // banner; por defecto el name de package.json
   changelog: { audience: "quien usa TuTribu", language: "es" }, // "en": entradas en inglés ASCII
   releaseTypeDescriptions: { patch: "…", minor: "…", major: "…" },
+  preMajorShift: true,                          // en 0.x la sugerida baja un nivel (breaking → minor, feat → patch)
   publishedLabel: "en producción",              // banner: vX.Y.Z en producción
   registry: "npm",                              // retoma y banner según las versiones en npm
   checks: ["pnpm check"],                       // antes de tocar la versión; false para no validar
@@ -118,6 +119,8 @@ export default {
 ```
 
 Solo `changelog.audience` es obligatorio. Sin `checks`, un release nuevo corre `<package manager> run ci` (`pnpm run ci`, `bun run ci`…) si el `package.json` declara el script `ci`; si no lo declara, el plan se bloquea para no publicar sin validar. `checks: false` saltea la validación a propósito (por ejemplo, cuando `prepare` ya corre lint, typecheck, tests y build) y una lista vacía no es válida. Los hooks (`migrations.check`, `migrations.apply`, `prepare`, `publish`) reciben `{ repositoryRoot, version, git, run, print, fail }`: `git` lee Git, `run("pnpm x")` corre un comando visible y devuelve su exit code, y `fail(mensaje, qué hacer)` corta el paso con una explicación. El config no necesita importar `beez-rp`.
+
+La versión sugerida sale de los commits: un breaking change (`feat!:` o `BREAKING CHANGE:`) sugiere major, un `feat` (o un asunto como "Add …") minor, y solo arreglos y mantenimiento patch. Con `preMajorShift: true`, mientras la versión es `0.x` la sugerida baja un nivel (breaking → minor, `feat` → patch), la convención de `0.x` que release-please aplica con `bump-minor-pre-major` y `bump-patch-for-minor-pre-major`: así un breaking change en `0.x` no sugiere saltar a `1.0.0`. Es solo la sugerida (la estrella y `--accept-suggested`); se puede elegir cualquiera de las tres.
 
 `versionFiles` lista archivos (relativos a la raíz) que también llevan la versión, como el `--version` de una CLI o una constante. En el commit de release solo cambian sus líneas marcadas: una línea con el comentario `beez-rp-version`, o todas las líneas entre `beez-rp-start-version` y `beez-rp-end`. También se aceptan los marcadores de release-please (`x-release-please-version`, `x-release-please-start-version` … `x-release-please-end`), así que un proyecto que viene de release-please no toca sus archivos. Si un archivo no existe o no tiene ninguna versión marcada, el release se corta antes de tocar la versión (release-please lo ignoraría en silencio).
 
