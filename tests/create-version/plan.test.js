@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { MIGRATION_STATUS, NPM_AUTH_STATUS, NPM_LOOKUP_STATUS, NPM_TOKEN_SOURCE, PULL_REQUEST_STATE, RELEASE_MODE, RELEASE_STEP } from "../../src/constants/create-version.js";
+import { HEAD_FILE_DIFFERENCE, MIGRATION_STATUS, NPM_AUTH_STATUS, NPM_LOOKUP_STATUS, NPM_TOKEN_SOURCE, PULL_REQUEST_STATE, RELEASE_MODE, RELEASE_STEP } from "../../src/constants/create-version.js";
 import { RELEASE_USAGE, buildReleasePlan, buildReleaseUsage, listLocalChangesToSetAside, parseReleaseArguments } from "../../src/create-version/plan.js";
 import { describeProjectCommands } from "../../src/package-manager.js";
 import { resolveRequestedVersion } from "../../src/versions.js";
@@ -229,10 +229,14 @@ describe("create-version plan", () => {
     expect(plan.blockers).toEqual([{ title: "La configuración tiene cambios sin commitear", details: [" M beez-rp.config.js", expect.stringContaining("git stash")] }]);
   });
 
-  it("should block a new release with --ignore-local-changes while a module the configuration loads has uncommitted changes, naming it", () => {
+  it("should block a new release with --ignore-local-changes while a module the configuration loads differs from HEAD, naming it and how", () => {
     const state = createMainState({
       workingTreeChanges: [" M release/hooks.js", " M src/index.js"],
-      configModules: { loaded: true, files: ["beez-rp.config.js", "release/hooks.js"] },
+      configModules: { loaded: true, files: ["beez-rp.config.js", "release/hooks.js", "release/link.js"] },
+      uncommittedConfigModules: [
+        { file: "release/hooks.js", difference: HEAD_FILE_DIFFERENCE.contentChanged },
+        { file: "release/link.js", difference: HEAD_FILE_DIFFERENCE.typeChanged },
+      ],
     });
 
     const plan = buildReleasePlan(state, DEPLOYED_APP, { ignoreLocalChanges: true });
@@ -242,34 +246,33 @@ describe("create-version plan", () => {
     expect(plan.blockers).toEqual([
       {
         title: "La configuración tiene cambios sin commitear",
-        details: [" M release/hooks.js (módulo que carga beez-rp.config.mjs o beez-rp.config.js)", expect.stringContaining("los módulos que importa")],
+        details: [
+          "release/hooks.js (su contenido es distinto del de HEAD)",
+          "release/link.js (no es el mismo tipo de archivo que en HEAD, por ejemplo un enlace simbólico)",
+          expect.stringContaining("los módulos que importa"),
+        ],
       },
     ]);
   });
 
-  it("should recognize a loaded module whose quoted path has a literal emoji, as git status writes it with core.quotePath=false", () => {
+  it("should block a clean working tree while the configuration loads a module that is not committed, such as an ignored local override", () => {
     const state = createMainState({
-      workingTreeChanges: [' M "release/😀 hooks.js"'],
-      configModules: { loaded: true, files: ["beez-rp.config.js", "release/😀 hooks.js"] },
+      configModules: { loaded: true, files: ["beez-rp.config.js", "release/local-overrides.js"] },
+      uncommittedConfigModules: [{ file: "release/local-overrides.js", difference: HEAD_FILE_DIFFERENCE.notCommitted }],
     });
 
-    const plan = buildReleasePlan(state, DEPLOYED_APP, { ignoreLocalChanges: true });
+    const plan = buildReleasePlan(state, DEPLOYED_APP);
 
-    expect(plan.blockers[0].details[0]).toBe(' M "release/😀 hooks.js" (módulo que carga beez-rp.config.mjs o beez-rp.config.js)');
+    expect(plan.mode).toBe(RELEASE_MODE.blocked);
+    expect(plan.blockers[0].details[0]).toBe("release/local-overrides.js (no está commiteado: Git lo ignora, nunca se agregó o solo está en staging)");
+    expect(plan.blockers[0].details[1]).toContain("release/local-overrides.js no está commiteado y la configuración lo carga");
   });
 
-  it("should block while an untracked directory that git status collapses holds a module the configuration loads", () => {
-    const state = createMainState({ workingTreeChanges: ["?? release/"], configModules: { loaded: true, files: ["beez-rp.config.js", "release/hooks.js"] } });
-
-    const plan = buildReleasePlan(state, DEPLOYED_APP, { ignoreLocalChanges: true });
-
-    expect(plan.blockers[0].details[0]).toBe("?? release/ (módulo que carga beez-rp.config.mjs o beez-rp.config.js)");
-  });
-
-  it("should plan a new release with --ignore-local-changes when no local change reaches a module the configuration loads", () => {
+  it("should plan a new release with --ignore-local-changes when every module the configuration loads matches HEAD", () => {
     const state = createMainState({
       workingTreeChanges: [" M src/index.js", "?? notes/"],
       configModules: { loaded: true, files: ["beez-rp.config.js", "release/hooks.js"] },
+      uncommittedConfigModules: [],
     });
 
     const plan = buildReleasePlan(state, DEPLOYED_APP, { ignoreLocalChanges: true });
@@ -278,16 +281,16 @@ describe("create-version plan", () => {
     expect(plan.steps.map((planStep) => planStep.id)).toContain(RELEASE_STEP.bumpVersion);
   });
 
-  it("should block a runnable plan when the configuration module graph could not be read while there are local changes", () => {
-    const state = createMainState({ workingTreeChanges: [" M src/index.js"], configModules: { loaded: false, reason: "Node 22.14.0 no permite registrar hooks" } });
+  it("should block a runnable plan when the configuration module graph could not be read, even with a clean working tree", () => {
+    const state = createMainState({ configModules: { loaded: false, reason: "Node 22.14.0 no permite registrar hooks" } });
 
-    const plan = buildReleasePlan(state, DEPLOYED_APP, { ignoreLocalChanges: true });
+    const plan = buildReleasePlan(state, DEPLOYED_APP);
 
     expect(plan.mode).toBe(RELEASE_MODE.blocked);
     expect(plan.blockers).toEqual([
       {
         title: "No se pudo saber qué módulos carga beez-rp.config.mjs o beez-rp.config.js",
-        details: ["Cargar la configuración en un proceso nuevo falló: Node 22.14.0 no permite registrar hooks.", expect.stringContaining("git stash")],
+        details: ["Cargar la configuración en un proceso nuevo falló: Node 22.14.0 no permite registrar hooks.", expect.stringContaining("22.15.0")],
       },
     ]);
   });
@@ -307,21 +310,34 @@ describe("create-version plan", () => {
 
   it("should block a new release and a resume while the loaded configuration is an ignored file that git status does not list", () => {
     const npm = { status: NPM_LOOKUP_STATUS.ok, publishedVersions: ["0.1.0"], reason: null };
-    const resume = buildReleasePlan(createMainState({ headVersion: "0.2.0", headSubject: "0.2.0", npm, untrackedConfigFile: "beez-rp.config.mjs" }), NPM_PACKAGE);
-    const newRelease = buildReleasePlan(createMainState({ untrackedConfigFile: "beez-rp.config.mjs" }), DEPLOYED_APP, { ignoreLocalChanges: true });
+    const shadowingConfig = { uncommittedConfigModules: [{ file: "beez-rp.config.mjs", difference: HEAD_FILE_DIFFERENCE.notCommitted }] };
+    const resume = buildReleasePlan(createMainState({ headVersion: "0.2.0", headSubject: "0.2.0", npm, ...shadowingConfig }), NPM_PACKAGE);
+    const newRelease = buildReleasePlan(createMainState(shadowingConfig), DEPLOYED_APP, { ignoreLocalChanges: true });
 
     for (const plan of [resume, newRelease]) {
       expect(plan.mode).toBe(RELEASE_MODE.blocked);
       expect(plan.steps).toEqual([]);
-      expect(plan.blockers[0].details[0]).toBe("!! beez-rp.config.mjs");
+      expect(plan.blockers[0].details[0]).toBe("beez-rp.config.mjs (no está commiteado: Git lo ignora, nunca se agregó o solo está en staging)");
       expect(plan.blockers[0].details[1]).toContain("beez-rp.config.mjs no está commiteado");
     }
   });
 
   it("should list an untracked configuration once when git status already shows it", () => {
-    const plan = buildReleasePlan(createMainState({ workingTreeChanges: ["?? beez-rp.config.mjs"], untrackedConfigFile: "beez-rp.config.mjs" }), DEPLOYED_APP, { ignoreLocalChanges: true });
+    const state = createMainState({
+      workingTreeChanges: ["?? beez-rp.config.mjs"],
+      uncommittedConfigModules: [{ file: "beez-rp.config.mjs", difference: HEAD_FILE_DIFFERENCE.notCommitted }],
+    });
 
-    expect(plan.blockers[0].details.filter((detail) => detail.endsWith(" beez-rp.config.mjs"))).toEqual(["?? beez-rp.config.mjs"]);
+    const plan = buildReleasePlan(state, DEPLOYED_APP, { ignoreLocalChanges: true });
+
+    expect(plan.blockers[0].details.filter((detail) => detail.startsWith("beez-rp.config.mjs (") || detail.endsWith(" beez-rp.config.mjs"))).toEqual(["?? beez-rp.config.mjs"]);
+  });
+
+  it("should name a hidden local change that replaced a tracked file with a symbolic link", () => {
+    const plan = buildReleasePlan(createMainState({ hiddenChanges: [{ file: "release/hooks.js", difference: HEAD_FILE_DIFFERENCE.typeChanged }] }), DEPLOYED_APP);
+
+    expect(plan.blockers[0].title).toBe("Hay 1 archivo(s) con cambios locales que git status no muestra");
+    expect(plan.blockers[0].details[0]).toBe("release/hooks.js (no es el mismo tipo de archivo que en HEAD, por ejemplo un enlace simbólico)");
   });
 
   it("should not take a rename of CHANGELOG.md for a changelog-only change, because it also changes another path", () => {

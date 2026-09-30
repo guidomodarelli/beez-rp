@@ -1,0 +1,110 @@
+/**
+ * Comparison of working-tree files with `HEAD`, the commit a release is built on, without going
+ * through `git status`: the release loads the configuration and its modules, and uses the files it
+ * versions or publishes, from the working tree, so a file that Git does not report (ignored,
+ * untracked, or tracked but marked `skip-worktree` or `assume-unchanged`) must still match the
+ * committed one.
+ *
+ * @module create-version/head-files
+ */
+
+import { lstatSync, readlinkSync } from "node:fs";
+import path from "node:path";
+
+import { GIT_REGULAR_FILE_MODES, GIT_SYMBOLIC_LINK_MODE, HEAD_FILE_DIFFERENCE, LS_TREE_ENTRY_PATH_SEPARATOR } from "../constants/create-version.js";
+import { GIT_LITERAL_PATHSPEC_PREFIX } from "../constants/version-files.js";
+
+/**
+ * @typedef {import("./process.js").GitReader} GitReader
+ * @typedef {"notCommitted" | "typeChanged" | "contentChanged"} HeadFileDifferenceKind
+ * @typedef {{ file: string, difference: HeadFileDifferenceKind }} HeadFileDifference
+ *   `file` is relative to the repository root and separated with `/`.
+ * @typedef {{ mode: string, object: string }} HeadEntry
+ */
+
+/**
+ * Reads the `HEAD` entries of the given files.
+ *
+ * @param {GitReader} reader - Git reader of the repository root.
+ * @param {string[]} files - Repository-relative paths.
+ * @returns {Promise<Map<string, HeadEntry>>} Entry of each file `HEAD` has; empty without `HEAD`.
+ */
+async function readHeadEntries(reader, files) {
+  const listing = await reader.tryGit(["ls-tree", "-r", "-z", "HEAD", "--", ...files.map((file) => `${GIT_LITERAL_PATHSPEC_PREFIX}${file}`)]);
+  // An entry is `<mode> <type> <object>\t<path>`.
+  return new Map(
+    (listing ?? "")
+      .split("\0")
+      .filter(Boolean)
+      .map((entry) => {
+        const separatorIndex = entry.indexOf(LS_TREE_ENTRY_PATH_SEPARATOR);
+        const [mode, , object] = entry.slice(0, separatorIndex).split(" ");
+        return [entry.slice(separatorIndex + 1), { mode, object }];
+      })
+  );
+}
+
+/**
+ * Tells whether a working-tree symbolic link points where the committed one does.
+ *
+ * @param {GitReader} reader - Git reader of the repository root.
+ * @param {string} absolutePath - Link in the working tree.
+ * @param {string} object - Blob of the committed link, which holds its target.
+ * @returns {Promise<boolean>} `true` when both targets are the same.
+ */
+async function hasCommittedLinkTarget(reader, absolutePath, object) {
+  return (await reader.tryGit(["cat-file", "blob", object])) === readlinkSync(absolutePath);
+}
+
+/**
+ * Lists the given working-tree files that differ from `HEAD`: missing from `HEAD`, of another kind
+ * (a symbolic link or a directory where `HEAD` has a regular file) or with other content. Git hashes
+ * each regular file through its clean filters (line endings, `.gitattributes`), like `git add`, so
+ * a checkout with converted line endings is not a change. Index flags (`skip-worktree`,
+ * `assume-unchanged`) are ignored: only the working tree and `HEAD` are compared.
+ *
+ * @param {GitReader} reader - Git reader of the repository root.
+ * @param {string} repositoryRoot - Repository root.
+ * @param {string[]} files - Repository-relative paths, separated with `/`, that exist in the working tree.
+ * @returns {Promise<HeadFileDifference[]>} Differences, in the order of `files`.
+ */
+export async function listFilesDifferentFromHead(reader, repositoryRoot, files) {
+  if (files.length === 0) {
+    return [];
+  }
+
+  const headEntries = await readHeadEntries(reader, files);
+  /** @type {Map<string, HeadFileDifferenceKind>} */
+  const differenceByFile = new Map();
+  /** @type {{ file: string, object: string }[]} */
+  const regularFiles = [];
+
+  for (const file of files) {
+    const headEntry = headEntries.get(file);
+    const absolutePath = path.join(repositoryRoot, file);
+    const stats = lstatSync(absolutePath, { throwIfNoEntry: false });
+
+    if (!headEntry) {
+      differenceByFile.set(file, HEAD_FILE_DIFFERENCE.notCommitted);
+    } else if (GIT_REGULAR_FILE_MODES.includes(headEntry.mode) && stats?.isFile()) {
+      regularFiles.push({ file, object: headEntry.object });
+    } else if (headEntry.mode === GIT_SYMBOLIC_LINK_MODE && stats?.isSymbolicLink()) {
+      if (!(await hasCommittedLinkTarget(reader, absolutePath, headEntry.object))) {
+        differenceByFile.set(file, HEAD_FILE_DIFFERENCE.contentChanged);
+      }
+    } else {
+      differenceByFile.set(file, HEAD_FILE_DIFFERENCE.typeChanged);
+    }
+  }
+
+  if (regularFiles.length > 0) {
+    const workingObjects = (await reader.git(["hash-object", "--", ...regularFiles.map(({ file }) => file)])).split("\n");
+    regularFiles.forEach(({ file, object }, index) => {
+      if (workingObjects[index] !== object) {
+        differenceByFile.set(file, HEAD_FILE_DIFFERENCE.contentChanged);
+      }
+    });
+  }
+
+  return files.filter((file) => differenceByFile.has(file)).map((file) => ({ file, difference: /** @type {HeadFileDifferenceKind} */ (differenceByFile.get(file)) }));
+}

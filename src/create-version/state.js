@@ -3,6 +3,8 @@
  * changes, `main` compared with `origin/main`, the version and subject of
  * `HEAD`, the commit of a detached release tag on `origin`, the last release,
  * the commits waiting to be released, the pull request of a feature branch,
+ * the local changes `git status` does not show, the modules the configuration
+ * loads (read in a new Node process) and whether they are the committed ones,
  * the published versions, the npm credentials (when the plan would publish to
  * npm) and pending migrations.
  *
@@ -18,10 +20,8 @@ import path from "node:path";
 
 import { readUnreleased } from "../changelog.js";
 import { CHANGELOG_FILE } from "../constants/changelog.js";
-import { GIT_LITERAL_PATHSPEC_PREFIX } from "../constants/version-files.js";
 import {
   LS_FILES_SKIP_WORKTREE_TAG,
-  LS_FILES_STAGE_PATH_SEPARATOR,
   LS_FILES_TAG_WIDTH,
   MAIN_BRANCH,
   MIGRATION_STATUS,
@@ -38,6 +38,7 @@ import {
 import { toReleaseTag } from "../versions.js";
 import { findCreateVersionConfigFile } from "./config.js";
 import { listConfigModules } from "./config-modules.js";
+import { listFilesDifferentFromHead } from "./head-files.js";
 import { checkNpmPublishAccess, lookupPublishedVersions, resolvePublishRegistry } from "./npm.js";
 import { createGitReader, listCommits, readPackageVersionAt, runCaptured } from "./process.js";
 
@@ -47,6 +48,8 @@ import { createGitReader, listCommits, readPackageVersionAt, runCaptured } from 
  * @typedef {import("./plan.js").PullRequestSnapshot} PullRequestSnapshot
  * @typedef {import("./config.js").MigrationCheck} MigrationCheck
  * @typedef {import("./plan.js").LastReleaseSnapshot} LastReleaseSnapshot
+ * @typedef {import("./head-files.js").HeadFileDifference} HeadFileDifference
+ * @typedef {import("./config-modules.js").ConfigModuleGraph} ConfigModuleGraph
  * @typedef {ReleaseState & { packageName: string, releasedVersion: string | null, lastRelease: LastReleaseSnapshot | null }} ReleaseSnapshot
  */
 
@@ -270,27 +273,6 @@ function confirmFirstPublication(npmAuth, npm) {
 }
 
 /**
- * Finds the configuration file the run loads when Git does not track it: an ignored
- * `beez-rp.config.mjs` shadows a committed `beez-rp.config.js` without showing up in
- * `git status --porcelain`, so the release would follow instructions that are not committed.
- *
- * @param {GitReader} reader - Git reader.
- * @param {string} repositoryRoot - Repository root.
- * @returns {Promise<string | null>} Name of the loaded configuration file when it is not in the
- *   Git index, or `null` when it is tracked or there is none.
- */
-async function findUntrackedConfigFile(reader, repositoryRoot) {
-  const configFile = findCreateVersionConfigFile(repositoryRoot);
-
-  if (!configFile) {
-    return null;
-  }
-
-  const trackedListing = await reader.git(["ls-files", "--", `${GIT_LITERAL_PATHSPEC_PREFIX}${configFile}`]);
-  return trackedListing === "" ? configFile : null;
-}
-
-/**
  * Tells whether a `git ls-files -v` tag marks an entry Git does not compare with the working
  * tree: `skip-worktree` (`S`) or `assume-unchanged` (any lowercase tag).
  *
@@ -302,38 +284,46 @@ function isUncheckedIndexTag(tag) {
 }
 
 /**
- * Lists the tracked files whose working-tree content differs from the index while their entry is
- * marked `skip-worktree` or `assume-unchanged`: `git status --porcelain` and `git stash` skip
- * those entries, so the local change would reach the release unseen. Git hashes each file through
- * its clean filters (line endings, `.gitattributes`), like `git add`, so a checkout with converted
- * line endings is not a change. Files missing from the working tree (a sparse checkout) are skipped:
- * nothing local of them can be loaded or released.
+ * Lists the tracked files marked `skip-worktree` or `assume-unchanged` whose working-tree entry
+ * differs from `HEAD`: `git status --porcelain` and `git stash` skip those entries, so the local
+ * change (new content, or another kind of file such as a symbolic link) would reach the release
+ * unseen. Entries missing from the working tree (a sparse checkout) are skipped: nothing local of
+ * them can be loaded or released.
  *
  * @param {GitReader} reader - Git reader.
  * @param {string} repositoryRoot - Repository root.
- * @returns {Promise<string[]>} Repository-relative paths with hidden local changes.
+ * @returns {Promise<HeadFileDifference[]>} Hidden local changes.
  */
 async function listHiddenLocalChanges(reader, repositoryRoot) {
-  const taggedEntries = (await reader.git(["ls-files", "-v", "-z"])).split("\0").filter(Boolean);
+  const taggedEntries = (await reader.git(["ls-files", "-v", "-z"])).split(" ").filter(Boolean);
   const uncheckedPaths = taggedEntries
     .filter((entry) => isUncheckedIndexTag(entry.charAt(0)))
     .map((entry) => entry.slice(LS_FILES_TAG_WIDTH))
-    .filter((filePath) => lstatSync(path.join(repositoryRoot, filePath), { throwIfNoEntry: false })?.isFile() ?? false);
+    .filter((filePath) => lstatSync(path.join(repositoryRoot, filePath), { throwIfNoEntry: false }) !== undefined);
 
-  if (uncheckedPaths.length === 0) {
-    return [];
+  return listFilesDifferentFromHead(reader, repositoryRoot, uncheckedPaths);
+}
+
+/**
+ * Loads the configuration in a new Node process to list the repository files it loads as modules,
+ * and compares each one with `HEAD`. It always runs when there is a configuration, even with a
+ * clean `git status`: an ignored local override the configuration imports, or a module whose local
+ * change Git hides with `skip-worktree`, never shows up there. The cost is one extra Node process
+ * (and one extra evaluation of the configuration) per diagnosis.
+ *
+ * @param {GitReader} reader - Git reader.
+ * @param {string} repositoryRoot - Repository root.
+ * @returns {Promise<{ configModules: ConfigModuleGraph | null, uncommittedConfigModules: HeadFileDifference[] }>} Module
+ *   graph (`null` without configuration) and the modules that differ from `HEAD`.
+ */
+async function inspectConfigModules(reader, repositoryRoot) {
+  if (!findCreateVersionConfigFile(repositoryRoot)) {
+    return { configModules: null, uncommittedConfigModules: [] };
   }
 
-  const stageEntries = (await reader.git(["ls-files", "-s", "-z", "--", ...uncheckedPaths.map((filePath) => `${GIT_LITERAL_PATHSPEC_PREFIX}${filePath}`)])).split("\0").filter(Boolean);
-  // A stage entry is `<mode> <object> <stage>\t<path>`.
-  const indexObjectByPath = new Map(
-    stageEntries.map((entry) => {
-      const separatorIndex = entry.indexOf(LS_FILES_STAGE_PATH_SEPARATOR);
-      return [entry.slice(separatorIndex + 1), entry.slice(0, separatorIndex).split(" ")[1]];
-    })
-  );
-  const workingObjects = (await reader.git(["hash-object", "--", ...uncheckedPaths])).split("\n");
-  return uncheckedPaths.filter((filePath, index) => workingObjects[index] !== indexObjectByPath.get(filePath));
+  const configModules = await listConfigModules(repositoryRoot);
+  const uncommittedConfigModules = configModules.loaded ? await listFilesDifferentFromHead(reader, repositoryRoot, configModules.files) : [];
+  return { configModules, uncommittedConfigModules };
 }
 
 /**
@@ -372,9 +362,7 @@ export async function collectReleaseState({
   const statusOutput = await reader.git(["status", "--porcelain"]);
   const workingTreeChanges = statusOutput.split("\n").map((line) => line.trimEnd()).filter(Boolean);
   const hiddenChanges = await listHiddenLocalChanges(reader, repositoryRoot);
-  const untrackedConfigFile = await findUntrackedConfigFile(reader, repositoryRoot);
-  // Only a local change can reach the loaded configuration without being committed: a clean tree needs no graph.
-  const configModules = workingTreeChanges.length > 0 && findCreateVersionConfigFile(repositoryRoot) ? await listConfigModules(repositoryRoot) : null;
+  const { configModules, uncommittedConfigModules } = await inspectConfigModules(reader, repositoryRoot);
   const localMainExists = (await reader.tryGit(["rev-parse", "--verify", "--quiet", MAIN_BRANCH])) !== null;
   const remoteMainExists = (await reader.tryGit(["rev-parse", "--verify", "--quiet", REMOTE_MAIN_REF])) !== null;
   const aheadCommits = localMainExists && remoteMainExists ? await listCommits(reader, `${REMOTE_MAIN_REF}..${MAIN_BRANCH}`) : [];
@@ -424,8 +412,8 @@ export async function collectReleaseState({
     currentBranch,
     workingTreeChanges,
     hiddenChanges,
-    untrackedConfigFile,
     configModules,
+    uncommittedConfigModules,
     branch,
     pullRequest,
     githubError,

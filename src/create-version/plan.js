@@ -24,9 +24,10 @@ import {
   CREATE_VERSION_CONFIG_FILES,
   CREATE_VERSION_FLAG,
   DEFAULT_CHECKS_SCRIPT,
-  IGNORED_PORCELAIN_PREFIX,
+  HEAD_FILE_DIFFERENCE,
   MAIN_BRANCH,
   MAX_LISTED_ITEMS,
+  MODULE_HOOKS_MINIMUM_NODE_VERSION,
   MIGRATION_STATUS,
   NPM_AUTH_STATUS,
   NPM_DIST_TAG,
@@ -45,6 +46,13 @@ import { describeNpmAuthProblem, describeNpmFirstPublicationWarning } from "./np
 /** Names of the configuration files, as the hints quote them. */
 const CONFIG_FILES_LABEL = CREATE_VERSION_CONFIG_FILES.join(" o ");
 
+/** How the blockers describe each {@link HEAD_FILE_DIFFERENCE} of a file. */
+const HEAD_FILE_DIFFERENCE_LABELS = Object.freeze({
+  [HEAD_FILE_DIFFERENCE.notCommitted]: "no está commiteado: Git lo ignora, nunca se agregó o solo está en staging",
+  [HEAD_FILE_DIFFERENCE.typeChanged]: "no es el mismo tipo de archivo que en HEAD, por ejemplo un enlace simbólico",
+  [HEAD_FILE_DIFFERENCE.contentChanged]: "su contenido es distinto del de HEAD",
+});
+
 /**
  * @typedef {{ sha?: string, subject: string, body?: string }} ReleaseCommit
  * @typedef {{ name: string, headSha: string, hasUpstream: boolean, unpushedCount: number, aheadOfMainCount: number }} FeatureBranchSnapshot
@@ -52,14 +60,15 @@ const CONFIG_FILES_LABEL = CREATE_VERSION_CONFIG_FILES.join(" o ");
  * @typedef {import("./npm.js").NpmLookup} NpmLookup
  * @typedef {import("./npm.js").NpmAuthCheck} NpmAuthCheck
  * @typedef {import("./config.js").MigrationCheck} MigrationCheck
+ * @typedef {import("./head-files.js").HeadFileDifference} HeadFileDifference
  * @typedef {{ sha: string, version: string | null, subject?: string | null, tagged?: boolean }} LastReleaseSnapshot
  *   Newest commit of `origin/main` that changed `version`; `tagged` when `vX.Y.Z` points at it.
  * @typedef {{
  *   currentBranch: string | null,
  *   workingTreeChanges: string[],
- *   hiddenChanges?: string[],
- *   untrackedConfigFile?: string | null,
+ *   hiddenChanges?: HeadFileDifference[],
  *   configModules?: import("./config-modules.js").ConfigModuleGraph | null,
+ *   uncommittedConfigModules?: HeadFileDifference[],
  *   branch?: FeatureBranchSnapshot | null,
  *   pullRequest?: PullRequestSnapshot | null,
  *   githubError?: string | null,
@@ -390,57 +399,35 @@ function isConfigChange(line) {
 }
 
 /**
- * Tells whether a path reported by `git status --porcelain` is, or contains, a module the
- * configuration loads. Git reports a whole untracked directory as `dir/`, so a module inside it counts.
+ * Describes a file that differs from `HEAD`, for a blocker.
  *
- * @param {string} changedPath - Porcelain path, relative to the repository root.
- * @param {string[]} moduleFiles - Files of the configuration module graph.
- * @returns {boolean} `true` when the change reaches a loaded module.
+ * @param {HeadFileDifference} fileDifference - File and how it differs.
+ * @returns {string} Line such as `release/hooks.js (su contenido es distinto del de HEAD)`.
  */
-function reachesConfigModule(changedPath, moduleFiles) {
-  return changedPath.endsWith("/") ? moduleFiles.some((moduleFile) => moduleFile.startsWith(changedPath)) : moduleFiles.includes(changedPath);
+function describeHeadFileDifference({ file, difference }) {
+  return `${file} (${HEAD_FILE_DIFFERENCE_LABELS[difference]})`;
 }
 
 /**
- * Lists the uncommitted changes of modules the configuration file loads (directly or through other
- * modules), each `git status --porcelain` line followed by a note that names it as such.
- *
- * @param {ReleaseState} state - Snapshot.
- * @returns {string[]} Lines to show, empty without a module graph or without changes in it.
- */
-function listConfigModuleChanges(state) {
-  const configModules = state.configModules;
-
-  if (!configModules?.loaded) {
-    return [];
-  }
-
-  return state.workingTreeChanges
-    .filter((line) => !isConfigChange(line) && listPorcelainPaths(line).some((changedPath) => reachesConfigModule(changedPath, configModules.files)))
-    .map((line) => `${line} (módulo que carga ${CONFIG_FILES_LABEL})`);
-}
-
-/**
- * Lists the lines that show the loaded configuration differs from the committed one: uncommitted
- * changes (`git status --porcelain` lines) of the configuration file or of a module it loads and,
- * when the loaded file is not tracked but `git status` omits it because Git ignores it, a
- * `!! <file>` line (the notation of `git status --porcelain --ignored`), since it shadows the
- * committed configuration.
+ * Lists the lines that show the loaded configuration differs from the committed one:
+ * `git status --porcelain` lines of the configuration files (which also cover a deleted or renamed
+ * one) and every module of the loaded configuration (the file itself included) that differs from
+ * `HEAD`, even when `git status` omits it because Git ignores it or hides its change with
+ * `skip-worktree` or `assume-unchanged`. A module already named by a porcelain line is not repeated.
  *
  * @param {ReleaseState} state - Snapshot.
  * @returns {string[]} Lines to show, empty when the loaded configuration is the committed one.
  */
 function listConfigDifferences(state) {
-  const configChanges = [...state.workingTreeChanges.filter(isConfigChange), ...listConfigModuleChanges(state)];
-  const untrackedConfigFile = state.untrackedConfigFile ?? null;
-  const listedByStatus = configChanges.some((line) => listPorcelainPaths(line).includes(untrackedConfigFile ?? ""));
-
-  return untrackedConfigFile && !listedByStatus ? [...configChanges, `${IGNORED_PORCELAIN_PREFIX}${untrackedConfigFile}`] : configChanges;
+  const configChanges = state.workingTreeChanges.filter(isConfigChange);
+  const listedPaths = new Set(configChanges.flatMap(listPorcelainPaths));
+  const moduleDifferences = (state.uncommittedConfigModules ?? []).filter(({ file }) => !listedPaths.has(file)).map(describeHeadFileDifference);
+  return [...configChanges, ...moduleDifferences];
 }
 
 /**
- * Builds the blocker of a run whose configuration module graph could not be read while there are
- * local changes: without it the plan cannot tell whether those changes reach the loaded configuration.
+ * Builds the blocker of a run whose configuration module graph could not be read: without it the
+ * plan cannot tell whether the loaded configuration and its modules are the committed ones.
  *
  * @param {string} reason - Why the graph could not be read.
  * @param {ProjectCommands} commands - Project commands quoted by the hint.
@@ -451,16 +438,18 @@ function configModulesUnknownBlocker(reason, commands) {
     title: `No se pudo saber qué módulos carga ${CONFIG_FILES_LABEL}`,
     details: [
       `Cargar la configuración en un proceso nuevo falló: ${reason}.`,
-      `Sin esa lista no se puede asegurar que los cambios sin commitear no lleguen al release: commitealos en una rama, descartalos (git restore) o guardalos (git stash) y volvé a correr ${commands.createVersion}.`,
+      `Sin esa lista no se puede asegurar que la configuración y los módulos que carga sean los commiteados: corregí el error de carga (o actualizá Node a ${MODULE_HOOKS_MINIMUM_NODE_VERSION} o posterior si falta module.registerHooks) y volvé a correr ${commands.createVersion}.`,
     ],
   };
 }
 
 /**
- * Blocks a runnable plan (new release or resume) while the loaded configuration file is not the
- * committed one: it has uncommitted changes, or it is an ignored file that Git never tracked (such
- * as a local `beez-rp.config.mjs` that shadows the committed `beez-rp.config.js`), or a module it
- * loads (any file of `state.configModules`) has uncommitted changes. The run imports the
+ * Blocks a runnable plan (new release or resume) while the loaded configuration is not the
+ * committed one: a configuration file has uncommitted changes (also a deletion or a rename), or the
+ * loaded file or any module it loads differs from `HEAD` (an ignored or untracked file, such as a
+ * local `beez-rp.config.mjs` that shadows the committed `beez-rp.config.js` or a local override the
+ * configuration imports, a symbolic link where `HEAD` has a regular file, or other content), or its
+ * module graph could not be read. The run imports the
  * configuration and its modules from the working tree once, before `--ignore-local-changes` sets
  * them aside, and Node keeps them cached (hooks included, with every value they captured), so
  * the release would run with a configuration that is not the committed one: a local edit that drops
@@ -472,7 +461,7 @@ function configModulesUnknownBlocker(reason, commands) {
  * @param {ReleaseState} state - Snapshot.
  * @param {ProjectCommands} commands - Project commands quoted by the hints.
  * @returns {ReleasePlan} The same plan, or a blocked plan when the loaded configuration is not the
- *   committed one or its module graph could not be read while there are local changes.
+ *   committed one or its module graph could not be read.
  */
 function requireCommittedConfig(plan, state, commands) {
   if (plan.steps.length === 0) {
@@ -489,12 +478,13 @@ function requireCommittedConfig(plan, state, commands) {
     return plan;
   }
 
-  const untrackedConfigFile = state.untrackedConfigFile ?? null;
-  const shadowHint = untrackedConfigFile
-    ? [
-        `${untrackedConfigFile} no está commiteado (Git lo ignora o nunca se agregó) y es el archivo de configuración que se carga: borralo o renombralo para usar la configuración commiteada, o commitealo (git add -f si está ignorado) en una rama y llevalo a ${MAIN_BRANCH}.`,
-      ]
-    : [];
+  const notCommittedModules = (state.uncommittedConfigModules ?? []).filter(({ difference }) => difference === HEAD_FILE_DIFFERENCE.notCommitted).map(({ file }) => file);
+  const shadowHint =
+    notCommittedModules.length > 0
+      ? [
+          `${notCommittedModules.join(", ")} no está commiteado y la configuración lo carga: borralo o renombralo para usar la configuración commiteada, o commitealo (git add -f si está ignorado) en una rama y llevalo a ${MAIN_BRANCH}.`,
+        ]
+      : [];
   const blocker =
     plan.mode === RELEASE_MODE.resume
       ? {
@@ -541,8 +531,8 @@ function requireVisibleLocalChanges(plan, state, commands) {
   const blocker = {
     title: `Hay ${hiddenChanges.length} archivo(s) con cambios locales que git status no muestra`,
     details: [
-      ...hiddenChanges.slice(0, MAX_LISTED_ITEMS),
-      `Git los marca con skip-worktree o assume-unchanged (git ls-files -v los muestra con S o en minúscula), así que ni git status ni git stash (tampoco --${CREATE_VERSION_FLAG.ignoreLocalChanges}) los ven, pero el release usaría su contenido local mientras el commit de release guarda el del índice.`,
+      ...hiddenChanges.slice(0, MAX_LISTED_ITEMS).map(describeHeadFileDifference),
+      `Git los marca con skip-worktree o assume-unchanged (git ls-files -v los muestra con S o en minúscula), así que ni git status ni git stash (tampoco --${CREATE_VERSION_FLAG.ignoreLocalChanges}) los ven, pero el release usaría su contenido local mientras el commit de release guarda el de HEAD.`,
       `Quitá la marca (git update-index --no-skip-worktree -- <archivo> y git update-index --no-assume-unchanged -- <archivo>, en dos comandos), commitealos en una rama o descartalos (git restore), y volvé a correr ${commands.createVersion}.`,
     ],
   };
@@ -870,7 +860,8 @@ function missingChecksBlocker(commands) {
  */
 export function buildReleasePlan(state, capabilities = DEFAULT_CAPABILITIES, planOptions = {}) {
   const commands = capabilities.commands ?? DEFAULT_PROJECT_COMMANDS;
-  const plan = requireVisibleLocalChanges(requireCommittedConfig(planRelease(state, capabilities, planOptions), state, commands), state, commands);
+  // Hidden changes first: their hint (removing the index flag) is needed before any other fix works.
+  const plan = requireCommittedConfig(requireVisibleLocalChanges(planRelease(state, capabilities, planOptions), state, commands), state, commands);
   return warnAboutSetAsideChanges(applyNpmAuth(plan, state.npmAuth, commands), state, planOptions.ignoreLocalChanges ?? false);
 }
 

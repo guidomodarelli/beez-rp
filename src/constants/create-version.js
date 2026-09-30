@@ -268,9 +268,6 @@ export const PORCELAIN_SOURCE_PATH_STATUS_CODES = Object.freeze(["R", "C"]);
 /** Separates the source path from the new path of a renamed or copied `git status --porcelain` entry. */
 export const PORCELAIN_RENAME_SEPARATOR = " -> ";
 
-/** State columns `git status --porcelain --ignored` writes before an ignored path. */
-export const IGNORED_PORCELAIN_PREFIX = "!! ";
-
 /** Width of the tag and the space `git ls-files -v` writes before each path. */
 export const LS_FILES_TAG_WIDTH = 2;
 
@@ -281,8 +278,29 @@ export const LS_FILES_TAG_WIDTH = 2;
  */
 export const LS_FILES_SKIP_WORKTREE_TAG = "S";
 
-/** Separates the stage fields from the path of a `git ls-files -s` entry. */
-export const LS_FILES_STAGE_PATH_SEPARATOR = "\t";
+/** Separates the mode, type and object fields from the path of a `git ls-tree` entry. */
+export const LS_TREE_ENTRY_PATH_SEPARATOR = "\t";
+
+/** Mode `git ls-tree` reports for a committed symbolic link, whose blob holds the link target. */
+export const GIT_SYMBOLIC_LINK_MODE = "120000";
+
+/**
+ * Ways a working-tree file that the release loads or uses can differ from `HEAD`, the commit the
+ * release is built on:
+ *
+ * - `notCommitted`: `HEAD` has no such file (it is untracked, ignored or only staged).
+ * - `typeChanged`: the working-tree entry is not the same kind of file as in `HEAD` (for example,
+ *   a symbolic link or a directory where `HEAD` has a regular file).
+ * - `contentChanged`: same kind of file, different content.
+ */
+export const HEAD_FILE_DIFFERENCE = Object.freeze({
+  notCommitted: "notCommitted",
+  typeChanged: "typeChanged",
+  contentChanged: "contentChanged",
+});
+
+/** Directory of installed dependencies: the configuration module graph never lists files inside it. */
+export const NODE_MODULES_DIRECTORY = "node_modules";
 
 /** Delimiter of a path that Git quotes as a C string literal (special characters, or spaces in a rename). */
 export const GIT_QUOTED_PATH_DELIMITER = '"';
@@ -503,7 +521,7 @@ export const GIT_REGULAR_FILE_MODES = Object.freeze(["100644", "100755"]);
 
 /**
  * First Node version with `module.registerHooks`, the synchronous module hook that lists the modules
- * `beez-rp.config.(m)js` loads (ESM and CommonJS alike). Older versions cannot tell whether a local
- * change reaches the loaded configuration, so the plan blocks while there are local changes.
+ * `beez-rp.config.(m)js` loads (ESM and CommonJS alike). Older versions cannot tell whether the
+ * loaded configuration is the committed one, so the plan blocks every release.
  */
 export const MODULE_HOOKS_MINIMUM_NODE_VERSION = "22.15.0";

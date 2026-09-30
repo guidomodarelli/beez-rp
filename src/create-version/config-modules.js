@@ -10,8 +10,9 @@
  *
  * The graph is read in a new Node process with a module hook, so it lists what the configuration
  * really loads (ESM `import`, CommonJS `require` and JSON modules) instead of guessing from its
- * source. Files the configuration reads with `fs` instead of importing them are not modules and are
- * not listed.
+ * source, including ignored or untracked files and a module imported through a symbolic link (the
+ * link itself is listed, besides its target when that is inside the repository). Files the
+ * configuration reads with `fs` instead of importing them are not modules and are not listed.
  *
  * @module create-version/config-modules
  */
@@ -22,12 +23,12 @@ import module from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { MODULE_HOOKS_MINIMUM_NODE_VERSION } from "../constants/create-version.js";
+import { MODULE_HOOKS_MINIMUM_NODE_VERSION, NODE_MODULES_DIRECTORY } from "../constants/create-version.js";
 
 /**
  * @typedef {{ loaded: true, files: string[] } | { loaded: false, reason: string }} ConfigModuleGraph
  *   `files` are relative to the repository root, separated with `/` like `git status` paths, and
- *   only include files inside the repository.
+ *   only include files inside the repository, outside `node_modules`.
  * @typedef {import("./config-modules-process.js").ConfigModulesMessage} ConfigModulesMessage
  */
 
@@ -35,15 +36,17 @@ import { MODULE_HOOKS_MINIMUM_NODE_VERSION } from "../constants/create-version.j
 const CONFIG_MODULES_PROCESS_SCRIPT = fileURLToPath(new URL("./config-modules-process.js", import.meta.url));
 
 /**
- * Resolves a path through symbolic links and, on Windows, to its real casing, so a module URL and
- * the repository root compare equal whatever spelling each one used.
+ * Resolves the directory of a path through symbolic links and, on Windows, to its real casing,
+ * keeping the last segment as it is: the module URLs and the repository root then compare equal
+ * whatever spelling each one used, and a module that is itself a symbolic link keeps its own path
+ * (so it can be reported as a symbolic link instead of disappearing behind its target).
  *
- * @param {string} filePath - Existing path.
- * @returns {string} Canonical path, or the same path when it cannot be resolved.
+ * @param {string} filePath - Path whose directory exists.
+ * @returns {string} Path with a canonical directory, or the same path when it cannot be resolved.
  */
 function toCanonicalPath(filePath) {
   try {
-    return realpathSync.native(filePath);
+    return path.join(realpathSync.native(path.dirname(filePath)), path.basename(filePath));
   } catch {
     return filePath;
   }
@@ -51,21 +54,23 @@ function toCanonicalPath(filePath) {
 
 /**
  * Turns the loaded module URLs into repository-relative paths, dropping modules outside the
- * repository (Node built-ins never reach here; dependencies installed elsewhere do).
+ * repository and installed dependencies (anything inside a `node_modules` directory): Node
+ * built-ins never reach here.
  *
  * @param {string} repositoryRoot - Repository root.
  * @param {string[]} moduleUrls - `file:` URLs of the loaded modules.
  * @returns {string[]} Sorted repository-relative paths separated with `/`.
  */
 function toRepositoryFiles(repositoryRoot, moduleUrls) {
-  const canonicalRoot = toCanonicalPath(repositoryRoot);
+  const canonicalRoot = realpathSync.native(repositoryRoot);
   const files = new Set();
 
   for (const moduleUrl of moduleUrls) {
     const relativePath = path.relative(canonicalRoot, toCanonicalPath(fileURLToPath(moduleUrl)));
+    const segments = relativePath.split(path.sep);
 
-    if (relativePath && relativePath !== ".." && !relativePath.startsWith(`..${path.sep}`) && !path.isAbsolute(relativePath)) {
-      files.add(relativePath.split(path.sep).join("/"));
+    if (relativePath && segments[0] !== ".." && !path.isAbsolute(relativePath) && !segments.includes(NODE_MODULES_DIRECTORY)) {
+      files.add(segments.join("/"));
     }
   }
 
