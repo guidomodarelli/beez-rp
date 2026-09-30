@@ -3,10 +3,10 @@
  * changes, `main` compared with `origin/main`, the version and subject of
  * `HEAD`, the commit of a detached release tag on `origin`, the last release,
  * the commits waiting to be released, the pull request of a feature branch,
- * the local changes `git status` does not show, the modules the configuration
- * loads (read in a new Node process) and whether they are the committed ones,
- * the published versions, the npm credentials (when the plan would publish to
- * npm) and pending migrations.
+ * the local changes `git status` does not show, the published versions, the
+ * npm credentials (when the plan would publish to npm), pending migrations and
+ * the modules the configuration loaded in this process (traced since it was
+ * loaded) and whether they are the committed ones.
  *
  * Every reader is read-only; the only network operations are `git fetch`,
  * `git ls-remote`, `gh pr view`, `npm view`, `npm whoami`, `npm owner ls` and
@@ -290,23 +290,26 @@ async function listHiddenLocalChanges(reader, repositoryRoot) {
 }
 
 /**
- * Loads the configuration in a new Node process to list the repository files it loads as modules,
- * and compares each one with `HEAD`. It always runs when there is a configuration, even with a
- * clean `git status`: an ignored local override the configuration imports, or a module whose local
- * change Git hides with `skip-worktree`, never shows up there. The cost is one extra Node process
- * (and one extra evaluation of the configuration) per diagnosis.
+ * Lists the repository files this process has loaded as modules since the configuration trace
+ * started (the configuration, what it imports and what its hooks or `migrations.check` imported
+ * so far), and compares each one with `HEAD`. It always runs when there is a configuration, even
+ * with a clean `git status`: an ignored local override the configuration imports, or a module whose
+ * local change Git hides with `skip-worktree`, never shows up there. The run calls it again right
+ * before setting local changes aside, with everything loaded until then.
  *
  * @param {GitReader} reader - Git reader.
  * @param {string} repositoryRoot - Repository root.
  * @returns {Promise<{ configModules: ConfigModuleGraph | null, uncommittedConfigModules: HeadFileDifference[] }>} Module
  *   graph (`null` without configuration) and the modules that differ from `HEAD`.
  */
-async function inspectConfigModules(reader, repositoryRoot) {
-  if (!findCreateVersionConfigFile(repositoryRoot)) {
+export async function inspectConfigModules(reader, repositoryRoot) {
+  const configFile = findCreateVersionConfigFile(repositoryRoot);
+
+  if (!configFile) {
     return { configModules: null, uncommittedConfigModules: [] };
   }
 
-  const configModules = await listConfigModules(repositoryRoot);
+  const configModules = listConfigModules(repositoryRoot, configFile);
 
   if (!configModules.loaded) {
     return { configModules, uncommittedConfigModules: [] };
@@ -354,7 +357,6 @@ export async function collectReleaseState({
   const statusOutput = await reader.git(["status", "--porcelain"]);
   const workingTreeChanges = statusOutput.split("\n").map((line) => line.trimEnd()).filter(Boolean);
   const hiddenChanges = await listHiddenLocalChanges(reader, repositoryRoot);
-  const { configModules, uncommittedConfigModules } = await inspectConfigModules(reader, repositoryRoot);
   const localMainExists = (await reader.tryGit(["rev-parse", "--verify", "--quiet", MAIN_BRANCH])) !== null;
   const remoteMainExists = (await reader.tryGit(["rev-parse", "--verify", "--quiet", REMOTE_MAIN_REF])) !== null;
   const aheadCommits = localMainExists && remoteMainExists ? await listCommits(reader, `${REMOTE_MAIN_REF}..${MAIN_BRANCH}`) : [];
@@ -397,6 +399,8 @@ export async function collectReleaseState({
     onProgress("Consultando migraciones pendientes");
   }
   const migrations = await readMigrations(checkMigrations);
+  // Inspected last: `migrations.check` runs configuration code that may import more modules.
+  const { configModules, uncommittedConfigModules } = await inspectConfigModules(reader, repositoryRoot);
 
   /** @type {ReleaseSnapshot} */
   const snapshot = {

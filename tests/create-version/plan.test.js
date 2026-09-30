@@ -290,7 +290,7 @@ describe("create-version plan", () => {
     expect(plan.blockers).toEqual([
       {
         title: "No se pudo saber qué módulos carga beez-rp.config.mjs o beez-rp.config.js",
-        details: ["Cargar la configuración en un proceso nuevo falló: Node 22.14.0 no permite registrar hooks.", expect.stringContaining("22.15.0")],
+        details: ["No se pudo registrar qué módulos cargó: Node 22.14.0 no permite registrar hooks.", expect.stringContaining("22.15.0")],
       },
     ]);
   });

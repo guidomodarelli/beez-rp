@@ -101,7 +101,7 @@ import { restoreLocalChanges, setAsideLocalChanges } from "./local-changes.js";
 import { describeProjectCommands, detectPackageManager } from "../package-manager.js";
 import { buildReleasePlan, buildReleaseUsage, listLocalChangesToSetAside, parseReleaseArguments } from "./plan.js";
 import { createGitReader, listCommits, runCommandLine, runInherited } from "./process.js";
-import { collectReleaseState } from "./state.js";
+import { collectReleaseState, inspectConfigModules } from "./state.js";
 import { decodeStrictUtf8, InvalidUtf8Error } from "./utf8-text.js";
 
 /**
@@ -1746,6 +1746,18 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
     registryUrl: null,
     commands: config.commands,
   };
+  // Last check of the modules the configuration loaded, with everything this process loaded up to
+  // here, right before local changes are set aside and the steps run configuration code. A module
+  // loaded for the first time after this point comes from the working tree without the set-aside
+  // changes (tracked files hidden with skip-worktree or assume-unchanged already block the
+  // diagnosis); only an ignored file first imported by a step escapes this check.
+  const recheckedPlan = buildReleasePlan({ ...state, ...(await inspectConfigModules(reader, repositoryRoot)) }, capabilities, { ...planOptions, ignoreLocalChanges: options.ignoreLocalChanges });
+
+  if (recheckedPlan.blockers.length > 0) {
+    print(renderPlan(recheckedPlan));
+    return 0;
+  }
+
   const changesToSetAside = options.ignoreLocalChanges ? listLocalChangesToSetAside(state, plan.mode) : [];
   let setAside = null;
 

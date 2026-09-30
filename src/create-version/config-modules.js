@@ -1,6 +1,6 @@
 /**
- * Module graph of the `create-version` configuration: the files of the repository that
- * `beez-rp.config.(m)js` loads, directly or through the modules it imports.
+ * Module graph of the `create-version` configuration: the files of the repository that the run
+ * loads as modules, starting with `beez-rp.config.(m)js` and everything it imports.
  *
  * The run imports the configuration once, from the working tree, before `--ignore-local-changes`
  * sets the uncommitted changes aside, and Node keeps every imported module in its cache. A local
@@ -8,21 +8,22 @@
  * migrations and hooks, including the values they capture) even after it is set aside, so the plan
  * blocks it like a change in the configuration file itself.
  *
- * The graph is read in a new Node process with a module hook, so it lists what the configuration
- * really loads (ESM `import`, CommonJS `require` and JSON modules) instead of guessing from its
- * source, including ignored or untracked files and a module imported through a symbolic link (every
- * link along its path inside the repository is listed, besides its target, which is listed apart
- * when it is outside the repository). Files the
- * configuration reads with `fs` instead of importing them are not modules and are not listed.
+ * The graph is traced in the running process itself with a synchronous module hook
+ * (`module.registerHooks`), registered once per process before the configuration loads. It records
+ * every `file:` module the process resolves from then on (ESM `import`, CommonJS `require` and JSON
+ * modules), for the whole run: the configuration, whatever it imports depending on the process
+ * (its arguments, whether it has a terminal), and what its hooks or `migrations.check` import
+ * lazily when they run. It also records every symbolic link inside the repository followed to reach
+ * one (the module itself or any directory on its way). Files the configuration reads with `fs`
+ * instead of importing them are not modules and are not listed.
  *
  * @module create-version/config-modules
  */
 
-import { fork } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { lstatSync, realpathSync } from "node:fs";
 import module from "node:module";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { MODULE_HOOKS_MINIMUM_NODE_VERSION, NODE_MODULES_DIRECTORY } from "../constants/create-version.js";
 
@@ -32,17 +33,77 @@ import { MODULE_HOOKS_MINIMUM_NODE_VERSION, NODE_MODULES_DIRECTORY } from "../co
  *   only include files inside the repository, outside `node_modules` (loaded modules and the
  *   symbolic links followed to reach them). `externalFiles` are the absolute paths of the modules
  *   loaded from outside the repository, outside `node_modules` and beez-rp itself.
- * @typedef {import("./config-modules-process.js").ConfigModulesMessage} ConfigModulesMessage
+ * @typedef {{ moduleUrls: Set<string>, requestedUrls: Set<string> }} ModuleTrace
+ *   `file:` URLs of the resolved modules (their real path, where Node loads them) and of the paths
+ *   the specifiers named before Node followed symbolic links.
  */
-
-/** Script run by the new process: loads the configuration and sends the modules it loaded back. */
-const CONFIG_MODULES_PROCESS_SCRIPT = fileURLToPath(new URL("./config-modules-process.js", import.meta.url));
 
 /**
- * Canonical root of the running beez-rp package: the configuration process loads beez-rp's own
- * modules, which are not part of the released repository (unless it is beez-rp's own checkout).
+ * Canonical root of the running beez-rp package: the run loads beez-rp's own modules, which are
+ * not part of the released repository (unless it is beez-rp's own checkout).
  */
 const BEEZ_RP_PACKAGE_ROOT = realpathSync.native(fileURLToPath(new URL("../..", import.meta.url)));
+
+/** Trace of this process, created by the first {@link startTracingConfigModules}; `null` before. */
+/** @type {ModuleTrace | null} */
+let moduleTrace = null;
+
+/**
+ * Resolves a specifier to the `file:` URL it names before Node follows symbolic links.
+ *
+ * @param {string} specifier - Specifier as written in the `import` or `require`.
+ * @param {string | undefined} parentUrl - URL of the importing module.
+ * @returns {string | null} Requested URL, or `null` when the specifier is not a file path (a
+ *   package, a built-in).
+ */
+function toRequestedUrl(specifier, parentUrl) {
+  try {
+    if (specifier.startsWith("file:")) {
+      return new URL(specifier).href;
+    }
+    if (path.isAbsolute(specifier)) {
+      return pathToFileURL(specifier).href;
+    }
+    if ((specifier.startsWith("./") || specifier.startsWith("../")) && parentUrl?.startsWith("file:")) {
+      return new URL(specifier, parentUrl).href;
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+/**
+ * Starts recording the modules this process resolves, once per process: later calls keep the same
+ * trace. It must run before the configuration loads, since a module Node already cached is never
+ * resolved again from where it was first imported. Without `module.registerHooks` (Node before
+ * {@link MODULE_HOOKS_MINIMUM_NODE_VERSION}) nothing is recorded and {@link listConfigModules}
+ * says why.
+ */
+export function startTracingConfigModules() {
+  if (moduleTrace || typeof module.registerHooks !== "function") {
+    return;
+  }
+
+  /** @type {ModuleTrace} */
+  const trace = { moduleUrls: new Set(), requestedUrls: new Set() };
+  module.registerHooks({
+    resolve(specifier, context, nextResolve) {
+      const requestedUrl = toRequestedUrl(specifier, context.parentURL);
+      if (requestedUrl) {
+        trace.requestedUrls.add(requestedUrl);
+      }
+
+      const resolution = nextResolve(specifier, context);
+      if (resolution.url.startsWith("file:")) {
+        trace.moduleUrls.add(resolution.url);
+      }
+      return resolution;
+    },
+  });
+  moduleTrace = trace;
+}
 
 /**
  * Resolves the directory of a path through symbolic links and, on Windows, to its real casing,
@@ -74,29 +135,81 @@ function isInsideDirectory(directory, filePath) {
 }
 
 /**
- * Sorts the loaded modules and the symbolic links followed to reach them: files inside the
- * repository become repository-relative paths, and modules outside it are kept apart, since the
- * release cannot compare them with `HEAD` (such as a module reached through a directory of the
- * repository replaced by a link to an outside directory). Installed dependencies (anything inside a
- * `node_modules` directory) and beez-rp itself are dropped; Node built-ins never reach here.
+ * Lists the symbolic links (or Windows junctions) along a requested module path inside the
+ * repository, from its first segment below the root to the module itself. Node loads the module
+ * from its real path, so without this a link (the module itself, or any directory on its way, even
+ * one pointing outside the repository) would never show up in the graph.
+ *
+ * @param {string} requestedUrl - `file:` URL a specifier named.
+ * @param {string[]} repositoryRoots - Spellings of the repository root (as given and real).
+ * @returns {string[]} Paths of the links, empty when the URL is not inside the repository or no
+ *   segment is a link.
+ */
+function listSymbolicLinks(requestedUrl, repositoryRoots) {
+  const requestedPath = fileURLToPath(requestedUrl);
+  const repositoryRoot = repositoryRoots.find((root) => {
+    const relativePath = path.relative(root, requestedPath);
+    return relativePath !== "" && relativePath.split(path.sep)[0] !== ".." && !path.isAbsolute(relativePath);
+  });
+
+  if (!repositoryRoot) {
+    return [];
+  }
+
+  const symbolicLinks = [];
+  let currentPath = repositoryRoot;
+
+  for (const segment of path.relative(repositoryRoot, requestedPath).split(path.sep)) {
+    currentPath = path.join(currentPath, segment);
+    const stats = lstatSync(currentPath, { throwIfNoEntry: false });
+
+    if (!stats) {
+      break;
+    }
+    if (stats.isSymbolicLink()) {
+      symbolicLinks.push(currentPath);
+    }
+  }
+
+  return symbolicLinks;
+}
+
+/**
+ * Lists the repository files this process has loaded as modules so far, and the modules it loaded
+ * from outside the repository: files inside the repository become repository-relative paths, and
+ * modules outside it are kept apart, since the release cannot compare them with `HEAD` (such as a
+ * module reached through a directory of the repository replaced by a link to an outside
+ * directory). Installed dependencies (anything inside a `node_modules` directory) and beez-rp
+ * itself are dropped; Node built-ins are never recorded.
  *
  * @param {string} repositoryRoot - Repository root.
- * @param {string[]} moduleUrls - `file:` URLs of the loaded modules.
- * @param {string[]} symbolicLinkUrls - `file:` URLs of the symbolic links inside the repository followed to reach them.
- * @returns {{ files: string[], externalFiles: string[] }} Sorted repository-relative paths separated
- *   with `/`, and sorted absolute paths of the modules outside the repository.
+ * @param {string} configFile - Configuration file the run loaded, relative to the root.
+ * @returns {ConfigModuleGraph} Sorted repository-relative paths separated with `/` and sorted
+ *   absolute paths of the modules outside the repository, or why the graph is unknown: the trace
+ *   was never started, or the configuration was not loaded after it started.
  */
-function classifyConfigModules(repositoryRoot, moduleUrls, symbolicLinkUrls) {
+export function listConfigModules(repositoryRoot, configFile) {
+  if (!moduleTrace) {
+    return {
+      loaded: false,
+      reason:
+        typeof module.registerHooks === "function"
+          ? "beez-rp no registró sus hooks de módulos antes de cargar la configuración (loadCreateVersionConfig los registra)"
+          : `Node ${process.versions.node} no permite registrar hooks de módulos síncronos (module.registerHooks); hace falta Node ${MODULE_HOOKS_MINIMUM_NODE_VERSION} o posterior`,
+    };
+  }
+
   const canonicalRoot = realpathSync.native(repositoryRoot);
+  const repositoryRoots = [...new Set([path.resolve(repositoryRoot), canonicalRoot])];
   const files = new Set();
   const externalFiles = new Set();
 
   /**
-   * @param {string} fileUrl - URL of a loaded module or of a symbolic link followed to reach one.
-   * @param {boolean} isSymbolicLink - Whether the URL names a followed symbolic link.
+   * @param {string} filePath - Loaded module or symbolic link followed to reach one.
+   * @param {boolean} isSymbolicLink - Whether the path names a followed symbolic link.
    */
-  const classify = (fileUrl, isSymbolicLink) => {
-    const canonicalPath = toCanonicalPath(fileURLToPath(fileUrl));
+  const classify = (filePath, isSymbolicLink) => {
+    const canonicalPath = toCanonicalPath(filePath);
     const isInsideRepository = isInsideDirectory(canonicalRoot, canonicalPath);
     const segments = (isInsideRepository ? path.relative(canonicalRoot, canonicalPath) : canonicalPath).split(path.sep);
 
@@ -110,59 +223,18 @@ function classifyConfigModules(repositoryRoot, moduleUrls, symbolicLinkUrls) {
     }
   };
 
-  for (const moduleUrl of moduleUrls) {
-    classify(moduleUrl, false);
+  for (const moduleUrl of moduleTrace.moduleUrls) {
+    classify(fileURLToPath(moduleUrl), false);
   }
-  for (const symbolicLinkUrl of symbolicLinkUrls) {
-    classify(symbolicLinkUrl, true);
-  }
-
-  return { files: [...files].toSorted(), externalFiles: [...externalFiles].toSorted() };
-}
-
-/**
- * Loads the configuration of a repository in a new Node process and lists the repository files it
- * loaded as modules. The process is stopped as soon as it answers, so a configuration that leaves
- * handles open (a database pool, a timer) does not keep the diagnosis waiting.
- *
- * @param {string} repositoryRoot - Repository root.
- * @returns {Promise<ConfigModuleGraph>} Files of the module graph, or why the configuration could not be loaded; never rejects.
- */
-export function listConfigModules(repositoryRoot) {
-  // The new process runs on this same Node binary, so it lacks the hooks exactly when this one does.
-  if (typeof module.registerHooks !== "function") {
-    return Promise.resolve({
-      loaded: false,
-      reason: `Node ${process.versions.node} no permite registrar hooks de módulos síncronos (module.registerHooks); hace falta Node ${MODULE_HOOKS_MINIMUM_NODE_VERSION} o posterior`,
-    });
+  for (const requestedUrl of moduleTrace.requestedUrls) {
+    for (const symbolicLink of listSymbolicLinks(requestedUrl, repositoryRoots)) {
+      classify(symbolicLink, true);
+    }
   }
 
-  return new Promise((resolve) => {
-    let settled = false;
-    const graphProcess = fork(CONFIG_MODULES_PROCESS_SCRIPT, [repositoryRoot], { cwd: repositoryRoot, stdio: ["ignore", "ignore", "pipe", "ipc"] });
-    let errorOutput = "";
+  if (!files.has(configFile)) {
+    return { loaded: false, reason: `${configFile} no se cargó con loadCreateVersionConfig en este proceso después de registrar los hooks de módulos` };
+  }
 
-    /** @param {ConfigModuleGraph} outcome */
-    const settle = (outcome) => {
-      if (!settled) {
-        settled = true;
-        resolve(outcome);
-      }
-    };
-
-    graphProcess.stderr?.setEncoding("utf8").on("data", (chunk) => (errorOutput += chunk));
-    graphProcess.on("message", (/** @type {ConfigModulesMessage} */ message) => {
-      settle(
-        message.moduleUrls
-          ? { loaded: true, ...classifyConfigModules(repositoryRoot, message.moduleUrls, message.symbolicLinkUrls ?? []) }
-          : { loaded: false, reason: message.reason ?? "motivo desconocido" }
-      );
-      graphProcess.kill();
-    });
-    graphProcess.on("error", (error) => settle({ loaded: false, reason: error.message }));
-    // `close` comes after the IPC channel is drained, so a message sent right before exiting is never lost.
-    graphProcess.on("close", (exitCode) =>
-      settle({ loaded: false, reason: errorOutput.trim() || `el proceso terminó con código ${exitCode ?? "desconocido"} sin responder` })
-    );
-  });
+  return { loaded: true, files: [...files].toSorted(), externalFiles: [...externalFiles].toSorted() };
 }

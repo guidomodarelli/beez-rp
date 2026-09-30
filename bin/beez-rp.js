@@ -13,14 +13,16 @@
  * - `beez-rp guard-publish` is the `prepublishOnly` guard: it exits with `1`
  *   and explains why when pnpm, yarn or bun publishes, and with `0` otherwise.
  *
+ * Each command imports its modules only after `create-version` starts tracing module loads, so
+ * the trace also sees beez-rp's own modules (they are part of the release when beez-rp releases
+ * its own checkout).
+ *
  * @module beez-rp-cli
  */
 
-import { decideBuildForCheckout } from "../src/build-gate.js";
 import { BUILD_DECISION, DECISION_EXIT_CODE, GATE_FAILURE_EXIT_CODE } from "../src/constants/build-gate.js";
 import { CLI_COMMAND } from "../src/constants/cli.js";
-import { runCreateVersion } from "../src/create-version/run.js";
-import { decidePublishGuardForEnvironment } from "../src/guard-publish.js";
+import { startTracingConfigModules } from "../src/create-version/config-modules.js";
 
 /** Usage printed for unknown commands. */
 const USAGE = `Usage: beez-rp ${CLI_COMMAND.ignoreBuild} | beez-rp ${CLI_COMMAND.createVersion} [options] | beez-rp ${CLI_COMMAND.guardPublish}`;
@@ -28,14 +30,18 @@ const USAGE = `Usage: beez-rp ${CLI_COMMAND.ignoreBuild} | beez-rp ${CLI_COMMAND
 const [command, ...commandArguments] = process.argv.slice(2);
 
 if (command === CLI_COMMAND.createVersion) {
+  startTracingConfigModules();
+  const { runCreateVersion } = await import("../src/create-version/run.js");
   process.exitCode = await runCreateVersion({ repositoryRoot: process.cwd(), argv: commandArguments });
 } else if (command === CLI_COMMAND.guardPublish) {
+  const { decidePublishGuardForEnvironment } = await import("../src/guard-publish.js");
   const decision = decidePublishGuardForEnvironment();
   if (decision.message) {
     console.error(decision.message);
   }
   process.exitCode = decision.exitCode;
 } else if (command === CLI_COMMAND.ignoreBuild) {
+  const { decideBuildForCheckout } = await import("../src/build-gate.js");
   try {
     const decision = decideBuildForCheckout(process.cwd());
     console.log(decision.reason);

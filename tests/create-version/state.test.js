@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { spawn, spawnSync } from "node:child_process";
-import { appendFileSync, chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { HEAD_FILE_DIFFERENCE, NPM_LOOKUP_STATUS, RELEASE_MODE, RELEASE_STEP } from "../../src/constants/create-version.js";
+import { NPM_LOOKUP_STATUS, RELEASE_MODE, RELEASE_STEP } from "../../src/constants/create-version.js";
 import { buildReleasePlan } from "../../src/create-version/plan.js";
 import { collectReleaseState } from "../../src/create-version/state.js";
 import { startFixtureNpmRegistry } from "./support/fixture-npm-registry.js";
@@ -33,6 +33,9 @@ const BOX_BORDER_PATTERN = /[│╭╮╰╯─]/gu;
 
 /** Command line entrypoint exercised end to end. */
 const CLI_PATH = fileURLToPath(new URL("../../bin/beez-rp.js", import.meta.url));
+
+/** Root of this beez-rp checkout, whose `bin` and `src` a fixture copies to play beez-rp releasing itself. */
+const BEEZ_RP_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 
 /** @type {string[]} */
 const temporaryDirectories = [];
@@ -778,7 +781,7 @@ describe("beez-rp create-version command", () => {
 
   it(
     "should not start nor resume a release while an ignored beez-rp.config.mjs shadows the committed beez-rp.config.js",
-    async () => {
+    () => {
       const { repositoryRoot, remoteRoot } = createReleasedRepository();
       const cliPath = path.join(repositoryRoot, "src", "cli.js");
       mkdirSync(path.dirname(cliPath));
@@ -788,7 +791,6 @@ describe("beez-rp create-version command", () => {
       writeFileSync(path.join(repositoryRoot, "beez-rp.config.mjs"), ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", "};", ""].join("\n"));
 
       expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe("");
-      expect((await collect(repositoryRoot)).uncommittedConfigModules).toEqual([{ file: "beez-rp.config.mjs", difference: HEAD_FILE_DIFFERENCE.notCommitted }]);
 
       const newRelease = runCli(repositoryRoot, ["--bump", "minor", "--ignore-local-changes"]);
 
@@ -1080,7 +1082,7 @@ describe("beez-rp create-version command", () => {
 
   it(
     "should not release with --ignore-local-changes while a directory holding a module the configuration imports was replaced by a link to a directory outside the repository",
-    async () => {
+    () => {
       const { repositoryRoot, remoteRoot } = createReleasedRepository();
       const cliPath = path.join(repositoryRoot, "src", "cli.js");
       const releaseDirectory = path.join(repositoryRoot, "release");
@@ -1102,11 +1104,6 @@ describe("beez-rp create-version command", () => {
       writeFileSync(path.join(externalRoot, "version-files.js"), "export const versionFiles = [];\n");
       rmSync(releaseDirectory, { recursive: true });
       symlinkSync(externalRoot, releaseDirectory, process.platform === "win32" ? "junction" : "dir");
-
-      const { uncommittedConfigModules } = await collect(repositoryRoot);
-
-      expect(uncommittedConfigModules).toContainEqual({ file: "release", difference: HEAD_FILE_DIFFERENCE.typeChanged });
-      expect((uncommittedConfigModules ?? []).filter(({ difference }) => difference === HEAD_FILE_DIFFERENCE.outsideRepository)).toHaveLength(1);
 
       const blocked = runCli(repositoryRoot, ["--bump", "minor", "--ignore-local-changes"]);
 
@@ -1166,7 +1163,7 @@ describe("beez-rp create-version command", () => {
 
   it(
     "should not release nor plan it in --dry-run while the committed configuration imports an ignored local override that git status does not list",
-    async () => {
+    () => {
       const { repositoryRoot, remoteRoot } = createReleasedRepository();
       const cliPath = path.join(repositoryRoot, "src", "cli.js");
       const overridePath = path.join(repositoryRoot, "release", "local-overrides.js");
@@ -1188,7 +1185,6 @@ describe("beez-rp create-version command", () => {
       writeFileSync(overridePath, "export default { versionFiles: [] };\n");
 
       expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe("");
-      expect((await collect(repositoryRoot)).uncommittedConfigModules).toEqual([{ file: "release/local-overrides.js", difference: HEAD_FILE_DIFFERENCE.notCommitted }]);
 
       for (const commandArguments of [["--dry-run"], ["--bump", "minor"]]) {
         const blocked = runCli(repositoryRoot, commandArguments);
@@ -1384,6 +1380,115 @@ describe("beez-rp create-version command", () => {
       expect(flattenOutput(blocked.output)).toContain("release/migrations.js (su contenido es distinto del de HEAD)");
       expect(existsSync(migrationsLog)).toBe(false);
       expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+      expect(runGit(["stash", "list"], repositoryRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should not apply migrations with --ignore-local-changes while migrations.check lazily imports a module with an uncommitted edit",
+    () => {
+      const { repositoryRoot } = createReleasedRepository();
+      const migrationsLog = path.join(path.dirname(repositoryRoot), "migrations.log");
+      const helperPath = path.join(repositoryRoot, "release", "migration-runner.js");
+      const describeRunner = (/** @type {string} */ appliedMarker) =>
+        [
+          'import { appendFileSync } from "node:fs";',
+          'export const readStatus = () => ({ status: "pending", pending: ["001-local"], target: "fixture-db", reason: null });',
+          `export const apply = () => appendFileSync(${JSON.stringify(migrationsLog)}, "${appliedMarker}\\n");`,
+          "",
+        ].join("\n");
+      mkdirSync(path.dirname(helperPath));
+      writeFileSync(helperPath, describeRunner("committed"));
+      // The configuration never imports the runner: only migrations.check does, when the diagnosis calls it.
+      pushConfiguration(repositoryRoot, [
+        "const loadRunner = () => import(\"./release/migration-runner.js\");",
+        "export default {",
+        '  changelog: { audience: "equipo" },',
+        "  checks: false,",
+        "  migrations: {",
+        "    check: async () => (await loadRunner()).readStatus(),",
+        "    apply: async () => (await loadRunner()).apply(),",
+        "  },",
+        "};",
+      ]);
+      writeFileSync(helperPath, describeRunner("uncommitted"));
+
+      const blocked = runCli(repositoryRoot, ["--bump", "minor", "--ignore-local-changes"]);
+
+      expect(blocked.status, blocked.output).toBe(0);
+      expect(flattenOutput(blocked.output)).toContain("La configuración tiene cambios sin commitear");
+      expect(flattenOutput(blocked.output)).toContain("release/migration-runner.js (su contenido es distinto del de HEAD)");
+      expect(existsSync(migrationsLog)).toBe(false);
+      expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+      expect(runGit(["stash", "list"], repositoryRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should not release with --ignore-local-changes while the configuration imports, only for the arguments of the running command, a module with an uncommitted edit",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      const cliPath = path.join(repositoryRoot, "src", "cli.js");
+      const helperPath = path.join(repositoryRoot, "release", "bump-settings.js");
+      mkdirSync(path.dirname(cliPath));
+      mkdirSync(path.dirname(helperPath));
+      writeFileSync(cliPath, 'program.version("0.1.0"); // beez-rp-version\n');
+      writeFileSync(helperPath, 'export default { versionFiles: ["src/cli.js"] };\n');
+      // Depends on the process that loads it, like a configuration that checks process.stdin.isTTY.
+      pushConfiguration(repositoryRoot, [
+        'const bumpSettings = process.argv.includes("--bump") ? (await import("./release/bump-settings.js")).default : {};',
+        "export default {",
+        '  changelog: { audience: "equipo" },',
+        "  checks: false,",
+        "  ...bumpSettings,",
+        "};",
+      ]);
+      writeFileSync(helperPath, "export default { versionFiles: [] };\n");
+
+      const blocked = runCli(repositoryRoot, ["--bump", "minor", "--ignore-local-changes"]);
+
+      expect(blocked.status, blocked.output).toBe(0);
+      expect(flattenOutput(blocked.output)).toContain("La configuración tiene cambios sin commitear");
+      expect(flattenOutput(blocked.output)).toContain("release/bump-settings.js (su contenido es distinto del de HEAD)");
+      expect(runGit(["log", "-1", "--format=%s", "main"], repositoryRoot)).toBe("chore: configure releases");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+      expect(runGit(["stash", "list"], repositoryRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should not release beez-rp from its own checkout with --ignore-local-changes while a beez-rp module the configuration imports has an uncommitted edit",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      for (const directory of ["bin", "src"]) {
+        cpSync(path.join(BEEZ_RP_ROOT, directory), path.join(repositoryRoot, directory), { recursive: true });
+        writeFileSync(path.join(repositoryRoot, directory, "package.json"), `${JSON.stringify({ type: "module" })}\n`);
+      }
+      const constantsPath = path.join(repositoryRoot, "src", "constants", "create-version.js");
+      // beez-rp.config.js of beez-rp itself imports its own sources, already loaded by the running command.
+      pushConfiguration(repositoryRoot, [
+        'import { MAIN_BRANCH } from "./src/constants/create-version.js";',
+        "export default {",
+        "  changelog: { audience: `equipo de ${MAIN_BRANCH}` },",
+        "  checks: false,",
+        "};",
+      ]);
+      appendFileSync(constantsPath, "// local\n");
+
+      const result = spawnSync(process.execPath, [path.join(repositoryRoot, "bin", "beez-rp.js"), "create-version", "--bump", "minor", "--ignore-local-changes"], {
+        cwd: repositoryRoot,
+        encoding: "utf8",
+        env: commandEnvironment(),
+      });
+      const output = `${result.stdout}${result.stderr}`;
+
+      expect(result.status, output).toBe(0);
+      expect(flattenOutput(output)).toContain("La configuración tiene cambios sin commitear");
+      expect(flattenOutput(output)).toContain("src/constants/create-version.js (su contenido es distinto del de HEAD)");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
       expect(runGit(["stash", "list"], repositoryRoot)).toBe("");
     },
     GIT_FIXTURE_TEST_TIMEOUT_MS

@@ -438,8 +438,8 @@ function configModulesUnknownBlocker(reason, commands) {
   return {
     title: `No se pudo saber qué módulos carga ${CONFIG_FILES_LABEL}`,
     details: [
-      `Cargar la configuración en un proceso nuevo falló: ${reason}.`,
-      `Sin esa lista no se puede asegurar que la configuración y los módulos que carga sean los commiteados: corregí el error de carga (o actualizá Node a ${MODULE_HOOKS_MINIMUM_NODE_VERSION} o posterior si falta module.registerHooks) y volvé a correr ${commands.createVersion}.`,
+      `No se pudo registrar qué módulos cargó: ${reason}.`,
+      `Sin esa lista no se puede asegurar que la configuración y los módulos que carga sean los commiteados: corré ${commands.createVersion} con Node ${MODULE_HOOKS_MINIMUM_NODE_VERSION} o posterior (tiene module.registerHooks), o cargá la configuración con loadCreateVersionConfig antes de diagnosticar si usás collectReleaseState desde tu propio código.`,
     ],
   };
 }

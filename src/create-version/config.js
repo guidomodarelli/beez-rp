@@ -27,6 +27,7 @@ import {
 import { RELEASE_COMMIT_BUILT_IN_FILES } from "../constants/version-files.js";
 import { RELEASE_TYPE_ORDER } from "../constants/versions.js";
 import { DEFAULT_PROJECT_COMMANDS, describeProjectCommands, detectPackageManager } from "../package-manager.js";
+import { startTracingConfigModules } from "./config-modules.js";
 
 /**
  * @typedef {import("./process.js").GitReader} GitReader
@@ -319,7 +320,9 @@ export function findCreateVersionConfigFile(repositoryRoot) {
 /**
  * Imports `beez-rp.config.mjs` or `beez-rp.config.js` from the repository root and validates it.
  * It is imported once per process: after syncing `main` the command stops and asks to run it
- * again, so a new process imports the updated file and everything it imports.
+ * again, so a new process imports the updated file and everything it imports. The module trace of
+ * `config-modules.js` starts first (once per process), so the diagnosis can compare every module
+ * the configuration loads with `HEAD`.
  *
  * @param {string} repositoryRoot - Repository root.
  * @returns {Promise<ResolvedCreateVersionConfig>} Resolved configuration.
@@ -335,6 +338,7 @@ export async function loadCreateVersionConfig(repositoryRoot) {
   }
 
   const configPath = path.join(repositoryRoot, configFile);
+  startTracingConfigModules();
   let module;
   try {
     module = await import(pathToFileURL(configPath).href);
