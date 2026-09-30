@@ -77,7 +77,7 @@ import {
   verifyPreparedArtifact,
   withArtifactOutsidePackageRoot,
 } from "./artifact.js";
-import { loadCreateVersionConfig } from "./config.js";
+import { describeReleaseTypes, loadCreateVersionConfig } from "./config.js";
 import { ReleaseStepError } from "./errors.js";
 import {
   buildNpmAuthConfigLine,
@@ -936,12 +936,13 @@ async function bumpVersionStep(context) {
     print(`${ICON.info} Versión elegida por flag: ${paint(["bold", "cyan"], nextRelease.version)} (${nextRelease.releaseType})`);
   } else {
     const nextVersions = listNextVersions(currentVersion);
+    const releaseTypeDescriptions = describeReleaseTypes(context.config, currentVersion);
     const chosenVersion = await select({
       message: `¿Qué versión publicamos? (actual ${currentVersion})`,
       options: nextVersions.map((candidate) => ({
         label: `${candidate.releaseType.padEnd(5)}  ${currentVersion} → ${candidate.version}`,
         hint: candidate.releaseType === suggestion.releaseType ? `${ICON.star} sugerida: ${suggestion.reason}` : undefined,
-        description: context.config.releaseTypeDescriptions[candidate.releaseType],
+        description: releaseTypeDescriptions[candidate.releaseType],
         value: candidate.version,
       })),
       // Nothing is preselected so a stray Enter never ships a version: the suggestion is only a hint.

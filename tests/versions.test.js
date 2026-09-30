@@ -5,6 +5,7 @@ import {
   bumpReleaseVersion,
   compareReleaseVersions,
   findHighestStableVersion,
+  isPreMajorShiftActive,
   isReleaseCommitSubject,
   isStableReleaseVersion,
   isStableVersionAbove,
@@ -92,6 +93,13 @@ describe("release commits and tags", () => {
     expect(suggestReleaseType([{ subject: "refactor!: drop legacy routes" }]).releaseType).toBe("major");
     expect(suggestReleaseType([{ subject: "feat: new auth", body: "BREAKING CHANGE: sessions reset" }]).releaseType).toBe("major");
     expect(suggestReleaseType([{ subject: "0.94.0" }]).releaseType).toBe("minor");
+  });
+
+  it("should apply preMajorShift only to released 0.x versions", () => {
+    expect(isPreMajorShiftActive("0.10.10", { preMajorShift: true })).toBe(true);
+    expect(isPreMajorShiftActive("0.10.10")).toBe(false);
+    expect(isPreMajorShiftActive("1.2.3", { preMajorShift: true })).toBe(false);
+    expect(isPreMajorShiftActive("0.0.0", { preMajorShift: true })).toBe(false);
   });
 
   it("should lower the suggestion one level on 0.x only when preMajorShift is on", () => {

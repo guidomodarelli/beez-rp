@@ -268,6 +268,18 @@ export function suggestReleaseType(commits) {
 }
 
 /**
+ * Tells whether `preMajorShift` lowers the release levels after `currentVersion`: only when the
+ * option is on and the version is `0.x`, except the `0.0.0` placeholder of a package never released.
+ *
+ * @param {string} currentVersion - Current `X.Y.Z` version.
+ * @param {{ preMajorShift?: boolean }} [options] - Project versioning options.
+ * @returns {boolean} `true` when the release levels move one level down.
+ */
+export function isPreMajorShiftActive(currentVersion, { preMajorShift = false } = {}) {
+  return preMajorShift && currentVersion !== UNRELEASED_PLACEHOLDER_VERSION && parseReleaseVersion(currentVersion)[0] === PRE_MAJOR_VERSION;
+}
+
+/**
  * Suggests the release type of the next version after `currentVersion`: {@link suggestReleaseType},
  * shifted one level down while the version is `0.x` when `preMajorShift` is on (breaking changes
  * suggest `minor` and features `patch`, so a suggestion never jumps to `1.0.0`). The first release
@@ -280,7 +292,7 @@ export function suggestReleaseType(commits) {
  */
 export function suggestNextReleaseType(commits, currentVersion, { preMajorShift = false } = {}) {
   const suggestion = suggestReleaseType(commits);
-  if (!preMajorShift || currentVersion === UNRELEASED_PLACEHOLDER_VERSION || parseReleaseVersion(currentVersion)[0] !== PRE_MAJOR_VERSION) {
+  if (!isPreMajorShiftActive(currentVersion, { preMajorShift })) {
     return suggestion;
   }
 

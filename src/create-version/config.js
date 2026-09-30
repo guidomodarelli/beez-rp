@@ -20,14 +20,17 @@ import {
   CREATE_VERSION_CONFIG_FILE,
   CREATE_VERSION_CONFIG_FILES,
   DEFAULT_CHECKS_SCRIPT,
+  DEFAULT_RELEASE_TYPE_DESCRIPTIONS,
   NPM_PUBLISHER,
   PACKAGE_MANIFEST_FILE,
+  PRE_MAJOR_SHIFTED_RELEASE_TYPE_DESCRIPTIONS,
   RELEASE_REGISTRY,
 } from "../constants/create-version.js";
 import { DEFAULT_MONOREPO_TAG_FORMAT, TAG_FORMAT_PLACEHOLDER, WORKSPACES_PACKAGES } from "../constants/monorepo.js";
 import { RELEASE_COMMIT_BUILT_IN_FILES } from "../constants/version-files.js";
-import { RELEASE_TYPE_ORDER } from "../constants/versions.js";
+import { RELEASE_TYPE, RELEASE_TYPE_ORDER } from "../constants/versions.js";
 import { DEFAULT_PROJECT_COMMANDS, describeProjectCommands, detectPackageManager } from "../package-manager.js";
+import { isPreMajorShiftActive } from "../versions.js";
 
 /**
  * @typedef {import("./process.js").GitReader} GitReader
@@ -106,15 +109,39 @@ import { DEFAULT_PROJECT_COMMANDS, describeProjectCommands, detectPackageManager
  * @typedef {{ packageScripts?: Record<string, unknown>, commands?: ProjectCommands }} ConfigResolutionContext
  */
 
-/** What each release type means when a project does not describe it. */
-const DEFAULT_RELEASE_TYPE_DESCRIPTIONS = Object.freeze({
-  patch: "Solo arreglos o cambios internos; nada nuevo para quien lo usa.",
-  minor: "Funcionalidades nuevas compatibles; lo existente sigue funcionando igual.",
-  major: "Cambio incompatible: quien lo usa tiene que adaptarse.",
-});
-
 /** Banner suffix of the version on `origin/main` when a project does not name its environment. */
 const DEFAULT_PUBLISHED_LABEL = "publicada";
+
+/**
+ * Describes the release types offered after `currentVersion`. While `preMajorShift` applies (the
+ * same `0.x` rule as the suggestion), the default descriptions move one level down with the
+ * suggestion: a patch carries features and a minor breaking changes. Descriptions the project
+ * defined are kept as they are.
+ *
+ * @param {Pick<ResolvedCreateVersionConfig, "releaseTypeDescriptions" | "preMajorShift">} config - Resolved configuration.
+ * @param {string} currentVersion - Current `X.Y.Z` version.
+ * @returns {Record<ReleaseType, string>} Description of each release type.
+ */
+export function describeReleaseTypes({ releaseTypeDescriptions, preMajorShift }, currentVersion) {
+  if (!isPreMajorShiftActive(currentVersion, { preMajorShift })) {
+    return releaseTypeDescriptions;
+  }
+
+  /**
+   * @param {ReleaseType} releaseType - Release type to describe.
+   * @returns {string} The project's description, or the shifted default.
+   */
+  const describe = (releaseType) => {
+    const description = releaseTypeDescriptions[releaseType];
+    return description === DEFAULT_RELEASE_TYPE_DESCRIPTIONS[releaseType] ? PRE_MAJOR_SHIFTED_RELEASE_TYPE_DESCRIPTIONS[releaseType] : description;
+  };
+
+  return {
+    [RELEASE_TYPE.patch]: describe(RELEASE_TYPE.patch),
+    [RELEASE_TYPE.minor]: describe(RELEASE_TYPE.minor),
+    [RELEASE_TYPE.major]: describe(RELEASE_TYPE.major),
+  };
+}
 
 /**
  * Types a configuration in editors; returns it unchanged.

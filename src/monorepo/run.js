@@ -43,6 +43,7 @@ import {
 import { AUDIENCE_PACKAGE_PLACEHOLDER, MONOREPO_RELEASE_STEP, SKIP_PACKAGE_CHOICE, SUMMARY_PACKAGE_PLACEHOLDER } from "../constants/monorepo.js";
 import { RELEASE_TYPE_ORDER } from "../constants/versions.js";
 import { findPnpmPackRewrites, findPreparedArtifact, expandArtifactPattern, isSafeArtifactPath, verifyPreparedArtifact, withArtifactOutsidePackageRoot } from "../create-version/artifact.js";
+import { describeReleaseTypes } from "../create-version/config.js";
 import { ReleaseStepError } from "../create-version/errors.js";
 import { restoreLocalChanges, setAsideLocalChanges } from "../create-version/local-changes.js";
 import { buildNpmAuthConfigLine, checkNpmPublishAccess, describePublishedRelease, publishToNpm, readNpmPackIntegrity, resolvePublishRegistry } from "../create-version/npm.js";
@@ -258,13 +259,14 @@ async function chooseVersionsStep(context) {
     } else if (context.options.acceptSuggested) {
       choice = suggestion.releaseType;
     } else {
+      const releaseTypeDescriptions = describeReleaseTypes(context.config, currentVersion);
       choice = await select({
         message: `¿Qué versión de ${unit.name}? (actual ${currentVersion})`,
         options: [
           ...RELEASE_TYPE_ORDER.map((releaseType) => ({
             label: `${releaseType.padEnd(5)}  ${currentVersion} → ${bumpReleaseVersion(currentVersion, releaseType)}`,
             hint: releaseType === suggestion.releaseType ? `${ICON.star} sugerida: ${suggestion.reason}` : undefined,
-            description: context.config.releaseTypeDescriptions[releaseType],
+            description: releaseTypeDescriptions[releaseType],
             value: releaseType,
           })),
           { label: "No publicar ahora", hint: "queda para un release siguiente", value: SKIP_PACKAGE_CHOICE },

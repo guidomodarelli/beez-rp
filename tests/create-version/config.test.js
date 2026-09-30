@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { buildChangelogPrompt } from "../../src/changelog-ai.js";
-import { loadCreateVersionConfig, resolveCreateVersionConfig } from "../../src/create-version/config.js";
+import { describeReleaseTypes, loadCreateVersionConfig, resolveCreateVersionConfig } from "../../src/create-version/config.js";
 import { describeProjectCommands } from "../../src/package-manager.js";
 
 /** @type {string[]} */
@@ -126,6 +126,34 @@ describe("create-version config", () => {
 
     const tarball = resolveCreateVersionConfig({ changelog: { audience: "x" }, publish: "npm", artifact: "releases/{version}-*/{name}-{version}.tgz" });
     expect(tarball).toMatchObject({ registry: "npm", artifact: "releases/{version}-*/{name}-{version}.tgz" });
+  });
+
+  it("should describe the release types one level down wherever preMajorShift lowers the suggestion", () => {
+    const shifted = resolveCreateVersionConfig({ changelog: { audience: "x" }, preMajorShift: true });
+    const unshifted = resolveCreateVersionConfig({ changelog: { audience: "x" } });
+    const shiftedDescriptions = describeReleaseTypes(shifted, "0.10.10");
+
+    // On 0.x a feature suggests patch and a breaking change minor, so their descriptions say so.
+    expect(shiftedDescriptions.patch).toMatch(/funcionalidades nuevas/);
+    expect(shiftedDescriptions.minor).toMatch(/incompatible/);
+    expect(shiftedDescriptions.major).toMatch(/1\.0\.0/);
+    expect(shiftedDescriptions.patch).not.toBe(shifted.releaseTypeDescriptions.patch);
+    // Same rule as the suggestion: not shifted without the option, on 1.x or on the 0.0.0 placeholder.
+    expect(describeReleaseTypes(unshifted, "0.10.10")).toEqual(unshifted.releaseTypeDescriptions);
+    expect(describeReleaseTypes(shifted, "1.2.3")).toEqual(shifted.releaseTypeDescriptions);
+    expect(describeReleaseTypes(shifted, "0.0.0")).toEqual(shifted.releaseTypeDescriptions);
+  });
+
+  it("should keep the descriptions a project defined when preMajorShift applies", () => {
+    const config = resolveCreateVersionConfig({
+      changelog: { audience: "x" },
+      preMajorShift: true,
+      releaseTypeDescriptions: { minor: "Rompe la API en 0.x." },
+    });
+    const descriptions = describeReleaseTypes(config, "0.4.0");
+
+    expect(descriptions.minor).toBe("Rompe la API en 0.x.");
+    expect(descriptions.patch).toMatch(/funcionalidades nuevas/);
   });
 
   it("should default the checks to pnpm run ci only when package.json declares a ci script, and skip them with false", () => {
