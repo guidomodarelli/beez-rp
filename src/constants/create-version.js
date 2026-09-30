@@ -304,6 +304,8 @@ export const CHECK_ATTR_FIELDS_PER_ENTRY = 3;
  * - `typeChanged`: the working-tree entry is not the same kind of file as in `HEAD` (for example,
  *   a symbolic link or a directory where `HEAD` has a regular file).
  * - `contentChanged`: same kind of file, different content.
+ * - `executableBitChanged`: same content, but the file is executable where `HEAD` has it as plain,
+ *   or the other way around (only where Git tracks the executable bit, `core.fileMode`).
  * - `outsideRepository`: the file is outside the repository (for example, reached through a
  *   directory of the repository replaced by a symbolic link), so `HEAD` cannot vouch for it.
  * - `filtered`: Git applies a `filter` attribute to the file, so comparing it with `HEAD` goes
@@ -313,6 +315,7 @@ export const HEAD_FILE_DIFFERENCE = Object.freeze({
   notCommitted: "notCommitted",
   typeChanged: "typeChanged",
   contentChanged: "contentChanged",
+  executableBitChanged: "executableBitChanged",
   outsideRepository: "outsideRepository",
   filtered: "filtered",
 });
@@ -536,6 +539,18 @@ export const FAILURE_EXIT_CODE = 1;
  * commit does not carry the file with the version itself.
  */
 export const GIT_REGULAR_FILE_MODES = Object.freeze(["100644", "100755"]);
+
+/** Mode `git ls-tree` reports for an executable regular file. */
+export const GIT_EXECUTABLE_FILE_MODE = "100755";
+
+/**
+ * Git setting that says whether the working tree keeps the executable bit of files. Git sets it to
+ * `false` where the file system cannot (typically Windows), and then ignores that bit.
+ */
+export const GIT_FILE_MODE_SETTING = "core.fileMode";
+
+/** Permission bits of a working-tree file that make it executable (owner, group or others). */
+export const EXECUTABLE_PERMISSION_BITS = 0o111;
 
 /**
  * First Node version with `module.registerHooks`, the synchronous module hook that lists the modules

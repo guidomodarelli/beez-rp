@@ -11,12 +11,20 @@
 import { lstatSync, readlinkSync } from "node:fs";
 import path from "node:path";
 
-import { GIT_REGULAR_FILE_MODES, GIT_SYMBOLIC_LINK_MODE, HEAD_FILE_DIFFERENCE, LS_TREE_ENTRY_PATH_SEPARATOR } from "../constants/create-version.js";
+import {
+  EXECUTABLE_PERMISSION_BITS,
+  GIT_EXECUTABLE_FILE_MODE,
+  GIT_FILE_MODE_SETTING,
+  GIT_REGULAR_FILE_MODES,
+  GIT_SYMBOLIC_LINK_MODE,
+  HEAD_FILE_DIFFERENCE,
+  LS_TREE_ENTRY_PATH_SEPARATOR,
+} from "../constants/create-version.js";
 import { GIT_LITERAL_PATHSPEC_PREFIX } from "../constants/version-files.js";
 
 /**
  * @typedef {import("./process.js").GitReader} GitReader
- * @typedef {"notCommitted" | "typeChanged" | "contentChanged" | "outsideRepository" | "filtered"} HeadFileDifferenceKind
+ * @typedef {"notCommitted" | "typeChanged" | "contentChanged" | "executableBitChanged" | "outsideRepository" | "filtered"} HeadFileDifferenceKind
  * @typedef {{ file: string, difference: HeadFileDifferenceKind }} HeadFileDifference
  *   `file` is relative to the repository root and separated with `/`, or absolute for
  *   `outsideRepository`.
@@ -59,8 +67,21 @@ async function hasCommittedLinkTarget(reader, absolutePath, object) {
 }
 
 /**
+ * Tells whether Git keeps the executable bit of working-tree files (`core.fileMode`, `true` unless
+ * the repository sets it to `false`, as Git does where the file system cannot keep it).
+ *
+ * @param {GitReader} reader - Git reader of the repository root.
+ * @returns {Promise<boolean>} Whether the executable bit is part of the comparison with `HEAD`.
+ */
+async function tracksExecutableBit(reader) {
+  return (await reader.tryGit(["config", "--bool", GIT_FILE_MODE_SETTING]))?.trim() !== "false";
+}
+
+/**
  * Lists the given working-tree files that differ from `HEAD`: missing from `HEAD`, of another kind
- * (a symbolic link or a directory where `HEAD` has a regular file) or with other content. Git hashes
+ * (a symbolic link or a directory where `HEAD` has a regular file), with other content or, where
+ * Git keeps the executable bit (`core.fileMode`), executable where `HEAD` has a plain file or the
+ * other way around. Git hashes
  * each regular file through its clean filters (line endings, `.gitattributes`), like `git add`, so
  * a checkout with converted line endings is not a change. Index flags (`skip-worktree`,
  * `assume-unchanged`) are ignored: only the working tree and `HEAD` are compared.
@@ -80,6 +101,7 @@ export async function listFilesDifferentFromHead(reader, repositoryRoot, files) 
   const differenceByFile = new Map();
   /** @type {{ file: string, object: string }[]} */
   const regularFiles = [];
+  const comparesExecutableBit = await tracksExecutableBit(reader);
 
   for (const file of files) {
     const headEntry = headEntries.get(file);
@@ -89,6 +111,10 @@ export async function listFilesDifferentFromHead(reader, repositoryRoot, files) 
     if (!headEntry) {
       differenceByFile.set(file, HEAD_FILE_DIFFERENCE.notCommitted);
     } else if (GIT_REGULAR_FILE_MODES.includes(headEntry.mode) && stats?.isFile()) {
+      const isExecutable = (stats.mode & EXECUTABLE_PERMISSION_BITS) !== 0;
+      if (comparesExecutableBit && isExecutable !== (headEntry.mode === GIT_EXECUTABLE_FILE_MODE)) {
+        differenceByFile.set(file, HEAD_FILE_DIFFERENCE.executableBitChanged);
+      }
       regularFiles.push({ file, object: headEntry.object });
     } else if (headEntry.mode === GIT_SYMBOLIC_LINK_MODE && stats?.isSymbolicLink()) {
       if (!(await hasCommittedLinkTarget(reader, absolutePath, headEntry.object))) {

@@ -2206,8 +2206,87 @@ describe("beez-rp create-version command", () => {
       const result = spawnSync(process.execPath, ["--input-type=module", "--eval", script], { cwd: repositories[1], encoding: "utf8", env: commandEnvironment() });
 
       expect(result.status, result.stderr).toBe(0);
-      const expectedGraph = { loaded: true, files: ["beez-rp.config.js", "release/checks.js"], externalFiles: [] };
+      const expectedGraph = { loaded: true, files: ["beez-rp.config.js", "release/checks.js"], externalFiles: [], startedExplicitly: false };
       expect(JSON.parse(result.stdout)).toEqual([expectedGraph, expectedGraph]);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should not set local changes aside when custom tooling imported repository code before the module trace started, unless it starts the trace first",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      const cliPath = path.join(repositoryRoot, "src", "cli.js");
+      const helperPath = path.join(repositoryRoot, "release", "version-files.js");
+      mkdirSync(path.dirname(cliPath));
+      mkdirSync(path.dirname(helperPath));
+      writeFileSync(cliPath, 'program.version("0.1.0"); // beez-rp-version\n');
+      writeFileSync(helperPath, 'export const versionFiles = ["src/cli.js"];\n');
+      writeFileSync(path.join(repositoryRoot, "release", "index.js"), 'export { versionFiles } from "./version-files.js";\n');
+      pushConfiguration(repositoryRoot, ['import { versionFiles } from "./release/index.js";', "export default {", '  changelog: { audience: "equipo" },', "  checks: false,", "  versionFiles,", "};"]);
+      // A tracked local edit that drops the versionFiles entry, two imports away from the configuration.
+      writeFileSync(helperPath, "export const versionFiles = [];\n");
+      /**
+       * A real Node process, like a project script that imports a repository helper and then releases.
+       *
+       * @param {boolean} startsTraceFirst - Whether the script calls startTracingConfigModules before anything else.
+       */
+      const runScript = (startsTraceFirst) => {
+        const script = [
+          `import { runCreateVersion, startTracingConfigModules } from ${JSON.stringify(pathToFileURL(path.join(BEEZ_RP_ROOT, "src", "create-version", "index.js")).href)};`,
+          startsTraceFirst ? "startTracingConfigModules();" : "",
+          `await import(${JSON.stringify(pathToFileURL(path.join(repositoryRoot, "release", "index.js")).href)});`,
+          `process.exitCode = await runCreateVersion({ repositoryRoot: ${JSON.stringify(repositoryRoot)}, argv: ["--bump", "minor", "--ignore-local-changes"] });`,
+        ].join("\n");
+        const result = spawnSync(process.execPath, ["--input-type=module", "--eval", script], { cwd: repositoryRoot, encoding: "utf8", env: commandEnvironment() });
+        return { status: result.status, output: flattenOutput(`${result.stdout}${result.stderr}`) };
+      };
+
+      const lateTrace = runScript(false);
+
+      expect(lateTrace.status, lateTrace.output).toBe(0);
+      expect(lateTrace.output).toContain("No se pueden apartar los cambios locales: el registro de módulos empezó tarde");
+      expect(lateTrace.output).toContain("startTracingConfigModules()");
+
+      const earlyTrace = runScript(true);
+
+      expect(earlyTrace.status, earlyTrace.output).toBe(0);
+      expect(earlyTrace.output).toContain("release/version-files.js (su contenido es distinto del de HEAD)");
+      expect(runGit(["log", "-1", "--format=%s", "main"], repositoryRoot)).toBe("chore: configure releases");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+      expect(runGit(["stash", "list"], repositoryRoot)).toBe("");
+      expect(readFileSync(helperPath, "utf8")).toBe("export const versionFiles = [];\n");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should not release while skip-worktree hides a changed executable bit, where core.fileMode keeps it, and ignore that bit where it does not",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      const scriptPath = path.join(repositoryRoot, "release.sh");
+      writeFileSync(scriptPath, "#!/bin/sh\necho release\n");
+      chmodSync(scriptPath, 0o644);
+      runGit(["add", "release.sh"], repositoryRoot);
+      // HEAD keeps it executable while the working file is not (a file system without the bit, such as Windows, gets the same).
+      runGit(["update-index", "--chmod=+x", "--", "release.sh"], repositoryRoot);
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", "};"]);
+      runGit(["update-index", "--skip-worktree", "--", "release.sh"], repositoryRoot);
+
+      runGit(["config", "core.fileMode", "true"], repositoryRoot);
+      expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe("");
+      const blocked = runCli(repositoryRoot, ["--dry-run"]);
+
+      expect(blocked.status, blocked.output).toBe(0);
+      expect(flattenOutput(blocked.output)).toContain("Hay 1 archivo(s) con cambios locales que git status no muestra");
+      expect(flattenOutput(blocked.output)).toContain("release.sh (su permiso de ejecución es distinto del de HEAD)");
+
+      runGit(["config", "core.fileMode", "false"], repositoryRoot);
+      const ignored = runCli(repositoryRoot, ["--dry-run"]);
+
+      expect(ignored.status, ignored.output).toBe(0);
+      expect(flattenOutput(ignored.output)).not.toContain("release.sh");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
     },
     GIT_FIXTURE_TEST_TIMEOUT_MS
   );

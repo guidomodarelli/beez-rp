@@ -51,6 +51,7 @@ const HEAD_FILE_DIFFERENCE_LABELS = Object.freeze({
   [HEAD_FILE_DIFFERENCE.notCommitted]: "no está commiteado: Git lo ignora, nunca se agregó o solo está en staging",
   [HEAD_FILE_DIFFERENCE.typeChanged]: "no es el mismo tipo de archivo que en HEAD, por ejemplo un enlace simbólico",
   [HEAD_FILE_DIFFERENCE.contentChanged]: "su contenido es distinto del de HEAD",
+  [HEAD_FILE_DIFFERENCE.executableBitChanged]: "su permiso de ejecución es distinto del de HEAD",
   [HEAD_FILE_DIFFERENCE.outsideRepository]: "está fuera del repositorio, por ejemplo detrás de un enlace simbólico, y HEAD no lo respalda",
   [HEAD_FILE_DIFFERENCE.filtered]: "tiene un atributo filter en .gitattributes, así que no se puede comprobar que lo que cargó Node sea lo commiteado",
 });
@@ -446,6 +447,25 @@ function configModulesUnknownBlocker(reason, commands) {
 }
 
 /**
+ * Builds the blocker of `--ignore-local-changes` when the module trace was not started explicitly:
+ * repository code imported before `loadCreateVersionConfig` registered the trace (and everything it
+ * imports) is missing from the graph, so a local change in it would reach the release, from Node's
+ * cache, after being set aside.
+ *
+ * @param {ProjectCommands} commands - Project commands quoted by the hint.
+ * @returns {ReleaseBlocker} Blocker.
+ */
+function lateConfigModuleTraceBlocker(commands) {
+  return {
+    title: "No se pueden apartar los cambios locales: el registro de módulos empezó tarde",
+    details: [
+      `beez-rp empezó a registrar los módulos que carga ${CONFIG_FILES_LABEL} recién al cargarla, así que no ve el código del repositorio que se importó antes; un cambio local en ese código llegaría al release aunque --${CREATE_VERSION_FLAG.ignoreLocalChanges} lo aparte.`,
+      `Corré ${commands.createVersion} --${CREATE_VERSION_FLAG.ignoreLocalChanges}, o, desde tu propio código, llamá a startTracingConfigModules() de beez-rp/create-version antes de importar cualquier código del repositorio y de llamar a runCreateVersion o loadCreateVersionConfig.`,
+    ],
+  };
+}
+
+/**
  * Blocks a runnable plan (new release or resume) while the loaded configuration is not the
  * committed one: a configuration file has uncommitted changes (also a deletion or a rename), or the
  * loaded file or any module it loads differs from `HEAD` (an ignored or untracked file, such as a
@@ -459,19 +479,27 @@ function configModulesUnknownBlocker(reason, commands) {
  * checks, preparation and publication would follow uncommitted instructions. When resuming, the
  * configuration of the pending release is the one committed in it.
  *
+ * With `--ignore-local-changes` it also blocks when the module trace was not started explicitly
+ * (see {@link lateConfigModuleTraceBlocker}).
+ *
  * @param {ReleasePlan} plan - Plan.
  * @param {ReleaseState} state - Snapshot.
  * @param {ProjectCommands} commands - Project commands quoted by the hints.
+ * @param {boolean} ignoreLocalChanges - Whether `--ignore-local-changes` was chosen.
  * @returns {ReleasePlan} The same plan, or a blocked plan when the loaded configuration is not the
- *   committed one or its module graph could not be read.
+ *   committed one or its module graph could not be read (or, setting changes aside, may be incomplete).
  */
-function requireCommittedConfig(plan, state, commands) {
+function requireCommittedConfig(plan, state, commands, ignoreLocalChanges) {
   if (plan.steps.length === 0) {
     return plan;
   }
 
   if (state.configModules && !state.configModules.loaded) {
     return { mode: RELEASE_MODE.blocked, steps: [], blockers: [configModulesUnknownBlocker(state.configModules.reason, commands)], warnings: [], pendingVersion: null };
+  }
+
+  if (ignoreLocalChanges && state.configModules && !state.configModules.startedExplicitly) {
+    return { mode: RELEASE_MODE.blocked, steps: [], blockers: [lateConfigModuleTraceBlocker(commands)], warnings: [], pendingVersion: null };
   }
 
   const configDifferences = listConfigDifferences(state);
@@ -870,8 +898,9 @@ function missingChecksBlocker(commands) {
 export function buildReleasePlan(state, capabilities = DEFAULT_CAPABILITIES, planOptions = {}) {
   const commands = capabilities.commands ?? DEFAULT_PROJECT_COMMANDS;
   // Hidden changes first: their hint (removing the index flag) is needed before any other fix works.
-  const plan = requireCommittedConfig(requireVisibleLocalChanges(planRelease(state, capabilities, planOptions), state, commands), state, commands);
-  return warnAboutSetAsideChanges(applyNpmAuth(plan, state.npmAuth, commands), state, planOptions.ignoreLocalChanges ?? false);
+  const ignoreLocalChanges = planOptions.ignoreLocalChanges ?? false;
+  const plan = requireCommittedConfig(requireVisibleLocalChanges(planRelease(state, capabilities, planOptions), state, commands), state, commands, ignoreLocalChanges);
+  return warnAboutSetAsideChanges(applyNpmAuth(plan, state.npmAuth, commands), state, ignoreLocalChanges);
 }
 
 /**

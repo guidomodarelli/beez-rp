@@ -232,7 +232,7 @@ describe("create-version plan", () => {
   it("should block a new release with --ignore-local-changes while a module the configuration loads differs from HEAD, naming it and how", () => {
     const state = createMainState({
       workingTreeChanges: [" M release/hooks.js", " M src/index.js"],
-      configModules: { loaded: true, files: ["beez-rp.config.js", "release/hooks.js", "release/link.js"], externalFiles: [] },
+      configModules: { loaded: true, files: ["beez-rp.config.js", "release/hooks.js", "release/link.js"], externalFiles: [], startedExplicitly: true },
       uncommittedConfigModules: [
         { file: "release/hooks.js", difference: HEAD_FILE_DIFFERENCE.contentChanged },
         { file: "release/link.js", difference: HEAD_FILE_DIFFERENCE.typeChanged },
@@ -257,7 +257,7 @@ describe("create-version plan", () => {
 
   it("should block a clean working tree while the configuration loads a module that is not committed, such as an ignored local override", () => {
     const state = createMainState({
-      configModules: { loaded: true, files: ["beez-rp.config.js", "release/local-overrides.js"], externalFiles: [] },
+      configModules: { loaded: true, files: ["beez-rp.config.js", "release/local-overrides.js"], externalFiles: [], startedExplicitly: true },
       uncommittedConfigModules: [{ file: "release/local-overrides.js", difference: HEAD_FILE_DIFFERENCE.notCommitted }],
     });
 
@@ -271,7 +271,7 @@ describe("create-version plan", () => {
   it("should plan a new release with --ignore-local-changes when every module the configuration loads matches HEAD", () => {
     const state = createMainState({
       workingTreeChanges: [" M src/index.js", "?? notes/"],
-      configModules: { loaded: true, files: ["beez-rp.config.js", "release/hooks.js"], externalFiles: [] },
+      configModules: { loaded: true, files: ["beez-rp.config.js", "release/hooks.js"], externalFiles: [], startedExplicitly: true },
       uncommittedConfigModules: [],
     });
 
@@ -279,6 +279,25 @@ describe("create-version plan", () => {
 
     expect(plan.blockers).toEqual([]);
     expect(plan.steps.map((planStep) => planStep.id)).toContain(RELEASE_STEP.bumpVersion);
+  });
+
+  it("should block --ignore-local-changes, and only it, when the module trace started with the configuration instead of explicitly", () => {
+    const state = createMainState({
+      workingTreeChanges: [" M src/index.js"],
+      configModules: { loaded: true, files: ["beez-rp.config.js"], externalFiles: [], startedExplicitly: false },
+      uncommittedConfigModules: [],
+    });
+
+    const setAside = buildReleasePlan(state, DEPLOYED_APP, { ignoreLocalChanges: true });
+
+    expect(setAside.mode).toBe(RELEASE_MODE.blocked);
+    expect(setAside.blockers).toEqual([
+      {
+        title: "No se pueden apartar los cambios locales: el registro de módulos empezó tarde",
+        details: [expect.stringContaining("no ve el código del repositorio que se importó antes"), expect.stringContaining("startTracingConfigModules()")],
+      },
+    ]);
+    expect(buildReleasePlan({ ...state, workingTreeChanges: [] }, DEPLOYED_APP).blockers).toEqual([]);
   });
 
   it("should block a runnable plan when the configuration module graph could not be read, even with a clean working tree", () => {

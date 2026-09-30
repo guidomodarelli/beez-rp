@@ -9,7 +9,12 @@
  * blocks it like a change in the configuration file itself.
  *
  * The graph is traced in the running process itself with a synchronous module hook
- * (`module.registerHooks`), registered once per process before the configuration loads. It records
+ * (`module.registerHooks`), registered once per process before the configuration loads: the CLI
+ * registers it before importing anything else, and custom tooling must do the same with
+ * {@link startTracingConfigModules} before importing any repository code, since a module Node
+ * already cached never shows up again, nor do its imports. `loadCreateVersionConfig` registers it
+ * too when nobody did, but then the trace may miss modules loaded earlier, so the plan refuses to
+ * set local changes aside (`--ignore-local-changes`) with such a trace. It records
  * every `file:` module the process resolves from then on (ESM `import`, CommonJS `require` and JSON
  * modules), for the whole run: the configuration, whatever it imports depending on the process
  * (its arguments, whether it has a terminal), and what its hooks or `migrations.check` import
@@ -30,11 +35,14 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { MODULE_HOOKS_MINIMUM_NODE_VERSION, NODE_MODULES_DIRECTORY } from "../constants/create-version.js";
 
 /**
- * @typedef {{ loaded: true, files: string[], externalFiles: string[] } | { loaded: false, reason: string }} ConfigModuleGraph
+ * @typedef {{ loaded: true, files: string[], externalFiles: string[], startedExplicitly: boolean } | { loaded: false, reason: string }} ConfigModuleGraph
  *   `files` are relative to the repository root, separated with `/` like `git status` paths, and
  *   only include files inside the repository, outside `node_modules` (loaded modules and the
  *   symbolic links followed to reach them). `externalFiles` are the absolute paths of the modules
  *   loaded from outside the repository, outside `node_modules` and beez-rp itself.
+ *   `startedExplicitly` tells whether the trace was started with {@link startTracingConfigModules}
+ *   (as the CLI does before importing anything else) rather than by `loadCreateVersionConfig` itself,
+ *   when repository code imported earlier may be missing from the graph.
  * @typedef {{ moduleUrlsByParent: Map<string, Set<string>>, requestedUrlsByParent: Map<string, Set<string>>, moduleUrlByRequestedUrl: Map<string, string> }} ModuleTrace
  *   Import edges of this process, keyed by the URL of the importing module: the `file:` URLs of the
  *   modules each one resolved (their real path, where Node loads them) and of the paths its
@@ -50,9 +58,12 @@ import { MODULE_HOOKS_MINIMUM_NODE_VERSION, NODE_MODULES_DIRECTORY } from "../co
  */
 const BEEZ_RP_PACKAGE_ROOT = realpathSync.native(fileURLToPath(new URL("../..", import.meta.url)));
 
-/** Trace of this process, created by the first {@link startTracingConfigModules}; `null` before. */
+/** Trace of this process, created by the first {@link startTracingConfigModules} or {@link ensureTracingConfigModules}; `null` before. */
 /** @type {ModuleTrace | null} */
 let moduleTrace = null;
+
+/** Whether {@link startTracingConfigModules} started {@link moduleTrace}, instead of `loadCreateVersionConfig`. */
+let traceStartedExplicitly = false;
 
 /**
  * Resolves a specifier to the `file:` URL it names before Node follows symbolic links.
@@ -82,14 +93,38 @@ function toRequestedUrl(specifier, parentUrl) {
 
 /**
  * Starts recording the modules this process resolves, once per process: later calls keep the same
- * trace. It must run before the configuration loads, since a module Node already cached is never
- * resolved again from where it was first imported. Without `module.registerHooks` (Node before
- * {@link MODULE_HOOKS_MINIMUM_NODE_VERSION}) nothing is recorded and {@link listConfigModules}
- * says why.
+ * trace. Custom tooling that calls `runCreateVersion` or `loadCreateVersionConfig` must call it
+ * first, before importing any code of the repository it releases (the CLI already does): a module
+ * Node already cached is never resolved again, so neither it nor what it imports would reach the
+ * graph, and the plan refuses `--ignore-local-changes` when the trace did not start here. Without
+ * `module.registerHooks` (Node before {@link MODULE_HOOKS_MINIMUM_NODE_VERSION}) nothing is
+ * recorded and {@link listConfigModules} says why.
  */
 export function startTracingConfigModules() {
-  if (moduleTrace || typeof module.registerHooks !== "function") {
-    return;
+  if (!moduleTrace) {
+    traceStartedExplicitly = registerModuleTrace();
+  }
+}
+
+/**
+ * Starts the trace when nobody started it yet, as `loadCreateVersionConfig` does right before
+ * importing the configuration. A trace started here is not explicit: code of the repository
+ * imported before it may be missing from the graph.
+ */
+export function ensureTracingConfigModules() {
+  if (!moduleTrace) {
+    registerModuleTrace();
+  }
+}
+
+/**
+ * Registers the module hook that fills {@link moduleTrace}.
+ *
+ * @returns {boolean} Whether the hook was registered (`false` without `module.registerHooks`).
+ */
+function registerModuleTrace() {
+  if (typeof module.registerHooks !== "function") {
+    return false;
   }
 
   /** @type {ModuleTrace} */
@@ -113,6 +148,7 @@ export function startTracingConfigModules() {
     },
   });
   moduleTrace = trace;
+  return true;
 }
 
 /**
@@ -303,5 +339,5 @@ export function listConfigModules(repositoryRoot, configFile) {
     return { loaded: false, reason: `${configFile} no se cargó con loadCreateVersionConfig en este proceso después de registrar los hooks de módulos` };
   }
 
-  return { loaded: true, files: [...files].toSorted(), externalFiles: [...externalFiles].toSorted() };
+  return { loaded: true, files: [...files].toSorted(), externalFiles: [...externalFiles].toSorted(), startedExplicitly: traceStartedExplicitly };
 }
