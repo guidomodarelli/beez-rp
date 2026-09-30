@@ -71,6 +71,15 @@ describe("discoverWorkspacePackages", () => {
     expect(() => discoverWorkspacePackages(root, ["nothing/*"])).toThrow(/no workspace package found/);
     expect(() => discoverWorkspacePackages(root, "workspaces")).toThrow(/declared in both packages\/a and packages\/b/);
   });
+
+  it("reports a malformed manifest of a matched workspace with its path", () => {
+    const root = createMonorepo({ "packages/a": { name: "a", version: "1.0.0" }, "packages/broken": {} });
+    writeFileSync(path.join(root, "packages/broken/package.json"), "{ \"name\": ");
+
+    expect(() => discoverWorkspacePackages(root, "workspaces")).toThrow(/no se pudo leer packages\/broken\/package\.json: .+/);
+    writeFileSync(path.join(root, "packages/broken/package.json"), "[]");
+    expect(() => discoverWorkspacePackages(root, "workspaces")).toThrow(/packages\/broken\/package\.json no es un objeto JSON/);
+  });
 });
 
 describe("resolveReleaseUnits", () => {

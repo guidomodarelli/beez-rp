@@ -73,6 +73,28 @@ function readManifest(manifestPath) {
 }
 
 /**
+ * Reads the manifest of a matched workspace directory.
+ *
+ * @param {string} repositoryRoot - Repository root.
+ * @param {string} directory - Workspace directory relative to the root.
+ * @returns {Record<string, unknown>} Manifest.
+ * @throws {Error} When the manifest is not valid JSON or not an object.
+ */
+function readWorkspaceManifest(repositoryRoot, directory) {
+  const manifestPath = `${directory}/${PACKAGE_MANIFEST_FILE}`;
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(path.join(repositoryRoot, manifestPath), "utf8"));
+  } catch (error) {
+    throw new Error(`beez-rp create-version: no se pudo leer ${manifestPath}: ${error instanceof Error ? error.message : String(error)}; corregilo o excluí ese workspace`, { cause: error });
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`beez-rp create-version: ${manifestPath} no es un objeto JSON; corregilo o excluí ese workspace`);
+  }
+  return parsed;
+}
+
+/**
  * Reads the workspace patterns the root `package.json` declares (`workspaces` as a list, or as an
  * object with `packages`, as Yarn and Bun accept).
  *
@@ -134,13 +156,13 @@ export function expandWorkspacePatterns(repositoryRoot, patterns) {
  * @param {string} repositoryRoot - Repository root.
  * @param {"workspaces" | readonly string[]} packages - `packages` of the configuration: the root workspaces, or explicit patterns.
  * @returns {WorkspacePackage[]} Packages with a `name`, sorted by directory.
- * @throws {Error} When no package is found or two packages share a name.
+ * @throws {Error} When a matched manifest is malformed, no package is found or two packages share a name.
  */
 export function discoverWorkspacePackages(repositoryRoot, packages) {
   const patterns = packages === WORKSPACES_PACKAGES ? readDeclaredWorkspaces(readManifest(path.join(repositoryRoot, PACKAGE_MANIFEST_FILE))) : packages;
   const found = expandWorkspacePatterns(repositoryRoot, patterns).flatMap((directory) => {
-    const manifest = readManifest(path.join(repositoryRoot, directory, PACKAGE_MANIFEST_FILE));
-    if (!manifest || typeof manifest.name !== "string" || manifest.name === "") {
+    const manifest = readWorkspaceManifest(repositoryRoot, directory);
+    if (typeof manifest.name !== "string" || manifest.name === "") {
       return [];
     }
     return [

@@ -91,13 +91,17 @@ function pushCoreFeature(repositoryRoot) {
   runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
 }
 
-/** @param {{ rejectPublications?: boolean }} [options] @returns {Promise<Awaited<ReturnType<typeof startFixtureNpmRegistry>>>} Registry with both packages released. */
-async function startRegistry({ rejectPublications = false } = {}) {
+/**
+ * @param {{ rejectPublications?: boolean, packages?: Record<string, { maintainers: string[], versions: string[] }> }} [options] - Rejection and extra (or replaced) packages.
+ * @returns {Promise<Awaited<ReturnType<typeof startFixtureNpmRegistry>>>} Registry with both packages released.
+ */
+async function startRegistry({ rejectPublications = false, packages = {} } = {}) {
   const registry = await startFixtureNpmRegistry({
     users: { [OWNER_TOKEN]: OWNER_USER },
     packages: {
       "@acme/widget": { maintainers: [OWNER_USER], versions: ["1.0.0"] },
       "@acme/adapter": { maintainers: [OWNER_USER], versions: ["0.3.0"] },
+      ...packages,
     },
     rejectPublications,
   });
@@ -170,6 +174,77 @@ describe("create-version in monorepo mode", () => {
       expect(runGit(["log", "-1", "--format=%s", "main"], remoteRoot)).toBe("release: @acme/adapter@0.3.1");
       expect(registry.publications.at(-1)).toEqual({ packageName: "@acme/adapter", version: "0.3.1", user: OWNER_USER });
       expect(readFileSync(path.join(repositoryRoot, "packages/adapter/package.json"), "utf8")).toContain('"version": "0.3.1"');
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS * 2
+  );
+
+  it(
+    "does not write the release when a chosen version is already on npm",
+    async () => {
+      const { repositoryRoot, remoteRoot } = createReleasedMonorepo();
+      pushCoreFeature(repositoryRoot);
+      const featureSha = runGit(["rev-parse", "HEAD"], repositoryRoot);
+      const registry = await startRegistry({ packages: { "@acme/widget": { maintainers: [OWNER_USER], versions: ["1.0.0", "1.1.0"] } } });
+
+      const release = await runCliAsync(repositoryRoot, ["--bump", "minor"], npmEnvironment(registry.registryUrl));
+
+      expect(release.status, release.output).toBe(1);
+      expect(flattenOutput(release.output)).toContain("@acme/widget@1.1.0 ya está publicada en npm.");
+      expect(runGit(["rev-parse", "HEAD"], repositoryRoot)).toBe(featureSha);
+      expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe("");
+      expect(runGit(["tag", "--list", "widget-v1.1.0"], repositoryRoot)).toBe("");
+      expect(runGit(["rev-parse", "main"], remoteRoot)).toBe(featureSha);
+      expect(registry.publications).toEqual([]);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "does not write the release when two chosen packages would get the same tag",
+    async () => {
+      const { repositoryRoot, remoteRoot } = createReleasedMonorepo();
+      writeJson(repositoryRoot, "package.json", { name: "acme-monorepo", private: true, type: "module", workspaces: ["packages/*", "apps/*"] });
+      writeJson(repositoryRoot, "apps/widget/package.json", { name: "@acme/widget-app", version: "1.0.0" });
+      commitAll(repositoryRoot, "chore(app): add the widget app at 1.0.0");
+      writeFileSync(path.join(repositoryRoot, "apps/widget/index.js"), "export {};\n");
+      writeFileSync(path.join(repositoryRoot, "apps/widget/CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- App nueva.\n");
+      commitAll(repositoryRoot, "feat(app): add the entry point");
+      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+      pushCoreFeature(repositoryRoot);
+      const featureSha = runGit(["rev-parse", "HEAD"], repositoryRoot);
+      const registry = await startRegistry({ packages: { "@acme/widget-app": { maintainers: [OWNER_USER], versions: ["1.0.0"] } } });
+
+      const release = await runCliAsync(repositoryRoot, ["--bump", "minor"], npmEnvironment(registry.registryUrl));
+
+      expect(release.status, release.output).toBe(1);
+      expect(flattenOutput(release.output)).toContain("Dos paquetes del release generan el mismo tag widget-v1.1.0");
+      expect(runGit(["rev-parse", "HEAD"], repositoryRoot)).toBe(featureSha);
+      expect(runGit(["tag", "--list", "widget-v1.1.0"], repositoryRoot)).toBe("");
+      expect(runGit(["rev-parse", "main"], remoteRoot)).toBe(featureSha);
+      expect(registry.publications).toEqual([]);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "does not publish a pending release whose package was renamed since its release commit",
+    async () => {
+      const { repositoryRoot } = createReleasedMonorepo();
+      pushCoreFeature(repositoryRoot);
+
+      const failed = await runCliAsync(repositoryRoot, ["--accept-suggested"], npmEnvironment((await startRegistry({ rejectPublications: true })).registryUrl));
+      expect(failed.status, failed.output).toBe(1);
+
+      writeJson(repositoryRoot, "packages/widget/package.json", { name: "@acme/gadget", version: "1.1.0", devDependencies: { "@acme/core": "workspace:*" } });
+      commitAll(repositoryRoot, "chore(widget): rename to gadget");
+      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+      const registry = await startRegistry({ packages: { "@acme/gadget": { maintainers: [OWNER_USER], versions: ["1.0.0"] } } });
+
+      const resume = await runCliAsync(repositoryRoot, ["--accept-suggested"], npmEnvironment(registry.registryUrl));
+
+      expect(resume.status, resume.output).toBe(1);
+      expect(flattenOutput(resume.output)).toContain("El commit de release widget-v1.1.0 publica @acme/widget desde packages/widget/package.json, pero el paquete ahora se llama @acme/gadget.");
+      expect(registry.publications).toEqual([]);
     },
     GIT_FIXTURE_TEST_TIMEOUT_MS * 2
   );

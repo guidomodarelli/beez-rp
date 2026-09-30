@@ -235,8 +235,22 @@ async function chooseVersionsStep(context) {
     }
 
     const version = bumpReleaseVersion(currentVersion, /** @type {"patch" | "minor" | "major"} */ (choice));
+    if (packageSnapshot.npm?.publishedVersions.includes(version)) {
+      throw new ReleaseStepError(
+        `${unit.name}@${version} ya está publicada en npm.`,
+        `No se escribió nada. Llevá la versión de ${unit.manifestPath} a la última publicada o elegí otro tipo de versión, y volvé a correr ${context.commands.createVersion}.`
+      );
+    }
     context.chosen.push({ unit, snapshot: packageSnapshot, version, tag: formatPackageTag(context.tagFormat, unit, version), commitSha: null });
     print(`${ICON.success} ${unit.name}: ${currentVersion} → ${paint(["bold", "cyan"], version)} (${choice})`);
+  }
+
+  const duplicatedTag = context.chosen.find((release, index) => context.chosen.findIndex(({ tag }) => tag === release.tag) !== index);
+  if (duplicatedTag) {
+    throw new ReleaseStepError(
+      `Dos paquetes del release generan el mismo tag ${duplicatedTag.tag} (tagFormat "${context.tagFormat}").`,
+      `No se escribió nada. Usá {name} en tagFormat, o carpetas de paquete con nombres distintos, y volvé a correr ${context.commands.createVersion}.`
+    );
   }
 
   if (context.chosen.length === 0) {
@@ -560,6 +574,12 @@ async function publishPackage(context, checkoutRoot, release) {
   // would upload as they are the specifiers only pnpm rewrites when packing.
   await assertNoTrackedChanges({ reader: createGitReader(checkoutRoot), commands: context.commands });
   const manifest = JSON.parse(readFileSync(path.join(packageRoot, PACKAGE_MANIFEST_FILE), "utf8"));
+  if (manifest.name !== release.name) {
+    throw new ReleaseStepError(
+      `El commit de release ${release.tag} publica ${String(manifest.name)} desde ${unit.manifestPath}, pero el paquete ahora se llama ${release.name}.`,
+      `No se publicó nada. Publicá ese release a mano con su nombre original, o dalo por descartado con --${CREATE_VERSION_FLAG.skipUnpublished}.`
+    );
+  }
   const rewrites = findPnpmPackRewrites(manifest);
   if (rewrites.length > 0) {
     throw new ReleaseStepError(`${release.name} depende de reescrituras del package manager al empaquetar: ${rewrites.join("; ")}.`, "No se publicó nada. Reemplazá workspace:/catalog:/jsr: por rangos de versión.");
