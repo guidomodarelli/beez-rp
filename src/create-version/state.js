@@ -21,8 +21,7 @@ import path from "node:path";
 import { readUnreleased } from "../changelog.js";
 import { CHANGELOG_FILE } from "../constants/changelog.js";
 import {
-  LS_FILES_SKIP_WORKTREE_TAG,
-  LS_FILES_TAG_WIDTH,
+  HEAD_FILE_DIFFERENCE,
   MAIN_BRANCH,
   MIGRATION_STATUS,
   NPM_AUTH_STATUS,
@@ -38,6 +37,7 @@ import {
 import { toReleaseTag } from "../versions.js";
 import { findCreateVersionConfigFile } from "./config.js";
 import { listConfigModules } from "./config-modules.js";
+import { listUncheckedIndexPaths } from "./git-status.js";
 import { listFilesDifferentFromHead } from "./head-files.js";
 import { checkNpmPublishAccess, lookupPublishedVersions, resolvePublishRegistry } from "./npm.js";
 import { createGitReader, listCommits, readPackageVersionAt, runCaptured } from "./process.js";
@@ -273,17 +273,6 @@ function confirmFirstPublication(npmAuth, npm) {
 }
 
 /**
- * Tells whether a `git ls-files -v` tag marks an entry Git does not compare with the working
- * tree: `skip-worktree` (`S`) or `assume-unchanged` (any lowercase tag).
- *
- * @param {string} tag - Tag of the entry.
- * @returns {boolean} `true` when `git status` would not report a local change of the entry.
- */
-function isUncheckedIndexTag(tag) {
-  return tag === LS_FILES_SKIP_WORKTREE_TAG || tag !== tag.toUpperCase();
-}
-
-/**
  * Lists the tracked files marked `skip-worktree` or `assume-unchanged` whose working-tree entry
  * differs from `HEAD`: `git status --porcelain` and `git stash` skip those entries, so the local
  * change (new content, or another kind of file such as a symbolic link) would reach the release
@@ -295,11 +284,7 @@ function isUncheckedIndexTag(tag) {
  * @returns {Promise<HeadFileDifference[]>} Hidden local changes.
  */
 async function listHiddenLocalChanges(reader, repositoryRoot) {
-  const taggedEntries = (await reader.git(["ls-files", "-v", "-z"])).split(" ").filter(Boolean);
-  const uncheckedPaths = taggedEntries
-    .filter((entry) => isUncheckedIndexTag(entry.charAt(0)))
-    .map((entry) => entry.slice(LS_FILES_TAG_WIDTH))
-    .filter((filePath) => lstatSync(path.join(repositoryRoot, filePath), { throwIfNoEntry: false }) !== undefined);
+  const uncheckedPaths = (await listUncheckedIndexPaths(reader)).filter((filePath) => lstatSync(path.join(repositoryRoot, filePath), { throwIfNoEntry: false }) !== undefined);
 
   return listFilesDifferentFromHead(reader, repositoryRoot, uncheckedPaths);
 }
@@ -322,7 +307,14 @@ async function inspectConfigModules(reader, repositoryRoot) {
   }
 
   const configModules = await listConfigModules(repositoryRoot);
-  const uncommittedConfigModules = configModules.loaded ? await listFilesDifferentFromHead(reader, repositoryRoot, configModules.files) : [];
+
+  if (!configModules.loaded) {
+    return { configModules, uncommittedConfigModules: [] };
+  }
+
+  /** @type {HeadFileDifference[]} */
+  const externalModules = configModules.externalFiles.map((file) => ({ file, difference: HEAD_FILE_DIFFERENCE.outsideRepository }));
+  const uncommittedConfigModules = [...(await listFilesDifferentFromHead(reader, repositoryRoot, configModules.files)), ...externalModules];
   return { configModules, uncommittedConfigModules };
 }
 

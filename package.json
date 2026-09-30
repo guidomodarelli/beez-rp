@@ -11,7 +11,7 @@
   "type": "module",
   "sideEffects": false,
   "engines": {
-    "node": ">=22"
+    "node": ">=22.15"
   },
   "packageManager": "pnpm@12.6.0",
   "bin": {

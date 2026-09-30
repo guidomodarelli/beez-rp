@@ -86,6 +86,7 @@ import {
 } from "./artifact.js";
 import { loadCreateVersionConfig } from "./config.js";
 import { ReleaseStepError } from "./errors.js";
+import { listUncheckedIndexPaths } from "./git-status.js";
 import {
   buildNpmAuthConfigLine,
   checkNpmPublishAccess,
@@ -845,6 +846,29 @@ function requireReleaseFilesWithoutHardLinks(context) {
 }
 
 /**
+ * Stops the release, before anything is written, when `package.json`, `CHANGELOG.md` or a
+ * `versionFiles` entry is marked `skip-worktree` or `assume-unchanged` in the index
+ * (`git update-index`). If staging or committing the release fails, undoing it resets those index
+ * entries, which would silently drop their flags; the other checks cannot see the flags when the
+ * file still matches `HEAD`.
+ *
+ * @param {VersionFilesContext} context - Release context.
+ * @returns {Promise<void>}
+ * @throws {ReleaseStepError} When a file the release writes has one of those flags.
+ */
+async function requireReleaseFilesWithoutIndexFlags(context) {
+  const releaseFiles = [...RELEASE_COMMIT_BUILT_IN_FILES, ...context.config.versionFiles];
+  const flaggedPaths = await listUncheckedIndexPaths(context.reader, releaseFiles.map(toLiteralPathspec));
+
+  if (flaggedPaths.length > 0) {
+    throw new ReleaseStepError(
+      `${flaggedPaths.join(", ")} tiene la marca skip-worktree o assume-unchanged en el índice: si el commit de release fallara, deshacerlo le quitaría esa marca.`,
+      `Quitale la marca con git update-index --no-skip-worktree -- ${flaggedPaths.join(" ")} y git update-index --no-assume-unchanged -- ${flaggedPaths.join(" ")}, y volvé a correr ${context.commands.createVersion}; no se tocó la versión.`
+    );
+  }
+}
+
+/**
  * Stops the release, right before its files are read and rewritten, when `package.json` or a
  * `versionFiles` entry differs from `HEAD`: the run starts from a clean working tree, so the change
  * came from an earlier step (such as a check running `lint --fix`), and `git add` would put it in
@@ -871,7 +895,7 @@ async function requireReleaseFilesUnchangedFromHead(context, filePaths) {
 /**
  * Computes the new content of every configured `versionFiles` entry, before anything is written,
  * so a missing file, a linked path, a file Git does not track, a file with another hard link
- * (maybe outside the release), a file changed since `HEAD`, a file that is not valid UTF-8, a file without
+ * (maybe outside the release), a release file marked `skip-worktree` or `assume-unchanged`, a file changed since `HEAD`, a file that is not valid UTF-8, a file without
  * markers or with block markers paired wrongly stops the release with the version untouched.
  * `package.json` is checked against `HEAD` too, so it must be read after this call.
  *
@@ -879,7 +903,7 @@ async function requireReleaseFilesUnchangedFromHead(context, filePaths) {
  * @param {string} version - Version being released.
  * @returns {Promise<ReleaseFileUpdate[]>} Files to write, relative to the root, with their bytes before the release.
  * @throws {ReleaseStepError} When a file is missing, goes through a symbolic link, is not tracked by
- *   Git, has another hard link, differs from `HEAD`, is not valid UTF-8, has
+ *   Git, has another hard link, is marked `skip-worktree` or `assume-unchanged`, differs from `HEAD`, is not valid UTF-8, has
  *   block markers paired wrongly or none of its lines is marked.
  */
 async function prepareVersionFileUpdates(context, version) {
@@ -893,6 +917,7 @@ async function prepareVersionFileUpdates(context, version) {
 
   await requireTrackedVersionFiles(context);
   requireReleaseFilesWithoutHardLinks(context);
+  await requireReleaseFilesWithoutIndexFlags(context);
   await requireReleaseFilesUnchangedFromHead(context, [PACKAGE_MANIFEST_FILE, ...context.config.versionFiles]);
 
   return context.config.versionFiles.map((filePath) => {

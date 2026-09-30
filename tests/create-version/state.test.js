@@ -1079,6 +1079,92 @@ describe("beez-rp create-version command", () => {
   );
 
   it(
+    "should not release with --ignore-local-changes while a directory holding a module the configuration imports was replaced by a link to a directory outside the repository",
+    async () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      const cliPath = path.join(repositoryRoot, "src", "cli.js");
+      const releaseDirectory = path.join(repositoryRoot, "release");
+      const externalRoot = mkdtempSync(path.join(os.tmpdir(), "beez-rp-external-"));
+      temporaryDirectories.push(externalRoot);
+      mkdirSync(path.dirname(cliPath));
+      mkdirSync(releaseDirectory);
+      writeFileSync(cliPath, 'program.version("0.1.0"); // beez-rp-version\n');
+      writeFileSync(path.join(releaseDirectory, "version-files.js"), 'export const versionFiles = ["src/cli.js"];\n');
+      pushConfiguration(repositoryRoot, [
+        'import { versionFiles } from "./release/version-files.js";',
+        "export default {",
+        '  changelog: { audience: "equipo" },',
+        "  checks: false,",
+        "  versionFiles,",
+        "};",
+      ]);
+      // Only the directory is a link: the module path itself resolves to a regular file outside the repository.
+      writeFileSync(path.join(externalRoot, "version-files.js"), "export const versionFiles = [];\n");
+      rmSync(releaseDirectory, { recursive: true });
+      symlinkSync(externalRoot, releaseDirectory, process.platform === "win32" ? "junction" : "dir");
+
+      const { uncommittedConfigModules } = await collect(repositoryRoot);
+
+      expect(uncommittedConfigModules).toContainEqual({ file: "release", difference: HEAD_FILE_DIFFERENCE.typeChanged });
+      expect((uncommittedConfigModules ?? []).filter(({ difference }) => difference === HEAD_FILE_DIFFERENCE.outsideRepository)).toHaveLength(1);
+
+      const blocked = runCli(repositoryRoot, ["--bump", "minor", "--ignore-local-changes"]);
+
+      expect(blocked.status, blocked.output).toBe(0);
+      expect(flattenOutput(blocked.output)).toContain("La configuración tiene cambios sin commitear");
+      expect(flattenOutput(blocked.output)).toContain("release (no es el mismo tipo de archivo que en HEAD, por ejemplo un enlace simbólico)");
+      expect(flattenOutput(blocked.output)).toContain("está fuera del repositorio, por ejemplo detrás de un enlace simbólico, y HEAD no lo respalda");
+      expect(runGit(["log", "-1", "--format=%s", "main"], repositoryRoot)).toBe("chore: configure releases");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+      expect(runGit(["stash", "list"], repositoryRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should stop before writing the version when a release file matching HEAD is marked skip-worktree or assume-unchanged, keeping its mark even if the release commit would fail",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      writeFileSync(path.join(repositoryRoot, "VERSION.txt"), "0.1.0 <!-- beez-rp-version -->\n");
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", '  versionFiles: ["VERSION.txt"],', "};"]);
+      const manifest = readFileSync(path.join(repositoryRoot, "package.json"), "utf8");
+      // A failing commit would make the rollback reset these index entries.
+      const preCommitHookPath = path.join(repositoryRoot, ".git", "hooks", "pre-commit");
+      writeFileSync(preCommitHookPath, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+
+      for (const { releaseFile, indexFlag, listedTag } of [
+        { releaseFile: "VERSION.txt", indexFlag: "--skip-worktree", listedTag: "S" },
+        { releaseFile: "package.json", indexFlag: "--assume-unchanged", listedTag: "h" },
+      ]) {
+        runGit(["update-index", indexFlag, "--", releaseFile], repositoryRoot);
+
+        const blocked = runCli(repositoryRoot, ["--bump", "minor"]);
+
+        expect(blocked.status, blocked.output).toBe(1);
+        expect(flattenOutput(blocked.output)).toContain(`${releaseFile} tiene la marca skip-worktree o assume-unchanged en el índice`);
+        expect(flattenOutput(blocked.output)).toContain(`git update-index --no-skip-worktree -- ${releaseFile} y git update-index --no-assume-unchanged -- ${releaseFile}`);
+        expect(runGit(["ls-files", "-v", "--", releaseFile], repositoryRoot)).toBe(`${listedTag} ${releaseFile}`);
+        expect(readFileSync(path.join(repositoryRoot, "VERSION.txt"), "utf8")).toBe("0.1.0 <!-- beez-rp-version -->\n");
+        expect(readFileSync(path.join(repositoryRoot, "package.json"), "utf8")).toBe(manifest);
+
+        // The commands the hint gives: Git applies a single flag option per update-index call.
+        runGit(["update-index", "--no-skip-worktree", "--", releaseFile], repositoryRoot);
+        runGit(["update-index", "--no-assume-unchanged", "--", releaseFile], repositoryRoot);
+      }
+
+      expect(runGit(["log", "-1", "--format=%s", "main"], repositoryRoot)).toBe("chore: configure releases");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+
+      rmSync(preCommitHookPath);
+      const release = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(release.status, release.output).toBe(0);
+      expect(runGit(["show", "main:VERSION.txt"], remoteRoot)).toBe("0.2.0 <!-- beez-rp-version -->");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
     "should not release nor plan it in --dry-run while the committed configuration imports an ignored local override that git status does not list",
     async () => {
       const { repositoryRoot, remoteRoot } = createReleasedRepository();

@@ -10,8 +10,9 @@
  *
  * The graph is read in a new Node process with a module hook, so it lists what the configuration
  * really loads (ESM `import`, CommonJS `require` and JSON modules) instead of guessing from its
- * source, including ignored or untracked files and a module imported through a symbolic link (the
- * link itself is listed, besides its target when that is inside the repository). Files the
+ * source, including ignored or untracked files and a module imported through a symbolic link (every
+ * link along its path inside the repository is listed, besides its target, which is listed apart
+ * when it is outside the repository). Files the
  * configuration reads with `fs` instead of importing them are not modules and are not listed.
  *
  * @module create-version/config-modules
@@ -26,14 +27,22 @@ import { fileURLToPath } from "node:url";
 import { MODULE_HOOKS_MINIMUM_NODE_VERSION, NODE_MODULES_DIRECTORY } from "../constants/create-version.js";
 
 /**
- * @typedef {{ loaded: true, files: string[] } | { loaded: false, reason: string }} ConfigModuleGraph
+ * @typedef {{ loaded: true, files: string[], externalFiles: string[] } | { loaded: false, reason: string }} ConfigModuleGraph
  *   `files` are relative to the repository root, separated with `/` like `git status` paths, and
- *   only include files inside the repository, outside `node_modules`.
+ *   only include files inside the repository, outside `node_modules` (loaded modules and the
+ *   symbolic links followed to reach them). `externalFiles` are the absolute paths of the modules
+ *   loaded from outside the repository, outside `node_modules` and beez-rp itself.
  * @typedef {import("./config-modules-process.js").ConfigModulesMessage} ConfigModulesMessage
  */
 
 /** Script run by the new process: loads the configuration and sends the modules it loaded back. */
 const CONFIG_MODULES_PROCESS_SCRIPT = fileURLToPath(new URL("./config-modules-process.js", import.meta.url));
+
+/**
+ * Canonical root of the running beez-rp package: the configuration process loads beez-rp's own
+ * modules, which are not part of the released repository (unless it is beez-rp's own checkout).
+ */
+const BEEZ_RP_PACKAGE_ROOT = realpathSync.native(fileURLToPath(new URL("../..", import.meta.url)));
 
 /**
  * Resolves the directory of a path through symbolic links and, on Windows, to its real casing,
@@ -53,28 +62,62 @@ function toCanonicalPath(filePath) {
 }
 
 /**
- * Turns the loaded module URLs into repository-relative paths, dropping modules outside the
- * repository and installed dependencies (anything inside a `node_modules` directory): Node
- * built-ins never reach here.
+ * Tells whether a canonical path is inside a directory (or is the directory itself).
+ *
+ * @param {string} directory - Canonical directory.
+ * @param {string} filePath - Canonical path.
+ * @returns {boolean} `true` when `filePath` is `directory` or below it.
+ */
+function isInsideDirectory(directory, filePath) {
+  const relativePath = path.relative(directory, filePath);
+  return relativePath.split(path.sep)[0] !== ".." && !path.isAbsolute(relativePath);
+}
+
+/**
+ * Sorts the loaded modules and the symbolic links followed to reach them: files inside the
+ * repository become repository-relative paths, and modules outside it are kept apart, since the
+ * release cannot compare them with `HEAD` (such as a module reached through a directory of the
+ * repository replaced by a link to an outside directory). Installed dependencies (anything inside a
+ * `node_modules` directory) and beez-rp itself are dropped; Node built-ins never reach here.
  *
  * @param {string} repositoryRoot - Repository root.
  * @param {string[]} moduleUrls - `file:` URLs of the loaded modules.
- * @returns {string[]} Sorted repository-relative paths separated with `/`.
+ * @param {string[]} symbolicLinkUrls - `file:` URLs of the symbolic links inside the repository followed to reach them.
+ * @returns {{ files: string[], externalFiles: string[] }} Sorted repository-relative paths separated
+ *   with `/`, and sorted absolute paths of the modules outside the repository.
  */
-function toRepositoryFiles(repositoryRoot, moduleUrls) {
+function classifyConfigModules(repositoryRoot, moduleUrls, symbolicLinkUrls) {
   const canonicalRoot = realpathSync.native(repositoryRoot);
   const files = new Set();
+  const externalFiles = new Set();
+
+  /**
+   * @param {string} fileUrl - URL of a loaded module or of a symbolic link followed to reach one.
+   * @param {boolean} isSymbolicLink - Whether the URL names a followed symbolic link.
+   */
+  const classify = (fileUrl, isSymbolicLink) => {
+    const canonicalPath = toCanonicalPath(fileURLToPath(fileUrl));
+    const isInsideRepository = isInsideDirectory(canonicalRoot, canonicalPath);
+    const segments = (isInsideRepository ? path.relative(canonicalRoot, canonicalPath) : canonicalPath).split(path.sep);
+
+    if (segments.includes(NODE_MODULES_DIRECTORY) || canonicalPath === canonicalRoot) {
+      return;
+    }
+    if (isInsideRepository) {
+      files.add(segments.join("/"));
+    } else if (!isSymbolicLink && !isInsideDirectory(BEEZ_RP_PACKAGE_ROOT, canonicalPath)) {
+      externalFiles.add(canonicalPath);
+    }
+  };
 
   for (const moduleUrl of moduleUrls) {
-    const relativePath = path.relative(canonicalRoot, toCanonicalPath(fileURLToPath(moduleUrl)));
-    const segments = relativePath.split(path.sep);
-
-    if (relativePath && segments[0] !== ".." && !path.isAbsolute(relativePath) && !segments.includes(NODE_MODULES_DIRECTORY)) {
-      files.add(segments.join("/"));
-    }
+    classify(moduleUrl, false);
+  }
+  for (const symbolicLinkUrl of symbolicLinkUrls) {
+    classify(symbolicLinkUrl, true);
   }
 
-  return [...files].toSorted();
+  return { files: [...files].toSorted(), externalFiles: [...externalFiles].toSorted() };
 }
 
 /**
@@ -111,7 +154,7 @@ export function listConfigModules(repositoryRoot) {
     graphProcess.on("message", (/** @type {ConfigModulesMessage} */ message) => {
       settle(
         message.moduleUrls
-          ? { loaded: true, files: toRepositoryFiles(repositoryRoot, message.moduleUrls) }
+          ? { loaded: true, ...classifyConfigModules(repositoryRoot, message.moduleUrls, message.symbolicLinkUrls ?? []) }
           : { loaded: false, reason: message.reason ?? "motivo desconocido" }
       );
       graphProcess.kill();

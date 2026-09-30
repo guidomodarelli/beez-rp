@@ -16,9 +16,10 @@ import { GIT_LITERAL_PATHSPEC_PREFIX } from "../constants/version-files.js";
 
 /**
  * @typedef {import("./process.js").GitReader} GitReader
- * @typedef {"notCommitted" | "typeChanged" | "contentChanged"} HeadFileDifferenceKind
+ * @typedef {"notCommitted" | "typeChanged" | "contentChanged" | "outsideRepository"} HeadFileDifferenceKind
  * @typedef {{ file: string, difference: HeadFileDifferenceKind }} HeadFileDifference
- *   `file` is relative to the repository root and separated with `/`.
+ *   `file` is relative to the repository root and separated with `/`, or absolute for
+ *   `outsideRepository`.
  * @typedef {{ mode: string, object: string }} HeadEntry
  */
 
@@ -27,10 +28,11 @@ import { GIT_LITERAL_PATHSPEC_PREFIX } from "../constants/version-files.js";
  *
  * @param {GitReader} reader - Git reader of the repository root.
  * @param {string[]} files - Repository-relative paths.
- * @returns {Promise<Map<string, HeadEntry>>} Entry of each file `HEAD` has; empty without `HEAD`.
+ * @returns {Promise<Map<string, HeadEntry>>} Entry of each file `HEAD` has (a directory too, so a
+ *   directory replaced by a symbolic link is another kind of file); empty without `HEAD`.
  */
 async function readHeadEntries(reader, files) {
-  const listing = await reader.tryGit(["ls-tree", "-r", "-z", "HEAD", "--", ...files.map((file) => `${GIT_LITERAL_PATHSPEC_PREFIX}${file}`)]);
+  const listing = await reader.tryGit(["ls-tree", "-r", "-t", "-z", "HEAD", "--", ...files.map((file) => `${GIT_LITERAL_PATHSPEC_PREFIX}${file}`)]);
   // An entry is `<mode> <type> <object>\t<path>`.
   return new Map(
     (listing ?? "")

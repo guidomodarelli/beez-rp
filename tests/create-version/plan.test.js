@@ -232,7 +232,7 @@ describe("create-version plan", () => {
   it("should block a new release with --ignore-local-changes while a module the configuration loads differs from HEAD, naming it and how", () => {
     const state = createMainState({
       workingTreeChanges: [" M release/hooks.js", " M src/index.js"],
-      configModules: { loaded: true, files: ["beez-rp.config.js", "release/hooks.js", "release/link.js"] },
+      configModules: { loaded: true, files: ["beez-rp.config.js", "release/hooks.js", "release/link.js"], externalFiles: [] },
       uncommittedConfigModules: [
         { file: "release/hooks.js", difference: HEAD_FILE_DIFFERENCE.contentChanged },
         { file: "release/link.js", difference: HEAD_FILE_DIFFERENCE.typeChanged },
@@ -257,7 +257,7 @@ describe("create-version plan", () => {
 
   it("should block a clean working tree while the configuration loads a module that is not committed, such as an ignored local override", () => {
     const state = createMainState({
-      configModules: { loaded: true, files: ["beez-rp.config.js", "release/local-overrides.js"] },
+      configModules: { loaded: true, files: ["beez-rp.config.js", "release/local-overrides.js"], externalFiles: [] },
       uncommittedConfigModules: [{ file: "release/local-overrides.js", difference: HEAD_FILE_DIFFERENCE.notCommitted }],
     });
 
@@ -271,7 +271,7 @@ describe("create-version plan", () => {
   it("should plan a new release with --ignore-local-changes when every module the configuration loads matches HEAD", () => {
     const state = createMainState({
       workingTreeChanges: [" M src/index.js", "?? notes/"],
-      configModules: { loaded: true, files: ["beez-rp.config.js", "release/hooks.js"] },
+      configModules: { loaded: true, files: ["beez-rp.config.js", "release/hooks.js"], externalFiles: [] },
       uncommittedConfigModules: [],
     });
 

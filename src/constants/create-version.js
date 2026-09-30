@@ -292,11 +292,14 @@ export const GIT_SYMBOLIC_LINK_MODE = "120000";
  * - `typeChanged`: the working-tree entry is not the same kind of file as in `HEAD` (for example,
  *   a symbolic link or a directory where `HEAD` has a regular file).
  * - `contentChanged`: same kind of file, different content.
+ * - `outsideRepository`: the file is outside the repository (for example, reached through a
+ *   directory of the repository replaced by a symbolic link), so `HEAD` cannot vouch for it.
  */
 export const HEAD_FILE_DIFFERENCE = Object.freeze({
   notCommitted: "notCommitted",
   typeChanged: "typeChanged",
   contentChanged: "contentChanged",
+  outsideRepository: "outsideRepository",
 });
 
 /** Directory of installed dependencies: the configuration module graph never lists files inside it. */

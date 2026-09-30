@@ -1,6 +1,7 @@
 /**
  * Entry point of the process started by `listConfigModules`: registers module hooks that record
- * every `file:` module Node loads (and every symbolic link it follows to reach one), imports the `create-version` configuration of the repository
+ * every `file:` module Node loads (and every symbolic link inside the repository it follows to reach
+ * one, the module itself or any directory on its way), imports the `create-version` configuration of the repository
  * given as first argument, and sends the recorded URLs (or why it could not load the configuration)
  * to the parent process.
  *
@@ -13,13 +14,13 @@
  * @module create-version/config-modules-process
  */
 
-import { lstatSync } from "node:fs";
+import { lstatSync, realpathSync } from "node:fs";
 import module from "node:module";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 /**
- * @typedef {{ moduleUrls?: string[], reason?: string }} ConfigModulesMessage
+ * @typedef {{ moduleUrls?: string[], symbolicLinkUrls?: string[], reason?: string }} ConfigModulesMessage
  */
 
 /**
@@ -43,51 +44,96 @@ function describeLoadFailure(error) {
 }
 
 /**
- * Returns the `file:` URL a specifier names before Node follows symbolic links, when that is a
- * symbolic link: Node loads the module from its real path, so without this the link would never
- * show up in the graph.
+ * Resolves a specifier to the `file:` URL it names before Node follows symbolic links.
  *
  * @param {string} specifier - Specifier as written in the `import` or `require`.
  * @param {string | undefined} parentUrl - URL of the importing module.
- * @returns {string | null} URL of the symbolic link, or `null` when the specifier is not a file
- *   path (a package, a built-in) or does not name a symbolic link.
+ * @returns {URL | null} Requested URL, or `null` when the specifier is not a file path (a package,
+ *   a built-in).
  */
-function findSymbolicLinkUrl(specifier, parentUrl) {
-  let requestedUrl;
-
+function toRequestedUrl(specifier, parentUrl) {
   try {
     if (specifier.startsWith("file:")) {
-      requestedUrl = new URL(specifier);
-    } else if (path.isAbsolute(specifier)) {
-      requestedUrl = pathToFileURL(specifier);
-    } else if ((specifier.startsWith("./") || specifier.startsWith("../")) && parentUrl?.startsWith("file:")) {
-      requestedUrl = new URL(specifier, parentUrl);
-    } else {
-      return null;
+      return new URL(specifier);
+    }
+    if (path.isAbsolute(specifier)) {
+      return pathToFileURL(specifier);
+    }
+    if ((specifier.startsWith("./") || specifier.startsWith("../")) && parentUrl?.startsWith("file:")) {
+      return new URL(specifier, parentUrl);
     }
   } catch {
     return null;
   }
 
-  return lstatSync(fileURLToPath(requestedUrl), { throwIfNoEntry: false })?.isSymbolicLink() ? requestedUrl.href : null;
+  return null;
+}
+
+/**
+ * Lists the symbolic links (or Windows junctions) along a requested module path inside the
+ * repository, from its first segment below the root to the module itself. Node loads the module
+ * from its real path, so without this a link (the module itself, or any directory on its way, even
+ * one pointing outside the repository) would never show up in the graph.
+ *
+ * @param {string} specifier - Specifier as written in the `import` or `require`.
+ * @param {string | undefined} parentUrl - URL of the importing module.
+ * @param {string[]} repositoryRoots - Spellings of the repository root (as given and real).
+ * @returns {string[]} `file:` URLs of the links, empty when the specifier is not a file path inside
+ *   the repository or no segment is a link.
+ */
+function listSymbolicLinkUrls(specifier, parentUrl, repositoryRoots) {
+  const requestedUrl = toRequestedUrl(specifier, parentUrl);
+
+  if (!requestedUrl) {
+    return [];
+  }
+
+  const requestedPath = fileURLToPath(requestedUrl);
+  const repositoryRoot = repositoryRoots.find((root) => {
+    const relativePath = path.relative(root, requestedPath);
+    return relativePath !== "" && relativePath.split(path.sep)[0] !== ".." && !path.isAbsolute(relativePath);
+  });
+
+  if (!repositoryRoot) {
+    return [];
+  }
+
+  const symbolicLinkUrls = [];
+  let currentPath = repositoryRoot;
+
+  for (const segment of path.relative(repositoryRoot, requestedPath).split(path.sep)) {
+    currentPath = path.join(currentPath, segment);
+    const stats = lstatSync(currentPath, { throwIfNoEntry: false });
+
+    if (!stats) {
+      break;
+    }
+    if (stats.isSymbolicLink()) {
+      symbolicLinkUrls.push(pathToFileURL(currentPath).href);
+    }
+  }
+
+  return symbolicLinkUrls;
 }
 
 /**
  * Imports the configuration while recording the `file:` URL of every module Node loads for it,
- * through ESM `import` and CommonJS `require` alike, plus the symbolic links followed to reach them.
+ * through ESM `import` and CommonJS `require` alike (at their real path, where Node loads them),
+ * plus the symbolic links inside the repository followed to reach them.
  *
  * @param {string} repositoryRoot - Repository root.
- * @returns {Promise<ConfigModulesMessage>} Loaded module URLs, or why they could not be listed.
+ * @returns {Promise<ConfigModulesMessage>} Loaded module and symbolic link URLs, or why they could not be listed.
  */
 async function recordConfigModules(repositoryRoot) {
   /** @type {Set<string>} */
   const moduleUrls = new Set();
+  /** @type {Set<string>} */
+  const symbolicLinkUrls = new Set();
+  const repositoryRoots = [...new Set([path.resolve(repositoryRoot), realpathSync.native(repositoryRoot)])];
   module.registerHooks({
     resolve(specifier, context, nextResolve) {
-      const symbolicLinkUrl = findSymbolicLinkUrl(specifier, context.parentURL);
-
-      if (symbolicLinkUrl) {
-        moduleUrls.add(symbolicLinkUrl);
+      for (const symbolicLinkUrl of listSymbolicLinkUrls(specifier, context.parentURL, repositoryRoots)) {
+        symbolicLinkUrls.add(symbolicLinkUrl);
       }
 
       return nextResolve(specifier, context);
@@ -104,7 +150,7 @@ async function recordConfigModules(repositoryRoot) {
   try {
     const { loadCreateVersionConfig } = await import("./config.js");
     await loadCreateVersionConfig(repositoryRoot);
-    return { moduleUrls: [...moduleUrls] };
+    return { moduleUrls: [...moduleUrls], symbolicLinkUrls: [...symbolicLinkUrls] };
   } catch (error) {
     return { reason: describeLoadFailure(error) };
   }

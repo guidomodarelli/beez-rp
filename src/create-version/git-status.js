@@ -1,5 +1,6 @@
 /**
- * Reading of `git status --porcelain` (v1) lines of `beez-rp create-version`.
+ * Reading of `git status --porcelain` (v1) lines of `beez-rp create-version`, and of the index
+ * entries whose local changes `git status` does not report.
  *
  * A line is `XY <path>`, or `XY <source> -> <path>` for a renamed or copied
  * entry; Git quotes a path as a C string literal when it has special
@@ -11,11 +12,17 @@
  * @module create-version/git-status
  */
 
+/**
+ * @typedef {import("./process.js").GitReader} GitReader
+ */
+
 import {
   GIT_QUOTED_PATH_DELIMITER,
   GIT_QUOTED_PATH_ESCAPE,
   GIT_QUOTED_PATH_ESCAPES,
   GIT_QUOTED_PATH_OCTAL_BYTE_PATTERN,
+  LS_FILES_SKIP_WORKTREE_TAG,
+  LS_FILES_TAG_WIDTH,
   OCTAL_RADIX,
   PORCELAIN_RENAME_SEPARATOR,
   PORCELAIN_SOURCE_PATH_STATUS_CODES,
@@ -95,4 +102,29 @@ export function listPorcelainPaths(line) {
   }
 
   return [firstPath.path, readPath(firstPath.rest.slice(PORCELAIN_RENAME_SEPARATOR.length), false).path];
+}
+
+/**
+ * Tells whether a `git ls-files -v` tag marks an entry Git does not compare with the working
+ * tree: `skip-worktree` (`S`) or `assume-unchanged` (any lowercase tag).
+ *
+ * @param {string} tag - Tag of the entry.
+ * @returns {boolean} `true` when `git status` would not report a local change of the entry.
+ */
+function isUncheckedIndexTag(tag) {
+  return tag === LS_FILES_SKIP_WORKTREE_TAG || tag !== tag.toUpperCase();
+}
+
+/**
+ * Lists the tracked files whose index entry is marked `skip-worktree` or `assume-unchanged`
+ * (`git update-index`): `git status` and `git stash` do not compare them with the working tree.
+ *
+ * @param {GitReader} reader - Git reader of the repository root.
+ * @param {string[]} [pathspecs] - Pathspecs that limit the listing; every tracked file when empty.
+ * @returns {Promise<string[]>} Repository-relative paths separated with `/`.
+ */
+export async function listUncheckedIndexPaths(reader, pathspecs = []) {
+  const pathspecArguments = pathspecs.length > 0 ? ["--", ...pathspecs] : [];
+  const taggedEntries = (await reader.git(["ls-files", "-v", "-z", ...pathspecArguments])).split("\0").filter(Boolean);
+  return taggedEntries.filter((entry) => isUncheckedIndexTag(entry.charAt(0))).map((entry) => entry.slice(LS_FILES_TAG_WIDTH));
 }
