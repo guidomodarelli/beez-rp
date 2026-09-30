@@ -66,8 +66,8 @@ import {
   select,
   startSpinner,
 } from "../terminal-ui.js";
-import { GIT_LITERAL_PATHSPEC_PREFIX } from "../constants/version-files.js";
-import { updateVersionMarkers } from "../version-files.js";
+import { GIT_LITERAL_PATHSPEC_PREFIX, VERSION_BLOCK_END_MARKERS, VERSION_BLOCK_PROBLEM, VERSION_BLOCK_START_MARKERS } from "../constants/version-files.js";
+import { updateVersionMarkers, VersionBlockError } from "../version-files.js";
 import { listNextVersions, resolveRequestedVersion, suggestReleaseType, toReleaseTag } from "../versions.js";
 import {
   expandArtifactPattern,
@@ -648,13 +648,83 @@ function missingVersionMarkerError(context, filePath) {
 }
 
 /**
+ * Explains, in Spanish, which version block markers of a `versionFiles` entry are paired wrongly
+ * and how to fix them.
+ *
+ * @param {VersionBlockError} blockError - Pairing problem found in the file.
+ * @param {string} filePath - Configured path.
+ * @returns {{ message: string, fix: string }} What is wrong (file and line) and the marker to add or change.
+ */
+function describeVersionBlockProblem(blockError, filePath) {
+  const { problem, lineNumber, marker, openingLineNumber, openingMarker } = blockError;
+  const expectedEndMarker = VERSION_BLOCK_END_MARKERS[VERSION_BLOCK_START_MARKERS.indexOf(openingMarker ?? "")];
+
+  switch (problem) {
+    case VERSION_BLOCK_PROBLEM.unterminated:
+      return {
+        message: `${filePath} (versionFiles) abre un bloque de versión con ${marker} en la línea ${lineNumber} y nunca lo cierra.`,
+        fix: `Cerralo con ${expectedEndMarker} al final de las líneas que llevan la versión`,
+      };
+    case VERSION_BLOCK_PROBLEM.nested:
+      return {
+        message: `${filePath} (versionFiles) abre un bloque de versión con ${marker} en la línea ${lineNumber} dentro del bloque que abrió ${openingMarker} en la línea ${openingLineNumber}.`,
+        fix: `Cerrá el bloque de la línea ${openingLineNumber} con ${expectedEndMarker} antes de abrir otro`,
+      };
+    case VERSION_BLOCK_PROBLEM.mismatched:
+      return {
+        message: `${filePath} (versionFiles) cierra con ${marker} en la línea ${lineNumber} el bloque que abrió ${openingMarker} en la línea ${openingLineNumber}.`,
+        fix: `Cambiá ${marker} por ${expectedEndMarker}`,
+      };
+    default:
+      return {
+        message: `${filePath} (versionFiles) tiene ${marker} en la línea ${lineNumber} sin ningún bloque de versión abierto.`,
+        fix: `Abrí el bloque con ${VERSION_BLOCK_START_MARKERS[VERSION_BLOCK_END_MARKERS.indexOf(marker)]} o borrá ese marcador`,
+      };
+  }
+}
+
+/**
+ * Rewrites the marked versions of a `versionFiles` entry, stopping the release when its block
+ * markers are paired wrongly or none of its lines is marked.
+ *
+ * @param {VersionFilesContext} context - Release context.
+ * @param {string} filePath - Configured path.
+ * @param {string} content - Content of the file.
+ * @param {string} version - Version to write.
+ * @param {string} untouchedNote - What the stop leaves untouched, closing the hint.
+ * @returns {string} Content with the marked versions rewritten.
+ * @throws {ReleaseStepError} When the block markers are paired wrongly or no version is marked.
+ */
+function rewriteMarkedVersions(context, filePath, content, version, untouchedNote) {
+  let update;
+
+  try {
+    update = updateVersionMarkers(content, version);
+  } catch (error) {
+    if (!(error instanceof VersionBlockError)) {
+      throw error;
+    }
+    const { message, fix } = describeVersionBlockProblem(error, filePath);
+    throw new ReleaseStepError(message, `${fix} y volvé a correr ${context.commands.createVersion}; ${untouchedNote}.`, { cause: error });
+  }
+
+  if (update.replacements === 0) {
+    throw missingVersionMarkerError(context, filePath);
+  }
+
+  return update.content;
+}
+
+/**
  * Computes the new content of every configured `versionFiles` entry, before anything is written,
- * so a missing file, a linked path or a file without markers stops the release with the version untouched.
+ * so a missing file, a linked path, a file without markers or with block markers paired wrongly stops
+ * the release with the version untouched.
  *
  * @param {ReleaseContext} context - Release context.
  * @param {string} version - Version being released.
  * @returns {{ filePath: string, content: string }[]} Files to write, relative to the root.
- * @throws {ReleaseStepError} When a file is missing, goes through a symbolic link or none of its lines is marked.
+ * @throws {ReleaseStepError} When a file is missing, goes through a symbolic link, has block markers
+ *   paired wrongly or none of its lines is marked.
  */
 function prepareVersionFileUpdates(context, version) {
   return context.config.versionFiles.map((filePath) => {
@@ -665,13 +735,7 @@ function prepareVersionFileUpdates(context, version) {
       throw new ReleaseStepError(`${filePath} (versionFiles) no existe.`, `Corregí versionFiles en beez-rp.config.(m)js y volvé a correr ${context.commands.createVersion}; no se tocó la versión.`);
     }
 
-    const update = updateVersionMarkers(readFileSync(absolutePath, "utf8"), version);
-
-    if (update.replacements === 0) {
-      throw missingVersionMarkerError(context, filePath);
-    }
-
-    return { filePath, content: update.content };
+    return { filePath, content: rewriteMarkedVersions(context, filePath, readFileSync(absolutePath, "utf8"), version, "no se tocó la versión") };
   });
 }
 
@@ -683,8 +747,8 @@ function prepareVersionFileUpdates(context, version) {
  * @param {VersionFilesContext} context - Release context.
  * @param {string} version - Version of the pending release.
  * @returns {Promise<void>}
- * @throws {ReleaseStepError} When a file is missing from `HEAD`, goes through a symbolic link, has no
- *   marked version or has a marked version other than the pending one.
+ * @throws {ReleaseStepError} When a file is missing from `HEAD`, goes through a symbolic link, has
+ *   block markers paired wrongly, has no marked version or has a marked version other than the pending one.
  */
 async function verifyReleasedVersionFiles(context, version) {
   for (const filePath of context.config.versionFiles) {
@@ -698,12 +762,7 @@ async function verifyReleasedVersionFiles(context, version) {
       );
     }
 
-    const update = updateVersionMarkers(content, version);
-
-    if (update.replacements === 0) {
-      throw missingVersionMarkerError(context, filePath);
-    }
-    if (update.content !== content) {
+    if (rewriteMarkedVersions(context, filePath, content, version, "no se subió ni publicó nada") !== content) {
       throw new ReleaseStepError(
         `${filePath} (versionFiles) tiene en el commit de release (HEAD) una versión marcada distinta de ${version}.`,
         `Actualizá sus líneas marcadas a ${version} dentro del commit de release (git commit --amend, y recreá el tag ${toReleaseTag(version)} si ya existe en local) y volvé a correr ${context.commands.createVersion}; no se subió ni publicó nada.`

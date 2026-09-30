@@ -485,6 +485,51 @@ describe("beez-rp create-version command", () => {
   );
 
   it(
+    "should stop before bumping when a versionFiles block is never closed, instead of rewriting every later version",
+    () => {
+      const { repositoryRoot } = createReleasedRepository();
+      const installPath = path.join(repositoryRoot, "INSTALL.md");
+      const installContent = "<!-- beez-rp-start-version -->\nnpm i fixture-app@0.1.0\n<!-- beez-rp-finish -->\nRequires other-tool@0.1.0.\n";
+      writeFileSync(installPath, installContent);
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", '  versionFiles: ["INSTALL.md"],', "};"]);
+
+      const blocked = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(blocked.status, blocked.output).toBe(1);
+      expect(flattenOutput(blocked.output)).toContain("INSTALL.md (versionFiles) abre un bloque de versión con beez-rp-start-version en la línea 1 y nunca lo cierra.");
+      expect(flattenOutput(blocked.output)).toContain("Cerralo con beez-rp-end");
+      expect(readFileSync(installPath, "utf8")).toBe(installContent);
+      expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+      expect(JSON.parse(readFileSync(path.join(repositoryRoot, "package.json"), "utf8")).version).toBe("0.1.0");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should not push a release commit whose versionFiles entry closes a block with the other tool's end marker",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      writeFileSync(path.join(repositoryRoot, "INSTALL.md"), "# x-release-please-start-version\nnpm i fixture-app@0.2.0\n# beez-rp-end\n");
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", '  versionFiles: ["INSTALL.md"],', "};"]);
+      writeFileSync(path.join(repositoryRoot, "package.json"), `${JSON.stringify({ name: "fixture-app", version: "0.2.0" }, null, 2)}\n`);
+      writeFileSync(path.join(repositoryRoot, "CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n## [0.2.0] - 2026-01-01\n\n### Added\n\n- Algo nuevo.\n");
+      runGit(["add", "-A"], repositoryRoot);
+      runGit(["commit", "--quiet", "-m", "0.2.0"], repositoryRoot);
+
+      const blocked = runCli(repositoryRoot, []);
+
+      expect(blocked.status, blocked.output).toBe(1);
+      expect(flattenOutput(blocked.output)).toContain(
+        "INSTALL.md (versionFiles) cierra con beez-rp-end en la línea 3 el bloque que abrió x-release-please-start-version en la línea 1."
+      );
+      expect(flattenOutput(blocked.output)).toContain("Cambiá beez-rp-end por x-release-please-end");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+      expect(runGit(["log", "-1", "--format=%s", "main"], remoteRoot)).toBe("chore: configure releases");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
     "should stage a versionFiles entry whose name starts with a dash as a file, not as a Git option",
     () => {
       const { repositoryRoot, remoteRoot } = createReleasedRepository();

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { updateVersionMarkers } from "../src/version-files.js";
+import { updateVersionMarkers, VersionBlockError } from "../src/version-files.js";
 
 describe("updateVersionMarkers", () => {
   it("rewrites the version of lines marked with beez-rp-version or x-release-please-version only", () => {
@@ -51,6 +51,39 @@ describe("updateVersionMarkers", () => {
 
     expect(update.content).toBe('v = "2.1.0"; // beez-rp-version\r\nip = "10.0.0.1"; // beez-rp-version\r\n');
     expect(update).toMatchObject({ markedLines: 2, replacements: 1 });
+  });
+
+  it.each([
+    {
+      name: "a start marker never closed, instead of rewriting every version after it",
+      lines: ["<!-- beez-rp-start-version -->", "npm i pkg@1.0.0", "<!-- beez-rp-finish -->", "unrelated 1.0.0"],
+      expected: { problem: "unterminated", lineNumber: 1, marker: "beez-rp-start-version" },
+    },
+    {
+      name: "an end marker outside any block",
+      lines: ['v = "1.0.0"; // beez-rp-version', "# x-release-please-end"],
+      expected: { problem: "unopened", lineNumber: 2, marker: "x-release-please-end" },
+    },
+    {
+      name: "a start marker inside a block still open",
+      lines: ["# beez-rp-start-version", "a 1.0.0", "# beez-rp-start-version", "b 1.0.0", "# beez-rp-end"],
+      expected: { problem: "nested", lineNumber: 3, marker: "beez-rp-start-version", openingLineNumber: 1, openingMarker: "beez-rp-start-version" },
+    },
+    {
+      name: "a block closed with the end marker of the other tool",
+      lines: ["# x-release-please-start-version", "a 1.0.0", "# beez-rp-end", "b 1.0.0"],
+      expected: { problem: "mismatched", lineNumber: 3, marker: "beez-rp-end", openingLineNumber: 1, openingMarker: "x-release-please-start-version" },
+    },
+  ])("rejects $name, pointing at the offending line", ({ lines, expected }) => {
+    let caughtError;
+    try {
+      updateVersionMarkers(lines.join("\n"), "1.1.0");
+    } catch (error) {
+      caughtError = error;
+    }
+
+    expect(caughtError).toBeInstanceOf(VersionBlockError);
+    expect(caughtError).toMatchObject(expected);
   });
 
   it("reports nothing to replace when no line is marked", () => {
