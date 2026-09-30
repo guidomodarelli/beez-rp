@@ -2361,9 +2361,77 @@ describe("beez-rp create-version command", () => {
       const blocked = runCli(repositoryRoot, ["--bump", "minor"]);
 
       expect(blocked.status, blocked.output).toBe(0);
-      expect(flattenOutput(blocked.output)).toContain("release/checks.js (tiene un atributo filter en .gitattributes, así que no se puede comprobar que lo que cargó Node sea lo commiteado)");
+      expect(flattenOutput(blocked.output)).toContain("release/checks.js (tiene un atributo filter en .gitattributes, así que no se puede comprobar que lo que usa el release sea lo commiteado)");
       expect(runGit(["log", "-1", "--format=%s", "main"], repositoryRoot)).toBe("chore: configure releases");
       expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should not release while skip-worktree hides a local edit that the clean filter of a filtered file maps back to HEAD",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      const notesPath = path.join(repositoryRoot, "notes.txt");
+      // A clean filter that drops every "X": the committed blob cannot tell "notas" from "notXas".
+      runGit(["config", "filter.drop-x.clean", "tr -d X"], repositoryRoot);
+      runGit(["config", "filter.drop-x.smudge", "cat"], repositoryRoot);
+      writeFileSync(path.join(repositoryRoot, ".gitattributes"), "notes.txt filter=drop-x\n");
+      writeFileSync(notesPath, "notas\n");
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", "};"]);
+      runGit(["update-index", "--skip-worktree", "--", "notes.txt"], repositoryRoot);
+      writeFileSync(notesPath, "notXas\n");
+
+      expect(runGit(["hash-object", "--", "notes.txt"], repositoryRoot)).toBe(runGit(["rev-parse", "HEAD:notes.txt"], repositoryRoot));
+
+      const blocked = runCli(repositoryRoot, ["--bump", "minor", "--ignore-local-changes"]);
+
+      expect(blocked.status, blocked.output).toBe(0);
+      expect(flattenOutput(blocked.output)).toContain("Hay 1 archivo(s) con cambios locales que git status no muestra");
+      expect(flattenOutput(blocked.output)).toContain("notes.txt (tiene un atributo filter en .gitattributes");
+      expect(runGit(["log", "-1", "--format=%s", "main"], repositoryRoot)).toBe("chore: configure releases");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should compare a submodule marked skip-worktree by its checked-out commit, and ignore one never initialized",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      const submoduleRoot = path.join(repositoryRoot, "vendor", "lib");
+      mkdirSync(submoduleRoot, { recursive: true });
+      runGit(["init", "--quiet", "--initial-branch=main"], submoduleRoot);
+      writeFileSync(path.join(submoduleRoot, "index.js"), "export const value = 1;\n");
+      runGit(["add", "index.js"], submoduleRoot);
+      runGit(["-c", "user.email=lib@example.test", "-c", "user.name=Lib Fixture", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "lib"], submoduleRoot);
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", "};"]);
+      runGit(["update-index", "--skip-worktree", "--", "vendor/lib"], repositoryRoot);
+      const hiddenChangesTitle = "archivo(s) con cambios locales que git status no muestra";
+
+      const atRecordedCommit = runCli(repositoryRoot, ["--dry-run"]);
+
+      expect(atRecordedCommit.status, atRecordedCommit.output).toBe(0);
+      expect(flattenOutput(atRecordedCommit.output)).not.toContain(hiddenChangesTitle);
+
+      writeFileSync(path.join(submoduleRoot, "index.js"), "export const value = 2;\n");
+      runGit(["-c", "user.email=lib@example.test", "-c", "user.name=Lib Fixture", "-c", "commit.gpgsign=false", "commit", "--quiet", "-am", "lib 2"], submoduleRoot);
+
+      const atAnotherCommit = runCli(repositoryRoot, ["--bump", "minor", "--ignore-local-changes"]);
+
+      expect(atAnotherCommit.status, atAnotherCommit.output).toBe(0);
+      expect(flattenOutput(atAnotherCommit.output)).toContain(hiddenChangesTitle);
+      expect(flattenOutput(atAnotherCommit.output)).toContain("vendor/lib (su contenido es distinto del de HEAD)");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+
+      // A submodule never initialized is the empty directory Git leaves in its place.
+      rmSync(submoduleRoot, { recursive: true, force: true });
+      mkdirSync(submoduleRoot);
+
+      const uninitialized = runCli(repositoryRoot, ["--dry-run"]);
+
+      expect(uninitialized.status, uninitialized.output).toBe(0);
+      expect(flattenOutput(uninitialized.output)).not.toContain(hiddenChangesTitle);
     },
     GIT_FIXTURE_TEST_TIMEOUT_MS
   );
@@ -2419,8 +2487,9 @@ describe("beez-rp create-version command", () => {
        */
       const runScript = (startsTraceFirst) => {
         const script = [
-          `import { runCreateVersion, startTracingConfigModules } from ${JSON.stringify(pathToFileURL(path.join(BEEZ_RP_ROOT, "src", "create-version", "index.js")).href)};`,
+          `import { startTracingConfigModules } from ${JSON.stringify(pathToFileURL(path.join(BEEZ_RP_ROOT, "src", "create-version", "module-trace-bootstrap.js")).href)};`,
           startsTraceFirst ? "startTracingConfigModules();" : "",
+          `const { runCreateVersion } = await import(${JSON.stringify(pathToFileURL(path.join(BEEZ_RP_ROOT, "src", "create-version", "index.js")).href)});`,
           `await import(${JSON.stringify(pathToFileURL(path.join(repositoryRoot, "release", "index.js")).href)});`,
           `process.exitCode = await runCreateVersion({ repositoryRoot: ${JSON.stringify(repositoryRoot)}, argv: ["--bump", "minor", "--ignore-local-changes"] });`,
         ].join("\n");
@@ -2445,6 +2514,26 @@ describe("beez-rp create-version command", () => {
     },
     GIT_FIXTURE_TEST_TIMEOUT_MS
   );
+
+  it("should let custom tooling start the module trace through beez-rp/module-trace before any beez-rp module loads", () => {
+    // Imported by package name from beez-rp itself, as when beez-rp releases its own checkout.
+    const script = [
+      'import { readModuleTrace, startTracingConfigModules } from "beez-rp/module-trace";',
+      "startTracingConfigModules();",
+      'const createVersion = await import("beez-rp/create-version");',
+      "const { trace, startedExplicitly } = readModuleTrace();",
+      "const tracedUrls = [...trace.moduleUrlsByParent.values()].flatMap((urls) => [...urls]);",
+      "console.log(JSON.stringify({ startedExplicitly, tracedUrls, barrelStartsTrace: 'startTracingConfigModules' in createVersion }));",
+    ].join("\n");
+
+    const result = spawnSync(process.execPath, ["--input-type=module", "--eval", script], { cwd: BEEZ_RP_ROOT, encoding: "utf8", env: commandEnvironment() });
+
+    expect(result.status, result.stderr).toBe(0);
+    const { startedExplicitly, tracedUrls, barrelStartsTrace } = JSON.parse(result.stdout);
+    expect(startedExplicitly).toBe(true);
+    expect(tracedUrls).toContain(pathToFileURL(path.join(BEEZ_RP_ROOT, "src", "constants", "create-version.js")).href);
+    expect(barrelStartsTrace).toBe(false);
+  });
 
   it(
     "should not release while skip-worktree hides a changed executable bit, where core.fileMode keeps it, and ignore that bit where it does not",

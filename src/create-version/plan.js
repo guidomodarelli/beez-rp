@@ -53,7 +53,7 @@ const HEAD_FILE_DIFFERENCE_LABELS = Object.freeze({
   [HEAD_FILE_DIFFERENCE.contentChanged]: "su contenido es distinto del de HEAD",
   [HEAD_FILE_DIFFERENCE.executableBitChanged]: "su permiso de ejecución es distinto del de HEAD",
   [HEAD_FILE_DIFFERENCE.outsideRepository]: "está fuera del repositorio, por ejemplo detrás de un enlace simbólico, y HEAD no lo respalda",
-  [HEAD_FILE_DIFFERENCE.filtered]: "tiene un atributo filter en .gitattributes, así que no se puede comprobar que lo que cargó Node sea lo commiteado",
+  [HEAD_FILE_DIFFERENCE.filtered]: "tiene un atributo filter en .gitattributes, así que no se puede comprobar que lo que usa el release sea lo commiteado",
   [HEAD_FILE_DIFFERENCE.implicitPath]:
     "se importa sin la ruta completa del archivo (sin extensión o como carpeta), así que no se puede comprobar qué archivo cargó Node: importalo con su ruta completa, con extensión (por ejemplo ./settings.js)",
 });
@@ -462,7 +462,7 @@ function lateConfigModuleTraceBlocker(commands) {
     title: "No se pueden apartar los cambios locales: el registro de módulos empezó tarde",
     details: [
       `beez-rp empezó a registrar los módulos que carga ${CONFIG_FILES_LABEL} recién al cargarla, así que no ve el código del repositorio que se importó antes; un cambio local en ese código llegaría al release aunque --${CREATE_VERSION_FLAG.ignoreLocalChanges} lo aparte.`,
-      `Corré ${commands.createVersion} --${CREATE_VERSION_FLAG.ignoreLocalChanges}, o, desde tu propio código, llamá a startTracingConfigModules() de beez-rp/create-version antes de importar cualquier código del repositorio y de llamar a runCreateVersion o loadCreateVersionConfig.`,
+      `Corré ${commands.createVersion} --${CREATE_VERSION_FLAG.ignoreLocalChanges}, o, desde tu propio código, llamá a startTracingConfigModules() de beez-rp/module-trace antes de importar beez-rp/create-version o cualquier código del repositorio, y antes de llamar a runCreateVersion o loadCreateVersionConfig.`,
     ],
   };
 }

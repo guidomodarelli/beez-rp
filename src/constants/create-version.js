@@ -285,6 +285,18 @@ export const LS_TREE_ENTRY_PATH_SEPARATOR = "\t";
 export const GIT_SYMBOLIC_LINK_MODE = "120000";
 
 /**
+ * Mode `git ls-tree` reports for a submodule (gitlink): its object is the commit the submodule must
+ * have checked out, not a blob, so it is compared with the `HEAD` of the submodule checkout.
+ */
+export const GIT_SUBMODULE_MODE = "160000";
+
+/**
+ * Entry an initialized submodule checkout has at its root (a `.git` file or directory). Without it
+ * the submodule directory belongs to the superproject, and `git -C` would read the superproject.
+ */
+export const GIT_METADATA_ENTRY_NAME = ".git";
+
+/**
  * Git attribute naming the clean/smudge filter driver of a path (`.gitattributes`): a clean filter
  * can rewrite what Git stores, so the committed blob is no longer the working-tree bytes.
  */

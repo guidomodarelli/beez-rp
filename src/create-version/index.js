@@ -20,7 +20,6 @@ export {
   withArtifactOutsidePackageRoot,
 } from "./artifact.js";
 export { defineCreateVersionConfig, loadCreateVersionConfig, resolveCreateVersionConfig } from "./config.js";
-export { startTracingConfigModules } from "./config-modules.js";
 export { ReleaseStepError } from "./errors.js";
 export {
   buildNpmAuthConfigLine,

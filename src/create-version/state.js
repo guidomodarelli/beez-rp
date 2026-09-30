@@ -278,7 +278,9 @@ function confirmFirstPublication(npmAuth, npm) {
  * differs from `HEAD`: `git status --porcelain` and `git stash` skip those entries, so the local
  * change (new content, or another kind of file such as a symbolic link) would reach the release
  * unseen. Entries missing from the working tree (a sparse checkout) are skipped: nothing local of
- * them can be loaded or released.
+ * them can be loaded or released. An entry with a `filter` attribute is reported as such even when
+ * it matches `HEAD`: Git compares it through its clean filter, which can map a local edit back to
+ * the committed blob, while checks and `npm publish` use the raw working-tree bytes.
  *
  * @param {GitReader} reader - Git reader.
  * @param {string} repositoryRoot - Repository root.
@@ -286,8 +288,14 @@ function confirmFirstPublication(npmAuth, npm) {
  */
 async function listHiddenLocalChanges(reader, repositoryRoot) {
   const uncheckedPaths = (await listUncheckedIndexPaths(reader)).filter((filePath) => lstatSync(path.join(repositoryRoot, filePath), { throwIfNoEntry: false }) !== undefined);
+  // A clean filter can map a local edit back to the committed blob, while the release uses the raw bytes.
+  const filteredPaths = await listFilteredFiles(reader, uncheckedPaths);
+  const unfilteredPaths = uncheckedPaths.filter((filePath) => !filteredPaths.includes(filePath));
 
-  return listFilesDifferentFromHead(reader, repositoryRoot, uncheckedPaths);
+  return [
+    ...(await listFilesDifferentFromHead(reader, repositoryRoot, unfilteredPaths)),
+    ...filteredPaths.map((file) => ({ file, difference: HEAD_FILE_DIFFERENCE.filtered })),
+  ];
 }
 
 /**

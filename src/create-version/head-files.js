@@ -8,20 +8,22 @@
  * @module create-version/head-files
  */
 
-import { lstatSync, readlinkSync } from "node:fs";
+import { lstatSync, readdirSync, readlinkSync } from "node:fs";
 import path from "node:path";
 
 import {
   GIT_EXECUTABLE_FILE_MODE,
   GIT_FILE_MODE_SETTING,
+  GIT_METADATA_ENTRY_NAME,
   GIT_REGULAR_FILE_MODES,
+  GIT_SUBMODULE_MODE,
   GIT_SYMBOLIC_LINK_MODE,
   HEAD_FILE_DIFFERENCE,
   LS_TREE_ENTRY_PATH_SEPARATOR,
   OWNER_EXECUTE_PERMISSION_BIT,
 } from "../constants/create-version.js";
 import { GIT_LITERAL_PATHSPEC_PREFIX } from "../constants/version-files.js";
-import { readGitBlob } from "./process.js";
+import { createGitReader, readGitBlob } from "./process.js";
 
 /**
  * @typedef {import("./process.js").GitReader} GitReader
@@ -81,10 +83,32 @@ async function tracksExecutableBit(reader) {
 }
 
 /**
+ * Tells whether a working-tree submodule directory matches its committed gitlink: an initialized
+ * submodule must have the recorded commit checked out, and one never initialized is an empty
+ * directory, as Git leaves it. Git reads the submodule itself only when its root has a `.git`
+ * entry; otherwise `git -C` would answer for the superproject.
+ *
+ * @param {string} absolutePath - Submodule directory in the working tree.
+ * @param {string} object - Commit the gitlink records.
+ * @returns {Promise<boolean>} `true` when the submodule is the committed one or was never initialized.
+ */
+async function hasCommittedSubmoduleCommit(absolutePath, object) {
+  const entries = readdirSync(absolutePath);
+
+  if (!entries.includes(GIT_METADATA_ENTRY_NAME)) {
+    return entries.length === 0;
+  }
+
+  const checkedOutCommit = await createGitReader(absolutePath).tryGit(["rev-parse", "--verify", "HEAD"]);
+  return checkedOutCommit?.trim() === object;
+}
+
+/**
  * Lists the given working-tree files that differ from `HEAD`: missing from `HEAD`, of another kind
  * (a symbolic link or a directory where `HEAD` has a regular file), with other content or, where
  * Git keeps the executable bit (`core.fileMode`), executable where `HEAD` has a plain file or the
- * other way around. Git hashes
+ * other way around. A submodule (gitlink) differs when its checkout is at another commit, or when
+ * it was never initialized but its directory is not empty. Git hashes
  * each regular file through its clean filters (line endings, `.gitattributes`), like `git add`, so
  * a checkout with converted line endings is not a change. Index flags (`skip-worktree`,
  * `assume-unchanged`) are ignored: only the working tree and `HEAD` are compared.
@@ -122,6 +146,10 @@ export async function listFilesDifferentFromHead(reader, repositoryRoot, files) 
       regularFiles.push({ file, object: headEntry.object });
     } else if (headEntry.mode === GIT_SYMBOLIC_LINK_MODE && stats?.isSymbolicLink()) {
       if (!(await hasCommittedLinkTarget(repositoryRoot, absolutePath, headEntry.object))) {
+        differenceByFile.set(file, HEAD_FILE_DIFFERENCE.contentChanged);
+      }
+    } else if (headEntry.mode === GIT_SUBMODULE_MODE && stats?.isDirectory()) {
+      if (!(await hasCommittedSubmoduleCommit(absolutePath, headEntry.object))) {
         differenceByFile.set(file, HEAD_FILE_DIFFERENCE.contentChanged);
       }
     } else {

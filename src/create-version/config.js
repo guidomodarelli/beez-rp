@@ -325,7 +325,8 @@ export function findCreateVersionConfigFile(repositoryRoot) {
  * again, so a new process imports the updated file and everything it imports. The module trace of
  * `config-modules.js` starts first (once per process) when nobody started it, so the diagnosis can
  * compare every module the configuration loads with `HEAD`; custom tooling that sets local changes
- * aside must start it earlier with `startTracingConfigModules`, before importing repository code.
+ * aside must start it earlier with `startTracingConfigModules` (`beez-rp/module-trace`), before importing
+ * this module or repository code.
  *
  * @param {string} repositoryRoot - Repository root.
  * @returns {Promise<ResolvedCreateVersionConfig>} Resolved configuration.

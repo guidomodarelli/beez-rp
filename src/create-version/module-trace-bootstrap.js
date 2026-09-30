@@ -116,8 +116,10 @@ function startModuleTrace(startedExplicitly) {
 
 /**
  * Starts recording the modules this process resolves, once per process: later calls keep the same
- * trace. Custom tooling that calls `runCreateVersion` or `loadCreateVersionConfig` must call it
- * first, before importing any code of the repository it releases (the CLI already does, before
+ * trace. Custom tooling that calls `runCreateVersion` or `loadCreateVersionConfig` must import it
+ * from `beez-rp/module-trace` and call it first, before importing `beez-rp/create-version` (whose
+ * modules would otherwise load untraced when beez-rp releases itself) or any code of the repository
+ * it releases (the CLI already does, before
  * importing any other module): a module Node already cached is never resolved again, so neither it
  * nor what it imports would reach the graph, and the plan refuses `--ignore-local-changes` when the
  * trace did not start here. Without `module.registerHooks` (Node before 22.15) nothing is recorded

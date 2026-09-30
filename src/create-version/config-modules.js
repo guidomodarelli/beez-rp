@@ -12,7 +12,8 @@
  * (`module.registerHooks`, in `module-trace-bootstrap.js`), registered once per process before the
  * configuration loads: the CLI registers it before importing anything else, and custom tooling
  * must do the same with
- * `startTracingConfigModules` before importing any repository code, since a module Node
+ * `startTracingConfigModules` (`beez-rp/module-trace`) before importing `beez-rp/create-version`
+ * or any repository code, since a module Node
  * already cached never shows up again, nor do its imports. `loadCreateVersionConfig` registers it
  * too when nobody did, but then the trace may miss modules loaded earlier, so the plan refuses to
  * set local changes aside (`--ignore-local-changes`) with such a trace. It records
@@ -39,7 +40,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { FILE_URL_SCHEME, MODULE_HOOKS_MINIMUM_NODE_VERSION, NODE_MODULES_DIRECTORY } from "../constants/create-version.js";
 import { readModuleTrace } from "./module-trace-bootstrap.js";
 
-export { ensureTracingConfigModules, startTracingConfigModules } from "./module-trace-bootstrap.js";
+export { ensureTracingConfigModules } from "./module-trace-bootstrap.js";
 
 /**
  * @typedef {{ loaded: true, files: string[], externalFiles: string[], implicitPaths: string[], startedExplicitly: boolean } | { loaded: false, reason: string }} ConfigModuleGraph
