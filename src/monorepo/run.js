@@ -772,7 +772,8 @@ function renderMonorepoSummary(context, remoteUrl, startedAt) {
   }
   lines.push("", paint("gray", `Tiempo total: ${formatDuration(measureActiveMs(startedAt))} (sin contar la espera de tus respuestas)`));
 
-  return renderBox({ title: `${ICON.rocket} ${releases.length} paquete(s) publicados`, lines, tone: BOX_TONE.success });
+  const outcome = context.published.length > 0 ? "publicados" : "releaseados (sin publicar)";
+  return renderBox({ title: `${ICON.rocket} ${releases.length} paquete(s) ${outcome}`, lines, tone: BOX_TONE.success });
 }
 
 /**

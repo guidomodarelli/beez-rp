@@ -44,8 +44,9 @@ import { isPathInsideRoot } from "../create-version/config.js";
  *   changePaths: string[],
  *   publishedDependencies: string[],
  * }} ReleaseUnit
- *   A released package: `component` names its tag, `changePaths` are the directories whose commits
- *   count as its changes (its own plus its private workspace dependencies), `publishedDependencies`
+ *   A released package: `component` names its tag, `changePaths` are the Git pathspecs whose commits
+ *   count as its changes (its own directory plus its private workspace dependencies, excluding the
+ *   released packages nested inside it), `publishedDependencies`
  *   the released packages it installs (they are published first).
  */
 
@@ -234,6 +235,21 @@ export function resolveReleaseUnits(workspacePackages) {
     });
   };
 
+  /**
+   * Git pathspecs whose commits count as changes of a package: its directory and its private
+   * dependencies, minus the released packages nested inside its directory (they release their own commits).
+   *
+   * @param {WorkspacePackage} workspacePackage - Released package.
+   * @param {string[]} dependencyDirectories - Directories of its private dependencies.
+   * @returns {string[]} Git pathspecs.
+   */
+  const listChangePaths = (workspacePackage, dependencyDirectories) => {
+    const nestedExclusions = workspacePackages
+      .filter((nestedPackage) => !nestedPackage.private && nestedPackage.directory.startsWith(`${workspacePackage.directory}/`))
+      .map((nestedPackage) => `:(exclude)${nestedPackage.directory}`);
+    return [...new Set([workspacePackage.directory, ...dependencyDirectories]), ...nestedExclusions];
+  };
+
   return workspacePackages
     .filter((workspacePackage) => !workspacePackage.private)
     .map((workspacePackage) => ({
@@ -243,7 +259,7 @@ export function resolveReleaseUnits(workspacePackages) {
       manifestPath: `${workspacePackage.directory}/${PACKAGE_MANIFEST_FILE}`,
       changelogPath: `${workspacePackage.directory}/${CHANGELOG_FILE}`,
       version: workspacePackage.version,
-      changePaths: [...new Set([workspacePackage.directory, ...privateDependencyDirectories(workspacePackage.name, new Set())])],
+      changePaths: listChangePaths(workspacePackage, privateDependencyDirectories(workspacePackage.name, new Set())),
       publishedDependencies: listWorkspaceDependencies(workspacePackage.manifest, PUBLISHED_DEPENDENCY_FIELDS, workspaceNames).filter(
         (dependencyName) => byName.get(dependencyName)?.private === false
       ),

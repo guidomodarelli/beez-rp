@@ -609,6 +609,92 @@ describe("create-version in monorepo mode", () => {
   );
 
   it(
+    "offers the first release of a package added in one commit with its initial version and no tag",
+    async () => {
+      const { repositoryRoot } = createReleasedMonorepo();
+      writeJson(repositoryRoot, "packages/gadget/package.json", { name: "@acme/gadget", version: "0.1.0" });
+      writeFileSync(path.join(repositoryRoot, "packages/gadget/CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Paquete nuevo.\n");
+      commitAll(repositoryRoot, "feat(gadget): add the package");
+      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+      const registry = await startRegistry();
+
+      const preview = await runCliAsync(repositoryRoot, ["--dry-run"], npmEnvironment(registry.registryUrl));
+
+      expect(preview.status, preview.output).toBe(0);
+      expect(flattenOutput(preview.output)).toContain("Elegir la versión de cada paquete con cambios (1) @acme/gadget");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "does not count the commits of a released package nested inside another one as changes of its parent",
+    async () => {
+      const { repositoryRoot } = createReleasedMonorepo();
+      writeJson(repositoryRoot, "package.json", { name: "acme-monorepo", private: true, type: "module", workspaces: ["packages/*", "packages/widget/plugin"] });
+      writeJson(repositoryRoot, "packages/widget/plugin/package.json", { name: "@acme/plugin", version: "0.1.0" });
+      commitAll(repositoryRoot, "chore: add the plugin");
+      runGit(["tag", "-a", "plugin-v0.1.0", "-m", "@acme/plugin@0.1.0"], repositoryRoot);
+      writeFileSync(path.join(repositoryRoot, "packages/widget/plugin/index.js"), "export {};\n");
+      writeFileSync(path.join(repositoryRoot, "packages/widget/plugin/CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Punto de entrada.\n");
+      commitAll(repositoryRoot, "feat(plugin): entry point");
+      runGit(["push", "--quiet", "origin", "main", "--tags"], repositoryRoot);
+      const registry = await startRegistry({ packages: { "@acme/plugin": { maintainers: [OWNER_USER], versions: ["0.1.0"] } } });
+
+      const preview = await runCliAsync(repositoryRoot, ["--dry-run"], npmEnvironment(registry.registryUrl));
+
+      expect(preview.status, preview.output).toBe(0);
+      expect(flattenOutput(preview.output)).toContain("Elegir la versión de cada paquete con cambios (1) @acme/plugin");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "leaves for the release commit the uncommitted changelog of a package whose directory has non-ASCII characters",
+    async () => {
+      const { repositoryRoot } = createReleasedMonorepo();
+      writeJson(repositoryRoot, "packages/canción/package.json", { name: "@acme/cancion", version: "0.1.0" });
+      writeFileSync(path.join(repositoryRoot, "packages/canción/CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n");
+      commitAll(repositoryRoot, "chore: add the cancion package");
+      runGit(["tag", "-a", "canción-v0.1.0", "-m", "@acme/cancion@0.1.0"], repositoryRoot);
+      writeFileSync(path.join(repositoryRoot, "packages/canción/index.js"), "export {};\n");
+      commitAll(repositoryRoot, "feat(cancion): entry point");
+      runGit(["push", "--quiet", "origin", "main", "--tags"], repositoryRoot);
+      writeFileSync(path.join(repositoryRoot, "packages/canción/CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Punto de entrada.\n");
+      const registry = await startRegistry({ packages: { "@acme/cancion": { maintainers: [OWNER_USER], versions: ["0.1.0"] } } });
+
+      const preview = await runCliAsync(repositoryRoot, ["--dry-run"], npmEnvironment(registry.registryUrl));
+
+      expect(preview.status, preview.output).toBe(0);
+      expect(flattenOutput(preview.output)).not.toContain("archivo(s) sin commitear");
+      expect(flattenOutput(preview.output)).toContain("Elegir la versión de cada paquete con cambios (1) @acme/cancion");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "does not report the packages as published when the configuration has no publish step",
+    async () => {
+      const { repositoryRoot, remoteRoot } = createReleasedMonorepo();
+      writeFileSync(
+        path.join(repositoryRoot, "beez-rp.config.js"),
+        ['export default {', '  changelog: { audience: "quien usa {name}" },', '  packages: "workspaces",', "  checks: false,", "};", ""].join("\n")
+      );
+      commitAll(repositoryRoot, "chore: stop publishing");
+      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+      pushCoreFeature(repositoryRoot);
+
+      const release = await runCliAsync(repositoryRoot, ["--accept-suggested"]);
+
+      expect(release.status, release.output).toBe(0);
+      expect(runGit(["tag", "--list", "--points-at", "main"], remoteRoot)).toBe("widget-v1.1.0");
+      const releaseOutput = flattenOutput(release.output);
+      expect(releaseOutput).toContain("1 paquete(s) releaseados (sin publicar)");
+      expect(releaseOutput).not.toContain("paquete(s) publicados");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
     "stops the diagnosis when the tags of origin cannot be listed",
     async () => {
       const { repositoryRoot } = createReleasedMonorepo();

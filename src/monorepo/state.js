@@ -94,7 +94,8 @@ async function readRemoteTags(reader) {
  * @param {ReleaseUnit} unit - Released package.
  * @param {string} tagFormat - Tag format.
  * @param {ReadonlySet<string>} remoteTags - Tags on `origin`.
- * @returns {Promise<PackageLastRelease | null>} Last release, or `null` without history.
+ * @returns {Promise<PackageLastRelease | null>} Last release, or `null` without history or when the
+ *   newest version change is the untagged commit that added the package.
  */
 export async function findLastPackageRelease(reader, revision, unit, tagFormat, remoteTags) {
   const sha = await reader.tryGit(["log", "-1", "--format=%H", `-G${VERSION_FIELD_CHANGE_PATTERN}`, revision, "--", unit.manifestPath]);
@@ -107,6 +108,10 @@ export async function findLastPackageRelease(reader, revision, unit, tagFormat, 
   const subject = await reader.tryGit(["log", "-1", "--format=%s", sha]);
   const tag = version ? formatPackageTag(tagFormat, unit, version) : null;
   const taggedSha = tag ? await reader.tryGit(["rev-parse", "--verify", "--quiet", `refs/tags/${tag}^{commit}`]) : null;
+  // The commit that adds the package carries its initial version without releasing it: only a tag makes it a release.
+  if (!taggedSha && !(await reader.tryGit(["tag", "--points-at", sha])) && (await reader.tryGit(["cat-file", "-e", `${sha}^:${unit.manifestPath}`])) === null) {
+    return null;
+  }
   return { sha, version, subject, tag, tagged: taggedSha === sha, tagOnOrigin: tag !== null && remoteTags.has(tag) };
 }
 
