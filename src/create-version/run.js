@@ -17,7 +17,7 @@
  * @module create-version/run
  */
 
-import { existsSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { readUnreleased, releaseUnreleased } from "../changelog.js";
@@ -67,7 +67,13 @@ import {
   select,
   startSpinner,
 } from "../terminal-ui.js";
-import { GIT_LITERAL_PATHSPEC_PREFIX, VERSION_BLOCK_END_MARKERS, VERSION_BLOCK_PROBLEM, VERSION_BLOCK_START_MARKERS } from "../constants/version-files.js";
+import {
+  GIT_LITERAL_PATHSPEC_PREFIX,
+  RELEASE_COMMIT_BUILT_IN_FILES,
+  VERSION_BLOCK_END_MARKERS,
+  VERSION_BLOCK_PROBLEM,
+  VERSION_BLOCK_START_MARKERS,
+} from "../constants/version-files.js";
 import { updateVersionMarkers, VersionBlockError } from "../version-files.js";
 import { listNextVersions, resolveRequestedVersion, suggestReleaseType, toReleaseTag } from "../versions.js";
 import {
@@ -96,6 +102,7 @@ import { describeProjectCommands, detectPackageManager } from "../package-manage
 import { buildReleasePlan, buildReleaseUsage, listLocalChangesToSetAside, parseReleaseArguments } from "./plan.js";
 import { createGitReader, listCommits, runCommandLine, runInherited } from "./process.js";
 import { collectReleaseState } from "./state.js";
+import { decodeStrictUtf8, InvalidUtf8Error } from "./utf8-text.js";
 
 /**
  * @typedef {import("./config.js").ResolvedCreateVersionConfig} ResolvedCreateVersionConfig
@@ -777,15 +784,136 @@ function rewriteMarkedVersions(context, filePath, content, version, untouchedNot
 }
 
 /**
+ * A file of the release commit: its bytes before the release, kept exactly so a rollback writes
+ * them back unchanged whatever they hold, and the content the release writes.
+ *
+ * @typedef {{ filePath: string, originalBytes: Buffer, content: string }} ReleaseFileUpdate
+ */
+
+/**
+ * Reads a file the release rewrites, as its exact bytes and as text. The text is decoded strictly:
+ * a file that is not valid UTF-8 (such as one saved as ISO-8859-1) stops the release, since writing
+ * the decoded text back would replace its other bytes with U+FFFD. A byte order mark is kept.
+ *
+ * @param {VersionFilesContext} context - Release context.
+ * @param {string} filePath - File relative to the root.
+ * @param {string} fileLabel - How the messages name the file, such as `src/cli.js (versionFiles)`.
+ * @param {string} conversionHint - Spanish action that fixes the encoding, without the rerun instruction.
+ * @returns {{ originalBytes: Buffer, text: string }} Bytes on disk and their text.
+ * @throws {ReleaseStepError} When the file is not valid UTF-8.
+ */
+function readReleaseFileText(context, filePath, fileLabel, conversionHint) {
+  const originalBytes = readFileSync(path.join(context.repositoryRoot, filePath));
+
+  try {
+    return { originalBytes, text: decodeStrictUtf8(originalBytes) };
+  } catch (error) {
+    if (!(error instanceof InvalidUtf8Error)) {
+      throw error;
+    }
+    throw new ReleaseStepError(
+      `${fileLabel} no es texto UTF-8 válido (línea ${error.lineNumber}): reescribir su versión cambiaría también esos bytes.`,
+      `${conversionHint} y volvé a correr ${context.commands.createVersion}; no se tocó la versión.`,
+      { cause: error }
+    );
+  }
+}
+
+/**
+ * Identifies the file a path resolves to on disk (device and inode), so two paths reaching the same
+ * file, such as hard links, are told apart from two separate files. `bigint` keeps the inode exact
+ * where it does not fit a number (the file index on Windows).
+ *
+ * @param {string} absolutePath - Existing path.
+ * @returns {string | null} Identity of the file, or `null` when the path is missing or the file system reports no inode.
+ */
+function readFileIdentity(absolutePath) {
+  const stats = statSync(absolutePath, { bigint: true, throwIfNoEntry: false });
+  return stats && stats.ino !== 0n ? `${stats.dev}:${stats.ino}` : null;
+}
+
+/**
+ * Stops the release, before anything is written, when a `versionFiles` entry is the same file on
+ * disk as `package.json`, `CHANGELOG.md` or another entry (a hard link, which neither the path
+ * checks nor the symbolic link check can see): the release would write that file twice, each time
+ * from its own snapshot, and the last write would undo the first one.
+ *
+ * @param {VersionFilesContext} context - Release context.
+ * @returns {void}
+ * @throws {ReleaseStepError} When two of the files the release writes are the same file.
+ */
+function requireVersionFilesWithoutAliases(context) {
+  /** @type {Map<string, string>} */
+  const pathsByIdentity = new Map();
+
+  for (const builtInFile of RELEASE_COMMIT_BUILT_IN_FILES) {
+    const identity = readFileIdentity(path.join(context.repositoryRoot, builtInFile));
+
+    if (identity !== null) {
+      pathsByIdentity.set(identity, builtInFile);
+    }
+  }
+
+  for (const filePath of context.config.versionFiles) {
+    const identity = readFileIdentity(path.join(context.repositoryRoot, filePath));
+
+    if (identity === null) {
+      continue;
+    }
+
+    const aliasedPath = pathsByIdentity.get(identity);
+
+    if (aliasedPath !== undefined) {
+      const removalHint = RELEASE_COMMIT_BUILT_IN_FILES.includes(aliasedPath)
+        ? `Sacalo de versionFiles (el commit de release ya actualiza ${aliasedPath})`
+        : "Dejá una sola de las dos entradas en versionFiles";
+      throw new ReleaseStepError(
+        `${filePath} (versionFiles) es el mismo archivo que ${aliasedPath} (un enlace duro): el release lo escribiría dos veces y una escritura pisaría la otra.`,
+        `${removalHint} o reemplazá el enlace duro por una copia independiente, y volvé a correr ${context.commands.createVersion}; no se tocó la versión.`
+      );
+    }
+
+    pathsByIdentity.set(identity, filePath);
+  }
+}
+
+/**
+ * Stops the release, right before its files are read and rewritten, when `package.json` or a
+ * `versionFiles` entry differs from `HEAD`: the run starts from a clean working tree, so the change
+ * came from an earlier step (such as a check running `lint --fix`), and `git add` would put it in
+ * the release commit next to the version. Git compares the content through its filters (line
+ * endings, `.gitattributes`), so a checkout with converted line endings is not a change.
+ *
+ * @param {VersionFilesContext} context - Release context.
+ * @param {string[]} filePaths - Files the release rewrites only in their version, relative to the root.
+ * @returns {Promise<void>}
+ * @throws {ReleaseStepError} When any of them differs from `HEAD`.
+ */
+async function requireReleaseFilesUnchangedFromHead(context, filePaths) {
+  const listing = await context.reader.git(["diff", "--name-only", "-z", "HEAD", "--", ...filePaths.map(toLiteralPathspec)]);
+  const changedPaths = listing.split("\0").filter((changedPath) => changedPath !== "");
+
+  if (changedPaths.length > 0) {
+    throw new ReleaseStepError(
+      `${changedPaths.join(", ")} cambió respecto de HEAD antes de escribir la versión (por ejemplo, lo modificó un check como lint --fix): el commit de release incluiría ese cambio junto con la versión.`,
+      `Revisalo con git diff HEAD -- ${changedPaths[0]}; commitealo en una rama y llevalo a ${MAIN_BRANCH}, o descartalo con git restore, y evitá que los checks modifiquen archivos; después volvé a correr ${context.commands.createVersion}; no se tocó la versión.`
+    );
+  }
+}
+
+/**
  * Computes the new content of every configured `versionFiles` entry, before anything is written,
- * so a missing file, a linked path, a file Git does not track, a file without markers or with block
- * markers paired wrongly stops the release with the version untouched.
+ * so a missing file, a linked path, a file Git does not track, a file that is another release file
+ * on disk (a hard link), a file changed since `HEAD`, a file that is not valid UTF-8, a file without
+ * markers or with block markers paired wrongly stops the release with the version untouched.
+ * `package.json` is checked against `HEAD` too, so it must be read after this call.
  *
  * @param {ReleaseContext} context - Release context.
  * @param {string} version - Version being released.
- * @returns {Promise<{ filePath: string, originalContent: string, content: string }[]>} Files to write, relative to the root, with their content before the release.
+ * @returns {Promise<ReleaseFileUpdate[]>} Files to write, relative to the root, with their bytes before the release.
  * @throws {ReleaseStepError} When a file is missing, goes through a symbolic link, is not tracked by
- *   Git, has block markers paired wrongly or none of its lines is marked.
+ *   Git, is the same file as another release file, differs from `HEAD`, is not valid UTF-8, has
+ *   block markers paired wrongly or none of its lines is marked.
  */
 async function prepareVersionFileUpdates(context, version) {
   for (const filePath of context.config.versionFiles) {
@@ -797,36 +925,43 @@ async function prepareVersionFileUpdates(context, version) {
   }
 
   await requireTrackedVersionFiles(context);
+  requireVersionFilesWithoutAliases(context);
+  await requireReleaseFilesUnchangedFromHead(context, [PACKAGE_MANIFEST_FILE, ...context.config.versionFiles]);
 
   return context.config.versionFiles.map((filePath) => {
-    const originalContent = readFileSync(path.join(context.repositoryRoot, filePath), "utf8");
-    return { filePath, originalContent, content: rewriteMarkedVersions(context, filePath, originalContent, version, "no se tocó la versión") };
+    const { originalBytes, text } = readReleaseFileText(
+      context,
+      filePath,
+      `${filePath} (versionFiles)`,
+      "Convertilo a UTF-8 (por ejemplo, desde ISO-8859-1) y commitealo, o sacalo de versionFiles en beez-rp.config.(m)js,"
+    );
+    return { filePath, originalBytes, content: rewriteMarkedVersions(context, filePath, text, version, "no se tocó la versión") };
   });
 }
 
 /**
- * Writes the files of the release commit, restoring every one of them to its original content when
+ * Writes the files of the release commit, restoring every one of them to its original bytes when
  * any write fails (a read-only file, a denying ACL, a full disk), so a failed bump never leaves
  * `package.json`, `CHANGELOG.md` or a `versionFiles` entry half rewritten.
  *
  * @param {ReleaseContext} context - Release context.
- * @param {{ filePath: string, originalContent: string, content: string }[]} fileUpdates - Files relative to the root, in writing order.
+ * @param {ReleaseFileUpdate[]} fileUpdates - Files relative to the root, in writing order.
  * @returns {void}
  * @throws {ReleaseStepError} When a write fails, after restoring the files; the message also lists
  *   the files that could not be restored.
  */
 function writeReleaseFiles(context, fileUpdates) {
-  /** @type {{ filePath: string, originalContent: string }[]} */
+  /** @type {ReleaseFileUpdate[]} */
   const touchedFiles = [];
 
   try {
-    for (const { filePath, originalContent, content } of fileUpdates) {
-      touchedFiles.push({ filePath, originalContent });
-      writeFileSync(path.join(context.repositoryRoot, filePath), content);
+    for (const fileUpdate of fileUpdates) {
+      touchedFiles.push(fileUpdate);
+      writeFileSync(path.join(context.repositoryRoot, fileUpdate.filePath), fileUpdate.content);
     }
   } catch (error) {
     const failedPath = touchedFiles.at(-1)?.filePath ?? "";
-    const unrestoredPaths = touchedFiles.filter(({ filePath, originalContent }) => !restoreFileContent(path.join(context.repositoryRoot, filePath), originalContent)).map(({ filePath }) => filePath);
+    const unrestoredPaths = touchedFiles.filter(({ filePath, originalBytes }) => !restoreFileBytes(path.join(context.repositoryRoot, filePath), originalBytes)).map(({ filePath }) => filePath);
     const restoreNote =
       unrestoredPaths.length === 0
         ? "se restauraron package.json, CHANGELOG.md y versionFiles, así que no se tocó la versión"
@@ -840,16 +975,16 @@ function writeReleaseFiles(context, fileUpdates) {
 }
 
 /**
- * Writes back the original content of a release file after a failed write.
+ * Writes back the original bytes of a release file after a failed write or commit.
  *
  * @param {string} absolutePath - File to restore.
- * @param {string} originalContent - Content before the release.
- * @returns {boolean} Whether the file holds its original content again.
+ * @param {Buffer} originalBytes - Bytes before the release.
+ * @returns {boolean} Whether the file holds its original bytes again.
  */
-function restoreFileContent(absolutePath, originalContent) {
+function restoreFileBytes(absolutePath, originalBytes) {
   try {
-    if (readFileSync(absolutePath, "utf8") !== originalContent) {
-      writeFileSync(absolutePath, originalContent);
+    if (!readFileSync(absolutePath).equals(originalBytes)) {
+      writeFileSync(absolutePath, originalBytes);
     }
     return true;
   } catch {
@@ -864,14 +999,14 @@ function restoreFileContent(absolutePath, originalContent) {
  * command has to quote the configured paths for a shell.
  *
  * @param {ReleaseContext} context - Release context.
- * @param {{ filePath: string, originalContent: string }[]} fileUpdates - Files the release wrote.
+ * @param {ReleaseFileUpdate[]} fileUpdates - Files the release wrote.
  * @param {string | null} indexTree - Tree of the index before staging (`git write-tree`), or `null` when Git could not write it.
  * @param {ReleaseStepError} failure - Failure of `git add` or `git commit`.
  * @returns {Promise<ReleaseStepError>} Failure to throw, whose hint says what was restored and what was not.
  */
 async function rollBackUncommittedRelease(context, fileUpdates, indexTree, failure) {
   const indexRestored = indexTree !== null && (await context.reader.tryGit(["read-tree", indexTree])) !== null;
-  const unrestoredPaths = fileUpdates.filter(({ filePath, originalContent }) => !restoreFileContent(path.join(context.repositoryRoot, filePath), originalContent)).map(({ filePath }) => filePath);
+  const unrestoredPaths = fileUpdates.filter(({ filePath, originalBytes }) => !restoreFileBytes(path.join(context.repositoryRoot, filePath), originalBytes)).map(({ filePath }) => filePath);
   const pendingRestores = [
     ...(indexRestored ? [] : ["no se pudo volver el staging a como estaba: revisá git status y sacá del staging package.json, CHANGELOG.md y versionFiles"]),
     ...(unrestoredPaths.length === 0 ? [] : [`no se pudo restaurar el contenido de ${unrestoredPaths.join(", ")}: devolvelos a su contenido anterior (git diff muestra el cambio)`]),
@@ -951,10 +1086,8 @@ async function verifyCommittedVersionFiles(context, version) {
  * @returns {Promise<void>}
  */
 async function bumpVersionStep(context) {
-  const manifestPath = path.join(context.repositoryRoot, PACKAGE_MANIFEST_FILE);
-  const manifest = readFileSync(manifestPath, "utf8");
   // Re-read the manifest: syncing main may have brought a newer version.
-  const currentVersion = JSON.parse(manifest).version;
+  const currentVersion = /** @type {string} */ (readWorkingManifest(context.repositoryRoot).version);
   const lastReleaseSha = context.state.lastRelease?.sha;
   const commits = await listCommits(context.reader, lastReleaseSha ? `${lastReleaseSha}..HEAD` : "HEAD");
   print(renderCommitList(commits, `Qué se publica (${commits.length} commit(s))`));
@@ -984,12 +1117,11 @@ async function bumpVersionStep(context) {
     throw new ReleaseStepError("No se eligió ninguna versión.", `Volvé a correr ${context.commands.createVersion}.`);
   }
 
-  const changelogPath = path.join(context.repositoryRoot, CHANGELOG_FILE);
-  const changelog = readFileSync(changelogPath, "utf8");
+  const changelog = readReleaseFileText(context, CHANGELOG_FILE, CHANGELOG_FILE, `Convertí ${CHANGELOG_FILE} a UTF-8 (por ejemplo, desde ISO-8859-1)`);
   let releasedChangelog;
 
   try {
-    releasedChangelog = releaseUnreleased(changelog, nextRelease.version, new Date().toISOString().split("T")[0]);
+    releasedChangelog = releaseUnreleased(changelog.text, nextRelease.version, new Date().toISOString().split("T")[0]);
   } catch (error) {
     throw new ReleaseStepError(
       `CHANGELOG.md no está listo: ${error instanceof Error ? error.message : String(error)}`,
@@ -999,10 +1131,13 @@ async function bumpVersionStep(context) {
   }
 
   const versionFileUpdates = await prepareVersionFileUpdates(context, nextRelease.version);
+  // Read after prepareVersionFileUpdates, which checks that package.json still matches HEAD.
+  const manifest = readReleaseFileText(context, PACKAGE_MANIFEST_FILE, PACKAGE_MANIFEST_FILE, `Convertí ${PACKAGE_MANIFEST_FILE} a UTF-8 y commitealo`);
   print(renderBox({ title: `CHANGELOG · ${UNRELEASED_HEADING} → [${nextRelease.version}]`, lines: readWorkingUnreleased(context.repositoryRoot).body.split("\n"), tone: BOX_TONE.info }));
+  /** @type {ReleaseFileUpdate[]} */
   const releaseFileUpdates = [
-    { filePath: PACKAGE_MANIFEST_FILE, originalContent: manifest, content: manifest.replace(PACKAGE_VERSION_FIELD_PATTERN, `$1${nextRelease.version}$2`) },
-    { filePath: CHANGELOG_FILE, originalContent: changelog, content: releasedChangelog },
+    { filePath: PACKAGE_MANIFEST_FILE, originalBytes: manifest.originalBytes, content: manifest.text.replace(PACKAGE_VERSION_FIELD_PATTERN, `$1${nextRelease.version}$2`) },
+    { filePath: CHANGELOG_FILE, originalBytes: changelog.originalBytes, content: releasedChangelog },
     ...versionFileUpdates,
   ];
   // The index before staging, so a failed commit puts it back exactly (a CHANGELOG.md the user staged stays staged).

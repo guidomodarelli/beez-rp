@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { spawn, spawnSync } from "node:child_process";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -881,6 +881,101 @@ describe("beez-rp create-version command", () => {
       for (const versionFile of versionFiles) expect(readFileSync(path.join(repositoryRoot, versionFile), "utf8")).toBe("0.1.0 <!-- beez-rp-version -->\n");
       expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe("M  CHANGELOG.md");
       expect(runGit(["log", "-1", "--format=%s", "main"], repositoryRoot)).toBe("chore: configure releases");
+      expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should stop before bumping when a versionFiles entry is not valid UTF-8, and keep every byte but the version of a UTF-8 file with a byte order mark",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      const legacyPath = path.join(repositoryRoot, "docs", "legacy.txt");
+      const latin1Content = Buffer.from("Versión 0.1.0 <!-- beez-rp-version -->\r\nÚltima línea\r\n", "latin1");
+      mkdirSync(path.dirname(legacyPath));
+      writeFileSync(legacyPath, latin1Content);
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", '  versionFiles: ["docs/legacy.txt"],', "};"]);
+      const manifest = readFileSync(path.join(repositoryRoot, "package.json"));
+
+      const blocked = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(blocked.status, blocked.output).toBe(1);
+      expect(flattenOutput(blocked.output)).toContain("docs/legacy.txt (versionFiles) no es texto UTF-8 válido (línea 1)");
+      expect(readFileSync(legacyPath).equals(latin1Content)).toBe(true);
+      expect(readFileSync(path.join(repositoryRoot, "package.json")).equals(manifest)).toBe(true);
+      expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+
+      const byteOrderMark = Buffer.from([0xef, 0xbb, 0xbf]);
+      writeFileSync(legacyPath, Buffer.concat([byteOrderMark, Buffer.from("Versión 0.1.0 <!-- beez-rp-version -->\r\nÚltima línea\r\n", "utf8")]));
+      runGit(["add", "-A"], repositoryRoot);
+      runGit(["commit", "--quiet", "-m", "chore: convert to UTF-8"], repositoryRoot);
+      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+
+      const release = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(release.status, release.output).toBe(0);
+      expect(runGit(["show", "main:docs/legacy.txt"], remoteRoot)).toContain("Versión 0.2.0 <!-- beez-rp-version -->");
+      expect(readFileSync(legacyPath).equals(Buffer.concat([byteOrderMark, Buffer.from("Versión 0.2.0 <!-- beez-rp-version -->\r\nÚltima línea\r\n", "utf8")]))).toBe(true);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should stop before bumping when a check changed a versionFiles entry beyond its version, instead of committing that change in the release",
+    () => {
+      const { repositoryRoot } = createReleasedRepository();
+      const cliPath = path.join(repositoryRoot, "src", "cli.js");
+      const markedContent = 'program.version("0.1.0"); // beez-rp-version\n';
+      mkdirSync(path.dirname(cliPath));
+      writeFileSync(cliPath, markedContent);
+      // Stands in for `lint --fix`: the check rewrites a line of the version file that is not the version.
+      writeFileSync(path.join(repositoryRoot, "lint-fix.mjs"), 'import { appendFileSync } from "node:fs";\nappendFileSync("src/cli.js", "// fixed by lint\\n");\n');
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', '  checks: ["node lint-fix.mjs"],', '  versionFiles: ["src/cli.js"],', "};"]);
+
+      const release = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(release.status, release.output).toBe(1);
+      expect(flattenOutput(release.output)).toContain("src/cli.js cambió respecto de HEAD antes de escribir la versión");
+      expect(readFileSync(cliPath, "utf8")).toBe(`${markedContent}// fixed by lint\n`);
+      expect(JSON.parse(readFileSync(path.join(repositoryRoot, "package.json"), "utf8")).version).toBe("0.1.0");
+      expect(runGit(["log", "-1", "--format=%s", "main"], repositoryRoot)).toBe("chore: configure releases");
+      expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should stop before bumping when a versionFiles entry is a hard link to package.json, instead of undoing the bumped version",
+    () => {
+      const { repositoryRoot } = createReleasedRepository("0.1.0", { description: "Versión 0.1.0 // beez-rp-version" });
+      linkSync(path.join(repositoryRoot, "package.json"), path.join(repositoryRoot, "manifest-copy.json"));
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", '  versionFiles: ["manifest-copy.json"],', "};"]);
+      const manifest = readFileSync(path.join(repositoryRoot, "package.json"));
+
+      const release = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(release.status, release.output).toBe(1);
+      expect(flattenOutput(release.output)).toContain("manifest-copy.json (versionFiles) es el mismo archivo que package.json (un enlace duro)");
+      expect(readFileSync(path.join(repositoryRoot, "package.json")).equals(manifest)).toBe(true);
+      expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should stop before bumping when two versionFiles entries are hard links to the same file",
+    () => {
+      const { repositoryRoot } = createReleasedRepository();
+      const markedContent = "0.1.0 <!-- beez-rp-version -->\n";
+      writeFileSync(path.join(repositoryRoot, "VERSION.txt"), markedContent);
+      linkSync(path.join(repositoryRoot, "VERSION.txt"), path.join(repositoryRoot, "VERSION-copy.txt"));
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", '  versionFiles: ["VERSION.txt", "VERSION-copy.txt"],', "};"]);
+
+      const release = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(release.status, release.output).toBe(1);
+      expect(flattenOutput(release.output)).toContain("VERSION-copy.txt (versionFiles) es el mismo archivo que VERSION.txt (un enlace duro)");
+      expect(readFileSync(path.join(repositoryRoot, "VERSION.txt"), "utf8")).toBe(markedContent);
       expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
     },
     GIT_FIXTURE_TEST_TIMEOUT_MS
