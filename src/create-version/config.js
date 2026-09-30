@@ -24,6 +24,7 @@ import {
   PACKAGE_MANIFEST_FILE,
   RELEASE_REGISTRY,
 } from "../constants/create-version.js";
+import { RELEASE_COMMIT_BUILT_IN_FILES } from "../constants/version-files.js";
 import { RELEASE_TYPE_ORDER } from "../constants/versions.js";
 import { DEFAULT_PROJECT_COMMANDS, describeProjectCommands, detectPackageManager } from "../package-manager.js";
 
@@ -241,6 +242,13 @@ export function resolveCreateVersionConfig(rawConfig, { packageScripts = {}, com
   if (!isStringList(versionFiles) || versionFiles.some((filePath) => !isPathInsideRoot(filePath))) {
     throw invalidField("versionFiles", "a list of file paths relative to the project root, inside it");
   }
+  const builtInVersionFile = versionFiles.find(isReleaseCommitBuiltInFile);
+  if (builtInVersionFile !== undefined) {
+    throw invalidField(
+      "versionFiles",
+      `a list without ${RELEASE_COMMIT_BUILT_IN_FILES.join(" nor ")}, which the release commit already updates (found ${JSON.stringify(builtInVersionFile)})`
+    );
+  }
 
   return {
     projectName: /** @type {string | undefined} */ (config.projectName) ?? null,
@@ -267,6 +275,18 @@ export function resolveCreateVersionConfig(rawConfig, { packageScripts = {}, com
  */
 function isPathInsideRoot(filePath) {
   return !path.isAbsolute(filePath) && !filePath.split(/[\\/]/u).includes("..");
+}
+
+/**
+ * Tells whether a configured path names, under any spelling (`./CHANGELOG.md`, `.\package.json`,
+ * other letter case for case-insensitive file systems), a file the release commit already writes.
+ *
+ * @param {string} filePath - Configured path, already known to stay inside the root.
+ * @returns {boolean} Whether it is `package.json` or `CHANGELOG.md` at the root.
+ */
+function isReleaseCommitBuiltInFile(filePath) {
+  const normalizedPath = path.posix.normalize(filePath.replaceAll("\\", "/")).replace(/\/+$/u, "").toLowerCase();
+  return RELEASE_COMMIT_BUILT_IN_FILES.some((builtInFile) => builtInFile.toLowerCase() === normalizedPath);
 }
 
 /**

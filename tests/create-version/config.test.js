@@ -27,6 +27,20 @@ describe("create-version config", () => {
     }
   });
 
+  it("should reject versionFiles naming package.json or CHANGELOG.md under any spelling, since the release commit already writes them", () => {
+    const base = { changelog: { audience: "equipo" } };
+
+    for (const builtInFile of ["CHANGELOG.md", "./CHANGELOG.md", "changelog.md", "package.json", ".\\package.json", "./package.json/"]) {
+      expect(() => resolveCreateVersionConfig({ ...base, versionFiles: ["src/cli.ts", builtInFile] })).toThrow(
+        /versionFiles must be a list without package\.json nor CHANGELOG\.md, which the release commit already updates/
+      );
+    }
+    expect(resolveCreateVersionConfig({ ...base, versionFiles: ["docs/CHANGELOG.md", "packages/app/package.json"] }).versionFiles).toEqual([
+      "docs/CHANGELOG.md",
+      "packages/app/package.json",
+    ]);
+  });
+
   it("should run the default ci checks with the project's package manager", () => {
     const config = resolveCreateVersionConfig(
       { changelog: { audience: "quien usa la app" } },

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -480,6 +480,90 @@ describe("beez-rp create-version command", () => {
       expect(runGit(["show", "--name-only", "--format=", "main"], remoteRoot).split("\n").toSorted()).toEqual(["CHANGELOG.md", "package.json", "src/cli.js", "src/plain.js"]);
       expect(runGit(["show", "main:src/cli.js"], remoteRoot)).toBe('program.version("0.2.0"); // x-release-please-version\nconst untouched = "0.1.0";');
       expect(runGit(["show", "main:src/plain.js"], remoteRoot)).toBe('export const VERSION = "0.2.0"; // beez-rp-version');
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should stage a versionFiles entry whose name starts with a dash as a file, not as a Git option",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      writeFileSync(path.join(repositoryRoot, "-version.txt"), "0.1.0 # beez-rp-version\n");
+      writeFileSync(
+        path.join(repositoryRoot, "beez-rp.config.js"),
+        ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", '  versionFiles: ["-version.txt"],', "};", ""].join("\n")
+      );
+      runGit(["add", "-A"], repositoryRoot);
+      runGit(["commit", "--quiet", "-m", "chore: configure releases"], repositoryRoot);
+      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+
+      const release = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(release.status, release.output).toBe(0);
+      expect(runGit(["show", "--name-only", "--format=", "main"], remoteRoot).split("\n").toSorted()).toEqual(["-version.txt", "CHANGELOG.md", "package.json"]);
+      expect(runGit(["show", "main:-version.txt"], remoteRoot)).toBe("0.2.0 # beez-rp-version");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should stop before bumping when a versionFiles entry goes through a symbolic link, leaving the linked target untouched",
+    () => {
+      const { repositoryRoot } = createReleasedRepository();
+      const externalRoot = path.join(path.dirname(repositoryRoot), "external");
+      const externalFile = path.join(externalRoot, "cli.js");
+      mkdirSync(externalRoot);
+      writeFileSync(externalFile, 'export const VERSION = "0.1.0"; // beez-rp-version\n');
+      // A junction on Windows: it needs no symlink privilege and Node reports it as a symbolic link too.
+      symlinkSync(externalRoot, path.join(repositoryRoot, "linked"), process.platform === "win32" ? "junction" : "dir");
+      appendFileSync(path.join(repositoryRoot, ".git", "info", "exclude"), "linked\n");
+      writeFileSync(
+        path.join(repositoryRoot, "beez-rp.config.js"),
+        ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", '  versionFiles: ["linked/cli.js"],', "};", ""].join("\n")
+      );
+      runGit(["add", "beez-rp.config.js"], repositoryRoot);
+      runGit(["commit", "--quiet", "-m", "chore: configure releases"], repositoryRoot);
+      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+
+      const blocked = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(blocked.status, blocked.output).toBe(1);
+      expect(flattenOutput(blocked.output)).toContain("linked/cli.js (versionFiles) pasa por el enlace simbólico linked");
+      expect(readFileSync(externalFile, "utf8")).toBe('export const VERSION = "0.1.0"; // beez-rp-version\n');
+      expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+      expect(JSON.parse(readFileSync(path.join(repositoryRoot, "package.json"), "utf8")).version).toBe("0.1.0");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should not push a release commit created by hand while a versionFiles entry still carries the previous version",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      const cliPath = path.join(repositoryRoot, "src", "cli.js");
+      mkdirSync(path.join(repositoryRoot, "src"));
+      writeFileSync(cliPath, 'program.version("0.1.0"); // beez-rp-version\n');
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", '  versionFiles: ["src/cli.js"],', "};"]);
+      writeFileSync(path.join(repositoryRoot, "package.json"), `${JSON.stringify({ name: "fixture-app", version: "0.2.0" }, null, 2)}\n`);
+      writeFileSync(path.join(repositoryRoot, "CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n## [0.2.0] - 2026-01-01\n\n### Added\n\n- Algo nuevo.\n");
+      runGit(["add", "-A"], repositoryRoot);
+      runGit(["commit", "--quiet", "-m", "0.2.0"], repositoryRoot);
+
+      const blocked = runCli(repositoryRoot, []);
+
+      expect(blocked.status, blocked.output).toBe(1);
+      expect(flattenOutput(blocked.output)).toContain("src/cli.js (versionFiles) tiene en el commit de release (HEAD) una versión marcada distinta de 0.2.0.");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+      expect(runGit(["log", "-1", "--format=%s", "main"], remoteRoot)).toBe("chore: configure releases");
+
+      writeFileSync(cliPath, 'program.version("0.2.0"); // beez-rp-version\n');
+      runGit(["commit", "--quiet", "--amend", "--no-edit", "-a"], repositoryRoot);
+
+      const resumed = runCli(repositoryRoot, []);
+
+      expect(resumed.status, resumed.output).toBe(0);
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("v0.2.0");
+      expect(runGit(["show", "main:src/cli.js"], remoteRoot)).toBe('program.version("0.2.0"); // beez-rp-version');
     },
     GIT_FIXTURE_TEST_TIMEOUT_MS
   );

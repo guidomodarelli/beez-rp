@@ -17,7 +17,7 @@
  * @module create-version/run
  */
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { readUnreleased, releaseUnreleased } from "../changelog.js";
@@ -66,6 +66,7 @@ import {
   select,
   startSpinner,
 } from "../terminal-ui.js";
+import { GIT_LITERAL_PATHSPEC_PREFIX } from "../constants/version-files.js";
 import { updateVersionMarkers } from "../version-files.js";
 import { listNextVersions, resolveRequestedVersion, suggestReleaseType, toReleaseTag } from "../versions.js";
 import {
@@ -570,17 +571,95 @@ async function runChecksStep(context) {
 }
 
 /**
+ * Part of the release context the `versionFiles` checks read, available before the plan runs.
+ *
+ * @typedef {Pick<ReleaseContext, "repositoryRoot" | "config" | "reader" | "commands">} VersionFilesContext
+ */
+
+/**
+ * Finds the first symbolic link (or Windows junction) along a configured path. Writing through it
+ * would change a file Git does not stage (the target, maybe outside the repository), while the
+ * release commit would only carry the link.
+ *
+ * @param {string} repositoryRoot - Repository root.
+ * @param {string} filePath - Configured path, relative to the root.
+ * @returns {string | null} The linked part of the path, or `null` when no segment is a link.
+ */
+function findSymbolicLinkSegment(repositoryRoot, filePath) {
+  const segments = path.normalize(filePath).split(path.sep).filter((segment) => segment !== "" && segment !== ".");
+  let currentPath = repositoryRoot;
+
+  for (const [index, segment] of segments.entries()) {
+    currentPath = path.join(currentPath, segment);
+    const stats = lstatSync(currentPath, { throwIfNoEntry: false });
+
+    if (!stats) {
+      return null;
+    }
+    if (stats.isSymbolicLink()) {
+      return segments.slice(0, index + 1).join("/");
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Stops the release when a `versionFiles` entry goes through a symbolic link.
+ *
+ * @param {VersionFilesContext} context - Release context.
+ * @param {string} filePath - Configured path.
+ * @returns {void}
+ * @throws {ReleaseStepError} When a segment of the path is a symbolic link.
+ */
+function requireVersionFileWithoutLinks(context, filePath) {
+  const linkedSegment = findSymbolicLinkSegment(context.repositoryRoot, filePath);
+
+  if (linkedSegment !== null) {
+    throw new ReleaseStepError(
+      `${filePath} (versionFiles) pasa por el enlace simbólico ${linkedSegment}: Git solo commitearía el enlace y no el archivo con la versión.`,
+      `Apuntá versionFiles al archivo real dentro del repositorio y volvé a correr ${context.commands.createVersion}; no se tocó la versión.`
+    );
+  }
+}
+
+/**
+ * Converts a configured path to the `/`-separated form Git expects in revisions and pathspecs.
+ *
+ * @param {string} filePath - Configured path, relative to the root.
+ * @returns {string} Path relative to the root with `/` separators and no `./` prefix.
+ */
+function toGitPath(filePath) {
+  return path.posix.normalize(filePath.split(path.sep).join("/"));
+}
+
+/**
+ * Builds the error for a `versionFiles` entry without any marked version.
+ *
+ * @param {VersionFilesContext} context - Release context.
+ * @param {string} filePath - Configured path.
+ * @returns {ReleaseStepError} Error with the markers to add.
+ */
+function missingVersionMarkerError(context, filePath) {
+  return new ReleaseStepError(
+    `${filePath} (versionFiles) no tiene ninguna versión marcada para actualizar.`,
+    `Marcá la línea con un comentario beez-rp-version (o x-release-please-version), o el bloque con beez-rp-start-version … beez-rp-end, y volvé a correr ${context.commands.createVersion}; no se tocó la versión.`
+  );
+}
+
+/**
  * Computes the new content of every configured `versionFiles` entry, before anything is written,
- * so a missing file or a file without markers stops the release with the version untouched.
+ * so a missing file, a linked path or a file without markers stops the release with the version untouched.
  *
  * @param {ReleaseContext} context - Release context.
  * @param {string} version - Version being released.
  * @returns {{ filePath: string, content: string }[]} Files to write, relative to the root.
- * @throws {ReleaseStepError} When a file is missing or none of its lines is marked.
+ * @throws {ReleaseStepError} When a file is missing, goes through a symbolic link or none of its lines is marked.
  */
 function prepareVersionFileUpdates(context, version) {
   return context.config.versionFiles.map((filePath) => {
     const absolutePath = path.join(context.repositoryRoot, filePath);
+    requireVersionFileWithoutLinks(context, filePath);
 
     if (!existsSync(absolutePath)) {
       throw new ReleaseStepError(`${filePath} (versionFiles) no existe.`, `Corregí versionFiles en beez-rp.config.(m)js y volvé a correr ${context.commands.createVersion}; no se tocó la versión.`);
@@ -589,14 +668,48 @@ function prepareVersionFileUpdates(context, version) {
     const update = updateVersionMarkers(readFileSync(absolutePath, "utf8"), version);
 
     if (update.replacements === 0) {
-      throw new ReleaseStepError(
-        `${filePath} (versionFiles) no tiene ninguna versión marcada para actualizar.`,
-        `Marcá la línea con un comentario beez-rp-version (o x-release-please-version), o el bloque con beez-rp-start-version … beez-rp-end, y volvé a correr ${context.commands.createVersion}; no se tocó la versión.`
-      );
+      throw missingVersionMarkerError(context, filePath);
     }
 
     return { filePath, content: update.content };
   });
+}
+
+/**
+ * Checks, before resuming a release commit that already exists (created by a previous run or by
+ * hand), that every configured `versionFiles` entry in `HEAD` already carries the pending version
+ * in its marked lines: the resume never rewrites them, so it would push or publish stale versions.
+ *
+ * @param {VersionFilesContext} context - Release context.
+ * @param {string} version - Version of the pending release.
+ * @returns {Promise<void>}
+ * @throws {ReleaseStepError} When a file is missing from `HEAD`, goes through a symbolic link, has no
+ *   marked version or has a marked version other than the pending one.
+ */
+async function verifyReleasedVersionFiles(context, version) {
+  for (const filePath of context.config.versionFiles) {
+    requireVersionFileWithoutLinks(context, filePath);
+    const content = await context.reader.tryGit(["show", `HEAD:${toGitPath(filePath)}`]);
+
+    if (content === null) {
+      throw new ReleaseStepError(
+        `${filePath} (versionFiles) no existe en el commit de release ${version} (HEAD).`,
+        `Agregalo al commit de release con sus líneas marcadas en ${version}, o corregí versionFiles en beez-rp.config.(m)js, y volvé a correr ${context.commands.createVersion}; no se subió ni publicó nada.`
+      );
+    }
+
+    const update = updateVersionMarkers(content, version);
+
+    if (update.replacements === 0) {
+      throw missingVersionMarkerError(context, filePath);
+    }
+    if (update.content !== content) {
+      throw new ReleaseStepError(
+        `${filePath} (versionFiles) tiene en el commit de release (HEAD) una versión marcada distinta de ${version}.`,
+        `Actualizá sus líneas marcadas a ${version} dentro del commit de release (git commit --amend, y recreá el tag ${toReleaseTag(version)} si ya existe en local) y volvé a correr ${context.commands.createVersion}; no se subió ni publicó nada.`
+      );
+    }
+  }
 }
 
 /**
@@ -663,7 +776,14 @@ async function bumpVersionStep(context) {
 
   const tag = toReleaseTag(nextRelease.version);
   const versionFilePaths = versionFileUpdates.map(({ filePath }) => filePath);
-  await runGitStep(context, ["add", PACKAGE_MANIFEST_FILE, CHANGELOG_FILE, ...versionFilePaths], "No se pudo stagear package.json, CHANGELOG.md y versionFiles", "Revisá git status.");
+  // Literal pathspecs after `--`: a configured name such as `-v.txt` or `:version` is a file, never an option nor pathspec magic.
+  const versionFilePathspecs = versionFilePaths.map((filePath) => `${GIT_LITERAL_PATHSPEC_PREFIX}${toGitPath(filePath)}`);
+  await runGitStep(
+    context,
+    ["add", "--", PACKAGE_MANIFEST_FILE, CHANGELOG_FILE, ...versionFilePathspecs],
+    "No se pudo stagear package.json, CHANGELOG.md y versionFiles",
+    "Revisá git status."
+  );
   await runGitStep(
     context,
     ["commit", "--quiet", "-m", nextRelease.version],
@@ -1166,6 +1286,17 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
     }
   } else if (plan.mode === RELEASE_MODE.resume && (options.bump || options.setVersion)) {
     print(`${ICON.warning} ${paint("yellow", `Se ignoran --bump y --set-version: se retoma ${plan.pendingVersion}, que ya tiene versión y CHANGELOG.`)}`);
+  }
+
+  // A resume never rewrites versionFiles: before pushing or publishing, HEAD must already carry the pending version.
+  if (plan.mode === RELEASE_MODE.resume && plan.pendingVersion) {
+    try {
+      await verifyReleasedVersionFiles({ repositoryRoot, config, reader, commands: config.commands }, plan.pendingVersion);
+    } catch (error) {
+      const hint = error instanceof ReleaseStepError ? ` ${error.hint}` : "";
+      print(`${ICON.failure} ${paint("red", `${error instanceof Error ? error.message : String(error)}${hint}`)}`);
+      return FAILURE_EXIT_CODE;
+    }
   }
 
   if (options.dryRun) {
