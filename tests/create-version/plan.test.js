@@ -229,6 +229,58 @@ describe("create-version plan", () => {
     expect(plan.blockers).toEqual([{ title: "La configuración tiene cambios sin commitear", details: [" M beez-rp.config.js", expect.stringContaining("git stash")] }]);
   });
 
+  it("should block a new release with --ignore-local-changes while a module the configuration loads has uncommitted changes, naming it", () => {
+    const state = createMainState({
+      workingTreeChanges: [" M release/hooks.js", " M src/index.js"],
+      configModules: { loaded: true, files: ["beez-rp.config.js", "release/hooks.js"] },
+    });
+
+    const plan = buildReleasePlan(state, DEPLOYED_APP, { ignoreLocalChanges: true });
+
+    expect(plan.mode).toBe(RELEASE_MODE.blocked);
+    expect(plan.steps).toEqual([]);
+    expect(plan.blockers).toEqual([
+      {
+        title: "La configuración tiene cambios sin commitear",
+        details: [" M release/hooks.js (módulo que carga beez-rp.config.mjs o beez-rp.config.js)", expect.stringContaining("los módulos que importa")],
+      },
+    ]);
+  });
+
+  it("should block while an untracked directory that git status collapses holds a module the configuration loads", () => {
+    const state = createMainState({ workingTreeChanges: ["?? release/"], configModules: { loaded: true, files: ["beez-rp.config.js", "release/hooks.js"] } });
+
+    const plan = buildReleasePlan(state, DEPLOYED_APP, { ignoreLocalChanges: true });
+
+    expect(plan.blockers[0].details[0]).toBe("?? release/ (módulo que carga beez-rp.config.mjs o beez-rp.config.js)");
+  });
+
+  it("should plan a new release with --ignore-local-changes when no local change reaches a module the configuration loads", () => {
+    const state = createMainState({
+      workingTreeChanges: [" M src/index.js", "?? notes/"],
+      configModules: { loaded: true, files: ["beez-rp.config.js", "release/hooks.js"] },
+    });
+
+    const plan = buildReleasePlan(state, DEPLOYED_APP, { ignoreLocalChanges: true });
+
+    expect(plan.blockers).toEqual([]);
+    expect(plan.steps.map((planStep) => planStep.id)).toContain(RELEASE_STEP.bumpVersion);
+  });
+
+  it("should block a runnable plan when the configuration module graph could not be read while there are local changes", () => {
+    const state = createMainState({ workingTreeChanges: [" M src/index.js"], configModules: { loaded: false, reason: "Node 22.14.0 no permite registrar hooks" } });
+
+    const plan = buildReleasePlan(state, DEPLOYED_APP, { ignoreLocalChanges: true });
+
+    expect(plan.mode).toBe(RELEASE_MODE.blocked);
+    expect(plan.blockers).toEqual([
+      {
+        title: "No se pudo saber qué módulos carga beez-rp.config.mjs o beez-rp.config.js",
+        details: ["Cargar la configuración en un proceso nuevo falló: Node 22.14.0 no permite registrar hooks.", expect.stringContaining("git stash")],
+      },
+    ]);
+  });
+
   it.each([
     ["renamed from .js to .mjs", "R  beez-rp.config.js -> beez-rp.config.mjs"],
     ["renamed from a quoted path", 'R  "old config.js" -> beez-rp.config.js'],

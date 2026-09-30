@@ -982,7 +982,7 @@ describe("beez-rp create-version command", () => {
   );
 
   it(
-    "should not release with --ignore-local-changes while a set-aside edit of a module the configuration imports drops a versionFiles entry",
+    "should not release with --ignore-local-changes, nor plan it in --dry-run, while a local edit of a module the configuration imports drops a versionFiles entry",
     () => {
       const { repositoryRoot, remoteRoot } = createReleasedRepository();
       const cliPath = path.join(repositoryRoot, "src", "cli.js");
@@ -1002,16 +1002,18 @@ describe("beez-rp create-version command", () => {
       const localHelper = "export const versionFiles = [];\n";
       writeFileSync(helperPath, localHelper);
 
-      const blocked = runCli(repositoryRoot, ["--bump", "minor", "--ignore-local-changes"]);
+      for (const commandArguments of [["--dry-run", "--ignore-local-changes"], ["--bump", "minor", "--ignore-local-changes"]]) {
+        const blocked = runCli(repositoryRoot, commandArguments);
 
-      expect(blocked.status, blocked.output).toBe(1);
-      expect(flattenOutput(blocked.output)).toContain("La configuración depende de cambios sin commitear que apartó --ignore-local-changes");
-      expect(flattenOutput(blocked.output)).toContain("sin ellos cambian versionFiles");
+        expect(blocked.status, blocked.output).toBe(0);
+        expect(flattenOutput(blocked.output)).toContain("La configuración tiene cambios sin commitear");
+        expect(flattenOutput(blocked.output)).toContain("M release/version-files.js (módulo que carga beez-rp.config.mjs o beez-rp.config.js)");
+      }
+
       expect(runGit(["log", "-1", "--format=%s", "main"], repositoryRoot)).toBe("chore: configure releases");
       expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
       expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
-      // The restore goes through Git, which may convert line endings (core.autocrlf): the content is what matters.
-      expect(readFileSync(helperPath, "utf8").replaceAll("\r\n", "\n")).toBe(localHelper);
+      expect(readFileSync(helperPath, "utf8")).toBe(localHelper);
       expect(runGit(["stash", "list"], repositoryRoot)).toBe("");
 
       runGit(["restore", "release/version-files.js"], repositoryRoot);
@@ -1019,6 +1021,83 @@ describe("beez-rp create-version command", () => {
 
       expect(release.status, release.output).toBe(0);
       expect(runGit(["show", "main:src/cli.js"], remoteRoot)).toBe('program.version("0.2.0"); // beez-rp-version');
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should not apply migrations with --ignore-local-changes while a local edit of the module that defines them is uncommitted",
+    () => {
+      const { repositoryRoot } = createReleasedRepository();
+      const migrationsLog = path.join(path.dirname(repositoryRoot), "migrations.log");
+      const helperPath = path.join(repositoryRoot, "release", "migrations.js");
+      const describeMigrations = (/** @type {string} */ status, /** @type {string} */ appliedMarker) =>
+        [
+          'import { appendFileSync } from "node:fs";',
+          "export const migrations = {",
+          `  check: () => ({ status: "${status}", pending: ${status === "pending" ? '["001-local"]' : "[]"}, target: "fixture-db", reason: null }),`,
+          `  apply: () => appendFileSync(${JSON.stringify(migrationsLog)}, "${appliedMarker}\\n"),`,
+          "};",
+          "",
+        ].join("\n");
+      mkdirSync(path.dirname(helperPath));
+      writeFileSync(helperPath, describeMigrations("up-to-date", "committed"));
+      pushConfiguration(repositoryRoot, [
+        'import { migrations } from "./release/migrations.js";',
+        "export default {",
+        '  changelog: { audience: "equipo" },',
+        "  checks: false,",
+        "  migrations,",
+        "};",
+      ]);
+      writeFileSync(helperPath, describeMigrations("pending", "uncommitted"));
+
+      const blocked = runCli(repositoryRoot, ["--bump", "minor", "--ignore-local-changes"]);
+
+      expect(blocked.status, blocked.output).toBe(0);
+      expect(flattenOutput(blocked.output)).toContain("M release/migrations.js (módulo que carga beez-rp.config.mjs o beez-rp.config.js)");
+      expect(existsSync(migrationsLog)).toBe(false);
+      expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+      expect(runGit(["stash", "list"], repositoryRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should not run a hook with --ignore-local-changes while a module it reads a value from through require has an uncommitted edit that keeps the hook source identical",
+    () => {
+      const { repositoryRoot } = createReleasedRepository();
+      const hookLog = path.join(path.dirname(repositoryRoot), "prepare.log");
+      const settingsPath = path.join(repositoryRoot, "release", "settings.cjs");
+      mkdirSync(path.dirname(settingsPath));
+      writeFileSync(settingsPath, 'module.exports = { channel: "committed" };\n');
+      pushConfiguration(repositoryRoot, [
+        'import { appendFileSync } from "node:fs";',
+        'import { createRequire } from "node:module";',
+        'const { channel } = createRequire(import.meta.url)("./release/settings.cjs");',
+        "export default {",
+        '  changelog: { audience: "equipo" },',
+        "  checks: false,",
+        `  prepare: () => appendFileSync(${JSON.stringify(hookLog)}, channel),`,
+        "};",
+      ]);
+      writeFileSync(settingsPath, 'module.exports = { channel: "uncommitted" };\n');
+
+      const blocked = runCli(repositoryRoot, ["--bump", "minor", "--ignore-local-changes"]);
+
+      expect(blocked.status, blocked.output).toBe(0);
+      expect(flattenOutput(blocked.output)).toContain("M release/settings.cjs (módulo que carga beez-rp.config.mjs o beez-rp.config.js)");
+      expect(existsSync(hookLog)).toBe(false);
+      expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+
+      runGit(["restore", "release/settings.cjs"], repositoryRoot);
+      writeFileSync(path.join(repositoryRoot, "notes.txt"), "borrador local\n");
+      const release = runCli(repositoryRoot, ["--bump", "minor", "--ignore-local-changes"]);
+
+      expect(release.status, release.output).toBe(0);
+      expect(readFileSync(hookLog, "utf8")).toBe("committed");
+      // The restore goes through Git, which may convert line endings (core.autocrlf): the content is what matters.
+      expect(readFileSync(path.join(repositoryRoot, "notes.txt"), "utf8").replaceAll("\r\n", "\n")).toBe("borrador local\n");
     },
     GIT_FIXTURE_TEST_TIMEOUT_MS
   );

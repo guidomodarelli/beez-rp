@@ -58,6 +58,7 @@ const CONFIG_FILES_LABEL = CREATE_VERSION_CONFIG_FILES.join(" o ");
  *   currentBranch: string | null,
  *   workingTreeChanges: string[],
  *   untrackedConfigFile?: string | null,
+ *   configModules?: import("./config-modules.js").ConfigModuleGraph | null,
  *   branch?: FeatureBranchSnapshot | null,
  *   pullRequest?: PullRequestSnapshot | null,
  *   githubError?: string | null,
@@ -388,16 +389,48 @@ function isConfigChange(line) {
 }
 
 /**
- * Lists the lines that show the loaded configuration file differs from the committed one: its
- * uncommitted changes (`git status --porcelain` lines) and, when the loaded file is not tracked but
- * `git status` omits it because Git ignores it, a `!! <file>` line (the notation of
- * `git status --porcelain --ignored`), since it shadows the committed configuration.
+ * Tells whether a path reported by `git status --porcelain` is, or contains, a module the
+ * configuration loads. Git reports a whole untracked directory as `dir/`, so a module inside it counts.
+ *
+ * @param {string} changedPath - Porcelain path, relative to the repository root.
+ * @param {string[]} moduleFiles - Files of the configuration module graph.
+ * @returns {boolean} `true` when the change reaches a loaded module.
+ */
+function reachesConfigModule(changedPath, moduleFiles) {
+  return changedPath.endsWith("/") ? moduleFiles.some((moduleFile) => moduleFile.startsWith(changedPath)) : moduleFiles.includes(changedPath);
+}
+
+/**
+ * Lists the uncommitted changes of modules the configuration file loads (directly or through other
+ * modules), each `git status --porcelain` line followed by a note that names it as such.
+ *
+ * @param {ReleaseState} state - Snapshot.
+ * @returns {string[]} Lines to show, empty without a module graph or without changes in it.
+ */
+function listConfigModuleChanges(state) {
+  const configModules = state.configModules;
+
+  if (!configModules?.loaded) {
+    return [];
+  }
+
+  return state.workingTreeChanges
+    .filter((line) => !isConfigChange(line) && listPorcelainPaths(line).some((changedPath) => reachesConfigModule(changedPath, configModules.files)))
+    .map((line) => `${line} (módulo que carga ${CONFIG_FILES_LABEL})`);
+}
+
+/**
+ * Lists the lines that show the loaded configuration differs from the committed one: uncommitted
+ * changes (`git status --porcelain` lines) of the configuration file or of a module it loads and,
+ * when the loaded file is not tracked but `git status` omits it because Git ignores it, a
+ * `!! <file>` line (the notation of `git status --porcelain --ignored`), since it shadows the
+ * committed configuration.
  *
  * @param {ReleaseState} state - Snapshot.
  * @returns {string[]} Lines to show, empty when the loaded configuration is the committed one.
  */
 function listConfigDifferences(state) {
-  const configChanges = state.workingTreeChanges.filter(isConfigChange);
+  const configChanges = [...state.workingTreeChanges.filter(isConfigChange), ...listConfigModuleChanges(state)];
   const untrackedConfigFile = state.untrackedConfigFile ?? null;
   const listedByStatus = configChanges.some((line) => listPorcelainPaths(line).includes(untrackedConfigFile ?? ""));
 
@@ -405,10 +438,30 @@ function listConfigDifferences(state) {
 }
 
 /**
+ * Builds the blocker of a run whose configuration module graph could not be read while there are
+ * local changes: without it the plan cannot tell whether those changes reach the loaded configuration.
+ *
+ * @param {string} reason - Why the graph could not be read.
+ * @param {ProjectCommands} commands - Project commands quoted by the hint.
+ * @returns {ReleaseBlocker} Blocker.
+ */
+function configModulesUnknownBlocker(reason, commands) {
+  return {
+    title: `No se pudo saber qué módulos carga ${CONFIG_FILES_LABEL}`,
+    details: [
+      `Cargar la configuración en un proceso nuevo falló: ${reason}.`,
+      `Sin esa lista no se puede asegurar que los cambios sin commitear no lleguen al release: commitealos en una rama, descartalos (git restore) o guardalos (git stash) y volvé a correr ${commands.createVersion}.`,
+    ],
+  };
+}
+
+/**
  * Blocks a runnable plan (new release or resume) while the loaded configuration file is not the
  * committed one: it has uncommitted changes, or it is an ignored file that Git never tracked (such
- * as a local `beez-rp.config.mjs` that shadows the committed `beez-rp.config.js`). The run imports
- * the configuration from the working tree once, before `--ignore-local-changes` sets it aside, so
+ * as a local `beez-rp.config.mjs` that shadows the committed `beez-rp.config.js`), or a module it
+ * loads (any file of `state.configModules`) has uncommitted changes. The run imports the
+ * configuration and its modules from the working tree once, before `--ignore-local-changes` sets
+ * them aside, and Node keeps them cached (hooks included, with every value they captured), so
  * the release would run with a configuration that is not the committed one: a local edit that drops
  * a `versionFiles` entry would bump without it while the release commit keeps declaring it, and
  * checks, preparation and publication would follow uncommitted instructions. When resuming, the
@@ -417,12 +470,21 @@ function listConfigDifferences(state) {
  * @param {ReleasePlan} plan - Plan.
  * @param {ReleaseState} state - Snapshot.
  * @param {ProjectCommands} commands - Project commands quoted by the hints.
- * @returns {ReleasePlan} The same plan, or a blocked plan when the loaded configuration is not the committed one.
+ * @returns {ReleasePlan} The same plan, or a blocked plan when the loaded configuration is not the
+ *   committed one or its module graph could not be read while there are local changes.
  */
 function requireCommittedConfig(plan, state, commands) {
+  if (plan.steps.length === 0) {
+    return plan;
+  }
+
+  if (state.configModules && !state.configModules.loaded) {
+    return { mode: RELEASE_MODE.blocked, steps: [], blockers: [configModulesUnknownBlocker(state.configModules.reason, commands)], warnings: [], pendingVersion: null };
+  }
+
   const configDifferences = listConfigDifferences(state);
 
-  if (plan.steps.length === 0 || configDifferences.length === 0) {
+  if (configDifferences.length === 0) {
     return plan;
   }
 
@@ -439,7 +501,7 @@ function requireCommittedConfig(plan, state, commands) {
           details: [
             ...configDifferences,
             ...shadowHint,
-            `Retomar un release usa la configuración de su commit (versionFiles incluido), y apartar los cambios no la recarga: descartalos (git restore) o guardalos (git stash) y volvé a correr ${commands.createVersion}.`,
+            `Retomar un release usa la configuración de su commit (versionFiles incluido, y los módulos que importa), y apartar los cambios no la recarga: descartalos (git restore) o guardalos (git stash) y volvé a correr ${commands.createVersion}.`,
           ],
         }
       : {
@@ -447,7 +509,7 @@ function requireCommittedConfig(plan, state, commands) {
           details: [
             ...configDifferences,
             ...shadowHint,
-            `El release usa ${CONFIG_FILES_LABEL} tal como está en el working tree (versionFiles, checks, prepare y publish), y --${CREATE_VERSION_FLAG.ignoreLocalChanges} no lo puede apartar porque ya está cargado: commitealo en una rama y llevalo a ${MAIN_BRANCH}, o descartá los cambios (git restore) o guardalos (git stash), y volvé a correr ${commands.createVersion}.`,
+            `El release usa ${CONFIG_FILES_LABEL} y los módulos que importa tal como están en el working tree (versionFiles, checks, migrations, prepare y publish), y --${CREATE_VERSION_FLAG.ignoreLocalChanges} no los puede apartar porque ya están cargados: commitealos en una rama y llevalos a ${MAIN_BRANCH}, o descartá los cambios (git restore) o guardalos (git stash), y volvé a correr ${commands.createVersion}.`,
           ],
         };
 

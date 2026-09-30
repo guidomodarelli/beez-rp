@@ -85,7 +85,6 @@ import {
   withArtifactOutsidePackageRoot,
 } from "./artifact.js";
 import { loadCreateVersionConfig } from "./config.js";
-import { describeReleaseInstructions, listChangedReleaseInstructions, reloadReleaseInstructions } from "./config-reload.js";
 import { ReleaseStepError } from "./errors.js";
 import {
   buildNpmAuthConfigLine,
@@ -1541,40 +1540,6 @@ function hasFailedNpmLookup(snapshot) {
 }
 
 /**
- * Checks, right after `--ignore-local-changes` set the uncommitted changes aside and before any
- * step runs, that the configuration the run imported does not depend on them: Node keeps the
- * configuration and every module it imports in its cache, so a set-aside helper that feeds
- * `versionFiles`, checks or hooks would keep its uncommitted content for the whole release while
- * the release commit keeps the committed one. The configuration is loaded again in a new process,
- * from the working tree without the set-aside changes, and must describe the same release.
- *
- * @param {ReleaseContext} context - Release context.
- * @returns {Promise<void>}
- * @throws {ReleaseStepError} When the configuration cannot be loaded without the set-aside changes,
- *   or loads with other release instructions.
- */
-async function requireConfigWithoutSetAsideChanges(context) {
-  const retryHint = `Commiteá esos cambios en una rama y llevalos a ${MAIN_BRANCH}, o descartalos (git restore) o guardalos (git stash), y volvé a correr ${context.commands.createVersion}; no se tocó la versión y los cambios apartados vuelven al working tree.`;
-  const reload = await reloadReleaseInstructions(context.repositoryRoot);
-
-  if (!reload.loaded) {
-    throw new ReleaseStepError(
-      `No se pudo cargar beez-rp.config.(m)js sin los cambios sin commitear que apartó --${CREATE_VERSION_FLAG.ignoreLocalChanges} (${reload.reason}): la configuración depende de ellos.`,
-      retryHint
-    );
-  }
-
-  const changedFields = listChangedReleaseInstructions(describeReleaseInstructions(context.config), reload.instructions);
-
-  if (changedFields.length > 0) {
-    throw new ReleaseStepError(
-      `La configuración depende de cambios sin commitear que apartó --${CREATE_VERSION_FLAG.ignoreLocalChanges} (por ejemplo, un módulo que importa beez-rp.config.(m)js): sin ellos cambian ${changedFields.join(", ")}, y el release usaría lo que no está commiteado.`,
-      retryHint
-    );
-  }
-}
-
-/**
  * Runs `create-version` in a repository.
  *
  * @param {{ repositoryRoot: string, argv: string[] }} options - Repository root and arguments after the command name.
@@ -1745,16 +1710,6 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   }
 
   try {
-    if (setAside) {
-      try {
-        await requireConfigWithoutSetAsideChanges(context);
-      } catch (error) {
-        const hint = error instanceof ReleaseStepError ? ` ${error.hint}` : "";
-        print(`${ICON.failure} ${paint("red", `${error instanceof Error ? error.message : String(error)}${hint}`)}`);
-        return FAILURE_EXIT_CODE;
-      }
-    }
-
     return await runPlanSteps(context, plan, remoteUrl, startedAt);
   } finally {
     if (setAside) {

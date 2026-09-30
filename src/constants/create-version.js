@@ -489,9 +489,8 @@ export const FAILURE_EXIT_CODE = 1;
 export const GIT_REGULAR_FILE_MODES = Object.freeze(["100644", "100755"]);
 
 /**
- * Fields of the resolved configuration that decide what the release commits, validates and
- * publishes. A run that sets local changes aside compares them with the configuration loaded again,
- * in a new process, without those changes: any difference means the loaded configuration depends
- * on uncommitted files (such as a helper module that `beez-rp.config.(m)js` imports).
+ * First Node version with `module.registerHooks`, the synchronous module hook that lists the modules
+ * `beez-rp.config.(m)js` loads (ESM and CommonJS alike). Older versions cannot tell whether a local
+ * change reaches the loaded configuration, so the plan blocks while there are local changes.
  */
-export const RELEASE_INSTRUCTION_FIELDS = Object.freeze(["versionFiles", "checks", "prepare", "publish", "registry", "artifact"]);
+export const MODULE_HOOKS_MINIMUM_NODE_VERSION = "22.15.0";

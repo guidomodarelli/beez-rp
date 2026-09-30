@@ -34,6 +34,7 @@ import {
 } from "../constants/create-version.js";
 import { toReleaseTag } from "../versions.js";
 import { findCreateVersionConfigFile } from "./config.js";
+import { listConfigModules } from "./config-modules.js";
 import { checkNpmPublishAccess, lookupPublishedVersions, resolvePublishRegistry } from "./npm.js";
 import { createGitReader, listCommits, readPackageVersionAt, runCaptured } from "./process.js";
 
@@ -322,6 +323,8 @@ export async function collectReleaseState({
   const statusOutput = await reader.git(["status", "--porcelain"]);
   const workingTreeChanges = statusOutput.split("\n").map((line) => line.trimEnd()).filter(Boolean);
   const untrackedConfigFile = await findUntrackedConfigFile(reader, repositoryRoot);
+  // Only a local change can reach the loaded configuration without being committed: a clean tree needs no graph.
+  const configModules = workingTreeChanges.length > 0 && findCreateVersionConfigFile(repositoryRoot) ? await listConfigModules(repositoryRoot) : null;
   const localMainExists = (await reader.tryGit(["rev-parse", "--verify", "--quiet", MAIN_BRANCH])) !== null;
   const remoteMainExists = (await reader.tryGit(["rev-parse", "--verify", "--quiet", REMOTE_MAIN_REF])) !== null;
   const aheadCommits = localMainExists && remoteMainExists ? await listCommits(reader, `${REMOTE_MAIN_REF}..${MAIN_BRANCH}`) : [];
@@ -371,6 +374,7 @@ export async function collectReleaseState({
     currentBranch,
     workingTreeChanges,
     untrackedConfigFile,
+    configModules,
     branch,
     pullRequest,
     githubError,
