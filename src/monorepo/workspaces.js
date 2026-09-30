@@ -156,15 +156,18 @@ export function expandWorkspacePatterns(repositoryRoot, patterns) {
  *
  * @param {string} repositoryRoot - Repository root.
  * @param {"workspaces" | readonly string[]} packages - `packages` of the configuration: the root workspaces, or explicit patterns.
- * @returns {WorkspacePackage[]} Packages with a `name`, sorted by directory.
- * @throws {Error} When a matched manifest is malformed, no package is found or two packages share a name.
+ * @returns {WorkspacePackage[]} Packages with a `name` (private ones without it are skipped), sorted by directory.
+ * @throws {Error} When a matched manifest is malformed or non-private without a `name`, no package is found or two packages share a name.
  */
 export function discoverWorkspacePackages(repositoryRoot, packages) {
   const patterns = packages === WORKSPACES_PACKAGES ? readDeclaredWorkspaces(readManifest(path.join(repositoryRoot, PACKAGE_MANIFEST_FILE))) : packages;
   const found = expandWorkspacePatterns(repositoryRoot, patterns).flatMap((directory) => {
     const manifest = readWorkspaceManifest(repositoryRoot, directory);
     if (typeof manifest.name !== "string" || manifest.name === "") {
-      return [];
+      if (manifest.private === true) {
+        return [];
+      }
+      throw new Error(`beez-rp create-version: ${directory}/${PACKAGE_MANIFEST_FILE} no tiene "name"; agregale un "name" para publicarlo, o "private": true (o excluí ese workspace) para omitirlo`);
     }
     return [
       {

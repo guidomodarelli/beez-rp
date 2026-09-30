@@ -404,14 +404,14 @@ function groupVersionFilesByPackage(context) {
 }
 
 /**
- * Lists the paths of a `git diff --name-only -z` run.
+ * Lists the paths of a `git diff --name-only --no-renames -z` run: both sides of a rename count.
  *
  * @param {MonorepoContext} context - Context.
- * @param {string[]} diffArguments - Arguments after `git diff --name-only -z`.
+ * @param {string[]} diffArguments - Arguments after `git diff --name-only --no-renames -z`.
  * @returns {Promise<string[]>} Paths relative to the root.
  */
 async function listDiffPaths(context, diffArguments) {
-  return (await context.reader.git(["diff", "--name-only", "-z", ...diffArguments])).split("\0").filter(Boolean);
+  return (await context.reader.git(["diff", "--name-only", "--no-renames", "-z", ...diffArguments])).split("\0").filter(Boolean);
 }
 
 /**

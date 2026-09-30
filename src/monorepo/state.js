@@ -26,6 +26,7 @@ import {
   readMigrations,
   readRepositorySnapshot,
 } from "../create-version/state.js";
+import { parseMonorepoReleaseSubject } from "./release-commit.js";
 import { formatPackageTag } from "./workspaces.js";
 
 /**
@@ -108,8 +109,10 @@ export async function findLastPackageRelease(reader, revision, unit, tagFormat, 
   const subject = await reader.tryGit(["log", "-1", "--format=%s", sha]);
   const tag = version ? formatPackageTag(tagFormat, unit, version) : null;
   const taggedSha = tag ? await reader.tryGit(["rev-parse", "--verify", "--quiet", `refs/tags/${tag}^{commit}`]) : null;
-  // The commit that adds the package carries its initial version without releasing it: only a tag makes it a release.
-  if (!taggedSha && !(await reader.tryGit(["tag", "--points-at", sha])) && (await reader.tryGit(["cat-file", "-e", `${sha}^:${unit.manifestPath}`])) === null) {
+  // The commit that adds the package carries its initial version without releasing it: only its own tag,
+  // or a release commit that lists it (its tag may follow an older tagFormat), makes it a release.
+  const listedInReleaseCommit = parseMonorepoReleaseSubject(subject)?.some((release) => release.name === unit.name && release.version === version) ?? false;
+  if (taggedSha !== sha && !listedInReleaseCommit && (await reader.tryGit(["cat-file", "-e", `${sha}^:${unit.manifestPath}`])) === null) {
     return null;
   }
   return { sha, version, subject, tag, tagged: taggedSha === sha, tagOnOrigin: tag !== null && remoteTags.has(tag) };

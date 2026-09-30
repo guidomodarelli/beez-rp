@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import {
@@ -358,6 +358,34 @@ describe("create-version in monorepo mode", () => {
 
       expect(unstaged.status, unstaged.output).toBe(1);
       expect(flattenOutput(unstaged.output)).toContain("Hay cambios sin commitear en el CHANGELOG de paquetes que no salen en este release: packages/adapter/CHANGELOG.md.");
+      expect(runGit(["rev-parse", "main"], remoteRoot)).toBe(releasedSha);
+      expect(registry.publications).toEqual([]);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "does not create the release commit while the changelog of a package left out is staged as renamed to a chosen changelog",
+    async () => {
+      const { repositoryRoot, remoteRoot } = createReleasedMonorepo();
+      runGit(["rm", "--cached", "--quiet", "packages/widget/CHANGELOG.md"], repositoryRoot);
+      runGit(["commit", "--quiet", "-m", "chore(widget): stop tracking the changelog"], repositoryRoot);
+      writeFileSync(path.join(repositoryRoot, "packages/core/index.js"), "export const answer = 42;\n");
+      runGit(["add", "packages/core/index.js"], repositoryRoot);
+      runGit(["commit", "--quiet", "-m", "feat(core): add the answer"], repositoryRoot);
+      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+      const releasedSha = runGit(["rev-parse", "HEAD"], repositoryRoot);
+      rmSync(path.join(repositoryRoot, "packages/widget/CHANGELOG.md"));
+      runGit(["mv", "packages/adapter/CHANGELOG.md", "packages/widget/CHANGELOG.md"], repositoryRoot);
+      writeFileSync(path.join(repositoryRoot, "packages/widget/CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Nuevo.\n");
+      runGit(["add", "packages/widget/CHANGELOG.md"], repositoryRoot);
+      const registry = await startRegistry();
+
+      const release = await runCliAsync(repositoryRoot, ["--accept-suggested"], npmEnvironment(registry.registryUrl));
+
+      expect(release.status, release.output).toBe(1);
+      expect(flattenOutput(release.output)).toContain("Hay cambios staged que no son del release y entrarían en su commit: packages/adapter/CHANGELOG.md.");
+      expect(runGit(["rev-parse", "HEAD"], repositoryRoot)).toBe(releasedSha);
       expect(runGit(["rev-parse", "main"], remoteRoot)).toBe(releasedSha);
       expect(registry.publications).toEqual([]);
     },

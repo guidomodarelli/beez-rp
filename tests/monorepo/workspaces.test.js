@@ -80,6 +80,14 @@ describe("discoverWorkspacePackages", () => {
     writeFileSync(path.join(root, "packages/broken/package.json"), "[]");
     expect(() => discoverWorkspacePackages(root, "workspaces")).toThrow(/packages\/broken\/package\.json no es un objeto JSON/);
   });
+
+  it("skips private workspaces without a name and rejects the non-private ones", () => {
+    const root = createMonorepo({ "packages/a": { name: "a", version: "1.0.0" }, "packages/tooling": { private: true } });
+    expect(discoverWorkspacePackages(root, "workspaces").map(({ name }) => name)).toEqual(["a"]);
+
+    writeFileSync(path.join(root, "packages/tooling/package.json"), JSON.stringify({ version: "1.0.0" }));
+    expect(() => discoverWorkspacePackages(root, "workspaces")).toThrow(/packages\/tooling\/package\.json no tiene "name"; agregale un "name"/);
+  });
 });
 
 describe("resolveReleaseUnits", () => {
