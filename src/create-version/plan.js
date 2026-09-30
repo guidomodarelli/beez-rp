@@ -57,6 +57,7 @@ const CONFIG_FILES_LABEL = CREATE_VERSION_CONFIG_FILES.join(" o ");
  * @typedef {{
  *   currentBranch: string | null,
  *   workingTreeChanges: string[],
+ *   hiddenChanges?: string[],
  *   untrackedConfigFile?: string | null,
  *   configModules?: import("./config-modules.js").ConfigModuleGraph | null,
  *   branch?: FeatureBranchSnapshot | null,
@@ -517,6 +518,39 @@ function requireCommittedConfig(plan, state, commands) {
 }
 
 /**
+ * Blocks a runnable plan while a tracked file has local changes that `git status` does not show,
+ * because its index entry is marked `skip-worktree` or `assume-unchanged` (`git update-index`).
+ * `git stash`, and so `--ignore-local-changes`, cannot set them aside either, yet the release
+ * would use them: the configuration and the modules it loads are imported from the working tree,
+ * and checks, preparation and publication run on it, while the release commit keeps the indexed
+ * content. Blocking every hidden change, instead of guessing which ones reach the release, covers
+ * the configuration, its modules and `versionFiles` alike.
+ *
+ * @param {ReleasePlan} plan - Plan.
+ * @param {ReleaseState} state - Snapshot.
+ * @param {ProjectCommands} commands - Project commands quoted by the hint.
+ * @returns {ReleasePlan} The same plan, or a blocked plan when there are hidden local changes.
+ */
+function requireVisibleLocalChanges(plan, state, commands) {
+  const hiddenChanges = state.hiddenChanges ?? [];
+
+  if (plan.steps.length === 0 || hiddenChanges.length === 0) {
+    return plan;
+  }
+
+  const blocker = {
+    title: `Hay ${hiddenChanges.length} archivo(s) con cambios locales que git status no muestra`,
+    details: [
+      ...hiddenChanges.slice(0, MAX_LISTED_ITEMS),
+      `Git los marca con skip-worktree o assume-unchanged (git ls-files -v los muestra con S o en minúscula), así que ni git status ni git stash (tampoco --${CREATE_VERSION_FLAG.ignoreLocalChanges}) los ven, pero el release usaría su contenido local mientras el commit de release guarda el del índice.`,
+      `Quitá la marca (git update-index --no-skip-worktree -- <archivo> y git update-index --no-assume-unchanged -- <archivo>, en dos comandos), commitealos en una rama o descartalos (git restore), y volvé a correr ${commands.createVersion}.`,
+    ],
+  };
+
+  return { mode: RELEASE_MODE.blocked, steps: [], blockers: [blocker], warnings: [], pendingVersion: null };
+}
+
+/**
  * Builds the blocker for local `main` commits that are not release commits.
  *
  * @param {ReleaseCommit[]} commits - Foreign commits.
@@ -836,7 +870,7 @@ function missingChecksBlocker(commands) {
  */
 export function buildReleasePlan(state, capabilities = DEFAULT_CAPABILITIES, planOptions = {}) {
   const commands = capabilities.commands ?? DEFAULT_PROJECT_COMMANDS;
-  const plan = requireCommittedConfig(planRelease(state, capabilities, planOptions), state, commands);
+  const plan = requireVisibleLocalChanges(requireCommittedConfig(planRelease(state, capabilities, planOptions), state, commands), state, commands);
   return warnAboutSetAsideChanges(applyNpmAuth(plan, state.npmAuth, commands), state, planOptions.ignoreLocalChanges ?? false);
 }
 

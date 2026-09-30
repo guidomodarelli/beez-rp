@@ -819,60 +819,28 @@ function readReleaseFileText(context, filePath, fileLabel, conversionHint) {
 }
 
 /**
- * Identifies the file a path resolves to on disk (device and inode), so two paths reaching the same
- * file, such as hard links, are told apart from two separate files. `bigint` keeps the inode exact
- * where it does not fit a number (the file index on Windows).
- *
- * @param {string} absolutePath - Existing path.
- * @returns {string | null} Identity of the file, or `null` when the path is missing or the file system reports no inode.
- */
-function readFileIdentity(absolutePath) {
-  const stats = statSync(absolutePath, { bigint: true, throwIfNoEntry: false });
-  return stats && stats.ino !== 0n ? `${stats.dev}:${stats.ino}` : null;
-}
-
-/**
- * Stops the release, before anything is written, when a `versionFiles` entry is the same file on
- * disk as `package.json`, `CHANGELOG.md` or another entry (a hard link, which neither the path
- * checks nor the symbolic link check can see): the release would write that file twice, each time
- * from its own snapshot, and the last write would undo the first one.
+ * Stops the release, before anything is written, when `package.json`, `CHANGELOG.md` or a
+ * `versionFiles` entry has another hard link (its link count is above one), which neither the path
+ * checks nor the symbolic link check can see: writing the version would also rewrite the other
+ * path, which may be outside the release file set or even outside the repository, and, when it is
+ * another release file, the second write would undo the first one.
  *
  * @param {VersionFilesContext} context - Release context.
  * @returns {void}
- * @throws {ReleaseStepError} When two of the files the release writes are the same file.
+ * @throws {ReleaseStepError} When a file the release writes has another hard link.
  */
-function requireVersionFilesWithoutAliases(context) {
-  /** @type {Map<string, string>} */
-  const pathsByIdentity = new Map();
+function requireReleaseFilesWithoutHardLinks(context) {
+  for (const filePath of [...RELEASE_COMMIT_BUILT_IN_FILES, ...context.config.versionFiles]) {
+    const linkCount = statSync(path.join(context.repositoryRoot, filePath), { throwIfNoEntry: false })?.nlink ?? 1;
 
-  for (const builtInFile of RELEASE_COMMIT_BUILT_IN_FILES) {
-    const identity = readFileIdentity(path.join(context.repositoryRoot, builtInFile));
-
-    if (identity !== null) {
-      pathsByIdentity.set(identity, builtInFile);
-    }
-  }
-
-  for (const filePath of context.config.versionFiles) {
-    const identity = readFileIdentity(path.join(context.repositoryRoot, filePath));
-
-    if (identity === null) {
-      continue;
-    }
-
-    const aliasedPath = pathsByIdentity.get(identity);
-
-    if (aliasedPath !== undefined) {
-      const removalHint = RELEASE_COMMIT_BUILT_IN_FILES.includes(aliasedPath)
-        ? `Sacalo de versionFiles (el commit de release ya actualiza ${aliasedPath})`
-        : "Dejá una sola de las dos entradas en versionFiles";
+    if (linkCount > 1) {
+      const isBuiltInFile = RELEASE_COMMIT_BUILT_IN_FILES.includes(filePath);
+      const fileLabel = isBuiltInFile ? filePath : `${filePath} (versionFiles)`;
       throw new ReleaseStepError(
-        `${filePath} (versionFiles) es el mismo archivo que ${aliasedPath} (un enlace duro): el release lo escribiría dos veces y una escritura pisaría la otra.`,
-        `${removalHint} o reemplazá el enlace duro por una copia independiente, y volvé a correr ${context.commands.createVersion}; no se tocó la versión.`
+        `${fileLabel} tiene otro enlace duro (${linkCount} enlaces al mismo archivo): escribir la versión cambiaría también el otro camino, que puede estar fuera del release o del repo.`,
+        `Reemplazá el enlace duro por una copia independiente (copiá el archivo, borrá el original y renombrá la copia)${isBuiltInFile ? "" : ", o sacalo de versionFiles,"} y volvé a correr ${context.commands.createVersion}; no se tocó la versión.`
       );
     }
-
-    pathsByIdentity.set(identity, filePath);
   }
 }
 
@@ -902,8 +870,8 @@ async function requireReleaseFilesUnchangedFromHead(context, filePaths) {
 
 /**
  * Computes the new content of every configured `versionFiles` entry, before anything is written,
- * so a missing file, a linked path, a file Git does not track, a file that is another release file
- * on disk (a hard link), a file changed since `HEAD`, a file that is not valid UTF-8, a file without
+ * so a missing file, a linked path, a file Git does not track, a file with another hard link
+ * (maybe outside the release), a file changed since `HEAD`, a file that is not valid UTF-8, a file without
  * markers or with block markers paired wrongly stops the release with the version untouched.
  * `package.json` is checked against `HEAD` too, so it must be read after this call.
  *
@@ -911,7 +879,7 @@ async function requireReleaseFilesUnchangedFromHead(context, filePaths) {
  * @param {string} version - Version being released.
  * @returns {Promise<ReleaseFileUpdate[]>} Files to write, relative to the root, with their bytes before the release.
  * @throws {ReleaseStepError} When a file is missing, goes through a symbolic link, is not tracked by
- *   Git, is the same file as another release file, differs from `HEAD`, is not valid UTF-8, has
+ *   Git, has another hard link, differs from `HEAD`, is not valid UTF-8, has
  *   block markers paired wrongly or none of its lines is marked.
  */
 async function prepareVersionFileUpdates(context, version) {
@@ -924,7 +892,7 @@ async function prepareVersionFileUpdates(context, version) {
   }
 
   await requireTrackedVersionFiles(context);
-  requireVersionFilesWithoutAliases(context);
+  requireReleaseFilesWithoutHardLinks(context);
   await requireReleaseFilesUnchangedFromHead(context, [PACKAGE_MANIFEST_FILE, ...context.config.versionFiles]);
 
   return context.config.versionFiles.map((filePath) => {
@@ -993,9 +961,12 @@ function restoreFileBytes(absolutePath, originalBytes) {
 
 /**
  * Undoes a release whose files were written but whose commit failed (a rejected `git add`, a
- * `pre-commit` hook that fails): the index goes back to the tree it had before staging and every
- * release file to its original content, so nothing is left for the user to discard by hand and no
- * command has to quote the configured paths for a shell.
+ * `pre-commit` hook that fails, a commit undone because it held other changes): the index entries
+ * of the release files go back to the tree the index had before staging, and every release file to
+ * its original content, so nothing is left for the user to discard by hand and no command has to
+ * quote the configured paths for a shell. Only those entries are reset: the rest of the index keeps
+ * its entries and their flags (`skip-worktree`, `assume-unchanged`, sparse checkout), which
+ * rebuilding the whole index from a tree would drop.
  *
  * @param {ReleaseContext} context - Release context.
  * @param {ReleaseFileUpdate[]} fileUpdates - Files the release wrote.
@@ -1004,7 +975,8 @@ function restoreFileBytes(absolutePath, originalBytes) {
  * @returns {Promise<ReleaseStepError>} Failure to throw, whose hint says what was restored and what was not.
  */
 async function rollBackUncommittedRelease(context, fileUpdates, indexTree, failure) {
-  const indexRestored = indexTree !== null && (await context.reader.tryGit(["read-tree", indexTree])) !== null;
+  const releaseFilePathspecs = fileUpdates.map(({ filePath }) => toLiteralPathspec(filePath));
+  const indexRestored = indexTree !== null && (await context.reader.tryGit(["reset", "--quiet", indexTree, "--", ...releaseFilePathspecs])) !== null;
   const unrestoredPaths = fileUpdates.filter(({ filePath, originalBytes }) => !restoreFileBytes(path.join(context.repositoryRoot, filePath), originalBytes)).map(({ filePath }) => filePath);
   const pendingRestores = [
     ...(indexRestored ? [] : ["no se pudo volver el staging a como estaba: revisá git status y sacá del staging package.json, CHANGELOG.md y versionFiles"]),
@@ -1016,6 +988,50 @@ async function rollBackUncommittedRelease(context, fileUpdates, indexTree, failu
       : `${pendingRestores.join("; ")}, antes de reintentar`;
 
   return new ReleaseStepError(failure.message, `${failure.hint} Después volvé a correr ${context.commands.createVersion}; ${restoreNote}.`, { cause: failure });
+}
+
+/**
+ * Lists the paths the release commit changed that are not release files: a `pre-commit` or
+ * `commit-msg` hook may stage other changes (even to the configuration or a module it loads), and
+ * `git commit` takes the whole index, so the release would push changes nobody reviewed and that
+ * the loaded configuration never saw.
+ *
+ * @param {ReleaseContext} context - Release context.
+ * @param {string[]} releasePaths - Paths of the release files as Git spells them in the index.
+ * @returns {Promise<string[]>} Paths changed by `HEAD` outside `releasePaths`.
+ */
+async function listForeignReleaseCommitPaths(context, releasePaths) {
+  const listing = await context.reader.git(["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "HEAD"]);
+  return listing.split("\0").filter((changedPath) => changedPath !== "" && !releasePaths.includes(changedPath));
+}
+
+/**
+ * Undoes a release commit that holds changes other than the release files (staged by a hook), before
+ * it is tagged: the commit is dropped with `git reset --soft`, so those changes stay staged for the
+ * user to review, and the release files go back to their content and staging before the release.
+ *
+ * @param {ReleaseContext} context - Release context.
+ * @param {ReleaseFileUpdate[]} fileUpdates - Files the release wrote.
+ * @param {string | null} indexTree - Tree of the index before staging.
+ * @param {string} version - Version of the undone commit.
+ * @param {string[]} foreignPaths - Paths the commit changed outside the release files.
+ * @returns {Promise<ReleaseStepError>} Failure to throw.
+ */
+async function undoReleaseCommitWithForeignChanges(context, fileUpdates, indexTree, version, foreignPaths) {
+  const listedPaths = foreignPaths.slice(0, MAX_LISTED_ITEMS).join(", ");
+  const failure = new ReleaseStepError(
+    `El commit de versión ${version} incluía cambios que no son del release: ${listedPaths} (por ejemplo, los stageó un hook pre-commit o commit-msg); no se creó el tag ${toReleaseTag(version)}.`,
+    "Esos cambios quedaron en staging: revisalos con git diff --cached, commitealos en una rama o descartalos, y evitá que los hooks stageen archivos durante el commit de release."
+  );
+
+  if ((await context.reader.tryGit(["reset", "--soft", "--quiet", "HEAD^"])) === null) {
+    return new ReleaseStepError(
+      failure.message,
+      `No se pudo deshacer el commit: corré git reset --soft HEAD^, sacá del staging esos cambios, y volvé a correr ${context.commands.createVersion}.`
+    );
+  }
+
+  return rollBackUncommittedRelease(context, fileUpdates, indexTree, failure);
 }
 
 /**
@@ -1146,15 +1162,25 @@ async function bumpVersionStep(context) {
   const tag = toReleaseTag(nextRelease.version);
   // Literal pathspecs after `--`: a configured name such as `-v.txt` or `:version` is a file, never an option nor pathspec magic.
   const releaseFilePathspecs = releaseFileUpdates.map(({ filePath }) => toLiteralPathspec(filePath));
+  /** @type {string[]} */
+  let releasePaths = [];
 
   try {
     await runGitStep(context, ["add", "--", ...releaseFilePathspecs], "No se pudo stagear package.json, CHANGELOG.md y versionFiles", "Revisá git status.");
+    // The staged release paths as Git spells them, to compare with the paths of the commit.
+    releasePaths = (await context.reader.git(["diff", "--cached", "--name-only", "-z", "HEAD", "--", ...releaseFilePathspecs])).split("\0").filter(Boolean);
     await runGitStep(context, ["commit", "--quiet", "-m", nextRelease.version], "El commit de versión falló", "Corregí el error (por ejemplo, un hook pre-commit que lo rechaza).");
   } catch (error) {
     if (!(error instanceof ReleaseStepError)) {
       throw error;
     }
     throw await rollBackUncommittedRelease(context, releaseFileUpdates, indexTree, error);
+  }
+
+  const foreignPaths = await listForeignReleaseCommitPaths(context, releasePaths);
+
+  if (foreignPaths.length > 0) {
+    throw await undoReleaseCommitWithForeignChanges(context, releaseFileUpdates, indexTree, nextRelease.version, foreignPaths);
   }
 
   await verifyCommittedVersionFiles(context, nextRelease.version);

@@ -4,16 +4,16 @@
  * given as first argument, and sends the recorded URLs (or why it could not load the configuration)
  * to the parent process.
  *
- * Only constants are imported statically: the loader (`config.js`) is imported after the hook is
- * registered, so a configuration that imports beez-rp modules from the same files (as beez-rp
- * itself can) still lists them.
+ * Nothing of beez-rp is imported statically: the loader (`config.js`) and everything it needs are
+ * imported after the hook is registered, so a configuration that imports beez-rp modules from the
+ * same files (as beez-rp itself can, releasing from its own checkout) still lists them. A module
+ * loaded before the hook would stay cached and never reach it. The parent checks beforehand that
+ * `module.registerHooks` exists.
  *
  * @module create-version/config-modules-process
  */
 
 import module from "node:module";
-
-import { MODULE_HOOKS_MINIMUM_NODE_VERSION } from "../constants/create-version.js";
 
 /**
  * @typedef {{ moduleUrls?: string[], reason?: string }} ConfigModulesMessage
@@ -47,12 +47,6 @@ function describeLoadFailure(error) {
  * @returns {Promise<ConfigModulesMessage>} Loaded module URLs, or why they could not be listed.
  */
 async function recordConfigModules(repositoryRoot) {
-  if (typeof module.registerHooks !== "function") {
-    return {
-      reason: `Node ${process.versions.node} no permite registrar hooks de módulos síncronos (module.registerHooks); hace falta Node ${MODULE_HOOKS_MINIMUM_NODE_VERSION} o posterior`,
-    };
-  }
-
   /** @type {Set<string>} */
   const moduleUrls = new Set();
   module.registerHooks({

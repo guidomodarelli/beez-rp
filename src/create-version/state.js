@@ -13,13 +13,16 @@
  * @module create-version/state
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import { readUnreleased } from "../changelog.js";
 import { CHANGELOG_FILE } from "../constants/changelog.js";
 import { GIT_LITERAL_PATHSPEC_PREFIX } from "../constants/version-files.js";
 import {
+  LS_FILES_SKIP_WORKTREE_TAG,
+  LS_FILES_STAGE_PATH_SEPARATOR,
+  LS_FILES_TAG_WIDTH,
   MAIN_BRANCH,
   MIGRATION_STATUS,
   NPM_AUTH_STATUS,
@@ -288,6 +291,52 @@ async function findUntrackedConfigFile(reader, repositoryRoot) {
 }
 
 /**
+ * Tells whether a `git ls-files -v` tag marks an entry Git does not compare with the working
+ * tree: `skip-worktree` (`S`) or `assume-unchanged` (any lowercase tag).
+ *
+ * @param {string} tag - Tag of the entry.
+ * @returns {boolean} `true` when `git status` would not report a local change of the entry.
+ */
+function isUncheckedIndexTag(tag) {
+  return tag === LS_FILES_SKIP_WORKTREE_TAG || tag !== tag.toUpperCase();
+}
+
+/**
+ * Lists the tracked files whose working-tree content differs from the index while their entry is
+ * marked `skip-worktree` or `assume-unchanged`: `git status --porcelain` and `git stash` skip
+ * those entries, so the local change would reach the release unseen. Git hashes each file through
+ * its clean filters (line endings, `.gitattributes`), like `git add`, so a checkout with converted
+ * line endings is not a change. Files missing from the working tree (a sparse checkout) are skipped:
+ * nothing local of them can be loaded or released.
+ *
+ * @param {GitReader} reader - Git reader.
+ * @param {string} repositoryRoot - Repository root.
+ * @returns {Promise<string[]>} Repository-relative paths with hidden local changes.
+ */
+async function listHiddenLocalChanges(reader, repositoryRoot) {
+  const taggedEntries = (await reader.git(["ls-files", "-v", "-z"])).split("\0").filter(Boolean);
+  const uncheckedPaths = taggedEntries
+    .filter((entry) => isUncheckedIndexTag(entry.charAt(0)))
+    .map((entry) => entry.slice(LS_FILES_TAG_WIDTH))
+    .filter((filePath) => lstatSync(path.join(repositoryRoot, filePath), { throwIfNoEntry: false })?.isFile() ?? false);
+
+  if (uncheckedPaths.length === 0) {
+    return [];
+  }
+
+  const stageEntries = (await reader.git(["ls-files", "-s", "-z", "--", ...uncheckedPaths.map((filePath) => `${GIT_LITERAL_PATHSPEC_PREFIX}${filePath}`)])).split("\0").filter(Boolean);
+  // A stage entry is `<mode> <object> <stage>\t<path>`.
+  const indexObjectByPath = new Map(
+    stageEntries.map((entry) => {
+      const separatorIndex = entry.indexOf(LS_FILES_STAGE_PATH_SEPARATOR);
+      return [entry.slice(separatorIndex + 1), entry.slice(0, separatorIndex).split(" ")[1]];
+    })
+  );
+  const workingObjects = (await reader.git(["hash-object", "--", ...uncheckedPaths])).split("\n");
+  return uncheckedPaths.filter((filePath, index) => workingObjects[index] !== indexObjectByPath.get(filePath));
+}
+
+/**
  * Gathers the complete release snapshot.
  *
  * @param {{
@@ -322,6 +371,7 @@ export async function collectReleaseState({
   const currentBranch = await reader.tryGit(["symbolic-ref", "--quiet", "--short", "HEAD"]);
   const statusOutput = await reader.git(["status", "--porcelain"]);
   const workingTreeChanges = statusOutput.split("\n").map((line) => line.trimEnd()).filter(Boolean);
+  const hiddenChanges = await listHiddenLocalChanges(reader, repositoryRoot);
   const untrackedConfigFile = await findUntrackedConfigFile(reader, repositoryRoot);
   // Only a local change can reach the loaded configuration without being committed: a clean tree needs no graph.
   const configModules = workingTreeChanges.length > 0 && findCreateVersionConfigFile(repositoryRoot) ? await listConfigModules(repositoryRoot) : null;
@@ -373,6 +423,7 @@ export async function collectReleaseState({
     packageName: manifest.name,
     currentBranch,
     workingTreeChanges,
+    hiddenChanges,
     untrackedConfigFile,
     configModules,
     branch,

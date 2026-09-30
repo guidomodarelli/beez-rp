@@ -271,6 +271,19 @@ export const PORCELAIN_RENAME_SEPARATOR = " -> ";
 /** State columns `git status --porcelain --ignored` writes before an ignored path. */
 export const IGNORED_PORCELAIN_PREFIX = "!! ";
 
+/** Width of the tag and the space `git ls-files -v` writes before each path. */
+export const LS_FILES_TAG_WIDTH = 2;
+
+/**
+ * `git ls-files -v` tag of an index entry marked `skip-worktree`; an entry marked
+ * `assume-unchanged` has its tag in lowercase instead. Git does not compare either with the
+ * working tree, so `git status` and `git stash` miss their local changes.
+ */
+export const LS_FILES_SKIP_WORKTREE_TAG = "S";
+
+/** Separates the stage fields from the path of a `git ls-files -s` entry. */
+export const LS_FILES_STAGE_PATH_SEPARATOR = "\t";
+
 /** Delimiter of a path that Git quotes as a C string literal (special characters, or spaces in a rename). */
 export const GIT_QUOTED_PATH_DELIMITER = '"';
 

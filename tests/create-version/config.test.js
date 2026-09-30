@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { buildChangelogPrompt } from "../../src/changelog-ai.js";
 import { loadCreateVersionConfig, resolveCreateVersionConfig } from "../../src/create-version/config.js";
@@ -10,6 +11,9 @@ import { describeProjectCommands } from "../../src/package-manager.js";
 /** @type {string[]} */
 const temporaryDirectories = [];
 
+/** Sources of beez-rp, copied into a fixture that plays beez-rp's own checkout. */
+const BEEZ_RP_SOURCE_ROOT = fileURLToPath(new URL("../../src", import.meta.url));
+
 afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) {
     rmSync(directory, { recursive: true, force: true });
@@ -17,6 +21,29 @@ afterEach(() => {
 });
 
 describe("create-version config", () => {
+  it(
+    "should list the beez-rp modules the configuration imports when the release runs from beez-rp's own checkout",
+    async () => {
+      const checkoutRoot = mkdtempSync(path.join(os.tmpdir(), "beez-rp-own-checkout-"));
+      temporaryDirectories.push(checkoutRoot);
+      cpSync(BEEZ_RP_SOURCE_ROOT, path.join(checkoutRoot, "src"), { recursive: true });
+      writeFileSync(path.join(checkoutRoot, "package.json"), `${JSON.stringify({ name: "beez-rp", type: "module", version: "0.1.0" })}\n`);
+      writeFileSync(
+        path.join(checkoutRoot, "beez-rp.config.js"),
+        'import { MAIN_BRANCH } from "./src/constants/create-version.js";\n\nexport default { changelog: { audience: `equipo de ${MAIN_BRANCH}` } };\n'
+      );
+      // The graph is read by the copy of beez-rp in the checkout, as when beez-rp releases itself.
+      const { listConfigModules } = await import(pathToFileURL(path.join(checkoutRoot, "src", "create-version", "config-modules.js")).href);
+
+      const graph = await listConfigModules(checkoutRoot);
+
+      expect(graph).toMatchObject({ loaded: true });
+      expect(graph.files).toContain("beez-rp.config.js");
+      expect(graph.files).toContain("src/constants/create-version.js");
+    },
+    60_000
+  );
+
   it("should accept versionFiles inside the project root and reject paths that escape it", () => {
     const base = { changelog: { audience: "equipo" } };
 

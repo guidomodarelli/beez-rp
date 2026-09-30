@@ -18,8 +18,11 @@
 
 import { fork } from "node:child_process";
 import { realpathSync } from "node:fs";
+import module from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { MODULE_HOOKS_MINIMUM_NODE_VERSION } from "../constants/create-version.js";
 
 /**
  * @typedef {{ loaded: true, files: string[] } | { loaded: false, reason: string }} ConfigModuleGraph
@@ -78,6 +81,14 @@ function toRepositoryFiles(repositoryRoot, moduleUrls) {
  * @returns {Promise<ConfigModuleGraph>} Files of the module graph, or why the configuration could not be loaded; never rejects.
  */
 export function listConfigModules(repositoryRoot) {
+  // The new process runs on this same Node binary, so it lacks the hooks exactly when this one does.
+  if (typeof module.registerHooks !== "function") {
+    return Promise.resolve({
+      loaded: false,
+      reason: `Node ${process.versions.node} no permite registrar hooks de módulos síncronos (module.registerHooks); hace falta Node ${MODULE_HOOKS_MINIMUM_NODE_VERSION} o posterior`,
+    });
+  }
+
   return new Promise((resolve) => {
     let settled = false;
     const graphProcess = fork(CONFIG_MODULES_PROCESS_SCRIPT, [repositoryRoot], { cwd: repositoryRoot, stdio: ["ignore", "ignore", "pipe", "ipc"] });
