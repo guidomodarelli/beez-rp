@@ -422,7 +422,7 @@ async function listDiffPaths(context, diffArguments) {
  * @param {MonorepoContext} context - Context.
  * @param {ReadonlySet<string>} releasePaths - Manifests, changelogs and `versionFiles` of the chosen packages.
  * @returns {Promise<void>}
- * @throws {ReleaseStepError} When something outside those files is staged or differs from `HEAD`, or the changelog of a package left out has changes.
+ * @throws {ReleaseStepError} When something outside those files is staged, differs from `HEAD` or is untracked (and not ignored), or the changelog of a package left out has changes.
  */
 async function assertOnlyReleaseChanges(context, releasePaths) {
   const foreignStaged = (await listDiffPaths(context, ["--cached"])).filter((filePath) => !releasePaths.has(filePath));
@@ -435,7 +435,9 @@ async function assertOnlyReleaseChanges(context, releasePaths) {
 
   const chosenNames = new Set(context.chosen.map(({ unit }) => unit.name));
   const skippedChangelogs = new Set(context.units.filter((unit) => !chosenNames.has(unit.name)).map((unit) => unit.changelogPath));
-  const changedPaths = await listDiffPaths(context, ["HEAD"]);
+  // `git diff HEAD` does not list untracked files, yet `npm publish` packs them from the package directory.
+  const untrackedPaths = (await context.reader.git(["ls-files", "--others", "--exclude-standard", "-z"])).split(" ").filter(Boolean);
+  const changedPaths = [...(await listDiffPaths(context, ["HEAD"])), ...untrackedPaths];
   const dirtySkippedChangelogs = changedPaths.filter((filePath) => skippedChangelogs.has(filePath));
   if (dirtySkippedChangelogs.length > 0) {
     throw new ReleaseStepError(
@@ -445,6 +447,15 @@ async function assertOnlyReleaseChanges(context, releasePaths) {
   }
 
   // Unstaged changes (for example, a check that rewrites a file) stay out of the commit but not out of what gets published.
+  // The plan blocks untracked files (or sets them aside with --ignore-local-changes), so an earlier step created these.
+  const foreignUntracked = untrackedPaths.filter((filePath) => !releasePaths.has(filePath));
+  if (foreignUntracked.length > 0) {
+    throw new ReleaseStepError(
+      `Un paso anterior (por ejemplo, un check) creó ${foreignUntracked.slice(0, MAX_LISTED_ITEMS).join(", ")}, que no son del release: quedarían fuera del commit pero se publicarían.`,
+      `No se escribió nada. Revisá el check, borralos o agregalos a .gitignore, y volvé a correr ${context.commands.createVersion}.`
+    );
+  }
+
   const foreignChanged = changedPaths.filter((filePath) => !releasePaths.has(filePath));
   if (foreignChanged.length > 0) {
     throw new ReleaseStepError(

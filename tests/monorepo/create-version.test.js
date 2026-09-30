@@ -535,6 +535,45 @@ describe("create-version in monorepo mode", () => {
   );
 
   it(
+    "stops before the release commit when a check creates an untracked file that is not ignored",
+    async () => {
+      const { repositoryRoot, remoteRoot } = createReleasedMonorepo();
+      mkdirSync(path.join(repositoryRoot, "scripts"), { recursive: true });
+      writeFileSync(
+        path.join(repositoryRoot, "scripts/generate.mjs"),
+        [
+          'import { mkdirSync, writeFileSync } from "node:fs";',
+          'mkdirSync("packages/core/dist", { recursive: true });',
+          'writeFileSync("packages/core/dist/index.js", "// built\\n");',
+          'writeFileSync("packages/core/generated.js", "// generated\\n");',
+          "",
+        ].join("\n")
+      );
+      writeFileSync(path.join(repositoryRoot, ".gitignore"), "dist/\n");
+      writeFileSync(
+        path.join(repositoryRoot, "beez-rp.config.js"),
+        ['export default {', '  changelog: { audience: "quien usa {name}" },', '  packages: "workspaces",', '  checks: ["node scripts/generate.mjs"],', '  publish: "npm",', "};", ""].join("\n")
+      );
+      commitAll(repositoryRoot, "chore: generate check");
+      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+      pushCoreFeature(repositoryRoot);
+      const releasedSha = runGit(["rev-parse", "HEAD"], repositoryRoot);
+      const registry = await startRegistry();
+
+      const release = await runCliAsync(repositoryRoot, ["--accept-suggested"], npmEnvironment(registry.registryUrl));
+
+      expect(release.status, release.output).toBe(1);
+      const output = flattenOutput(release.output);
+      expect(output).toContain("Un paso anterior (por ejemplo, un check) creó packages/core/generated.js, que no son del release");
+      expect(output).not.toContain("packages/core/dist/index.js");
+      expect(runGit(["rev-parse", "HEAD"], repositoryRoot)).toBe(releasedSha);
+      expect(runGit(["rev-parse", "main"], remoteRoot)).toBe(releasedSha);
+      expect(registry.publications).toEqual([]);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
     "does not publish when prepare modified a tracked file of the release commit",
     async () => {
       const { repositoryRoot } = createReleasedMonorepo();
