@@ -3,10 +3,8 @@
  * changes, `main` compared with `origin/main`, the version and subject of
  * `HEAD`, the commit of a detached release tag on `origin`, the last release,
  * the commits waiting to be released, the pull request of a feature branch,
- * the local changes `git status` does not show, the published versions, the
- * npm credentials (when the plan would publish to npm), pending migrations and
- * the modules the configuration loaded in this process (traced since it was
- * loaded) and whether they are the committed ones.
+ * the published versions, the npm credentials (when the plan would publish to
+ * npm) and pending migrations.
  *
  * Every reader is read-only; the only network operations are `git fetch`,
  * `git ls-remote`, `gh pr view`, `npm view`, `npm whoami`, `npm owner ls` and
@@ -15,13 +13,12 @@
  * @module create-version/state
  */
 
-import { existsSync, lstatSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import { readUnreleased } from "../changelog.js";
 import { CHANGELOG_FILE } from "../constants/changelog.js";
 import {
-  HEAD_FILE_DIFFERENCE,
   MAIN_BRANCH,
   MIGRATION_STATUS,
   NPM_AUTH_STATUS,
@@ -35,11 +32,6 @@ import {
   VERSION_FIELD_CHANGE_PATTERN,
 } from "../constants/create-version.js";
 import { toReleaseTag } from "../versions.js";
-import { findCreateVersionConfigFile } from "./config.js";
-import { listConfigModules, listConfigModuleUrls } from "./config-modules.js";
-import { listFilteredFiles } from "./git-attributes.js";
-import { listUncheckedIndexPaths } from "./git-status.js";
-import { listFilesDifferentFromHead } from "./head-files.js";
 import { checkNpmPublishAccess, lookupPublishedVersions, resolvePublishRegistry } from "./npm.js";
 import { createGitReader, listCommits, readPackageVersionAt, runCaptured } from "./process.js";
 
@@ -49,8 +41,6 @@ import { createGitReader, listCommits, readPackageVersionAt, runCaptured } from 
  * @typedef {import("./plan.js").PullRequestSnapshot} PullRequestSnapshot
  * @typedef {import("./config.js").MigrationCheck} MigrationCheck
  * @typedef {import("./plan.js").LastReleaseSnapshot} LastReleaseSnapshot
- * @typedef {import("./head-files.js").HeadFileDifference} HeadFileDifference
- * @typedef {import("./config-modules.js").ConfigModuleGraph} ConfigModuleGraph
  * @typedef {ReleaseState & { packageName: string, releasedVersion: string | null, lastRelease: LastReleaseSnapshot | null }} ReleaseSnapshot
  */
 
@@ -274,81 +264,6 @@ function confirmFirstPublication(npmAuth, npm) {
 }
 
 /**
- * Lists the tracked files marked `skip-worktree` or `assume-unchanged` whose working-tree entry
- * differs from `HEAD`: `git status --porcelain` and `git stash` skip those entries, so the local
- * change (new content, or another kind of file such as a symbolic link) would reach the release
- * unseen. An entry missing from the working tree (such as one left out of a sparse checkout) is
- * reported too: checks and `npm publish` run on the working tree, so the published package would
- * lack a tracked file. An entry with a `filter` attribute is reported as such even when
- * it matches `HEAD`: Git compares it through its clean filter, which can map a local edit back to
- * the committed blob, while checks and `npm publish` use the raw working-tree bytes.
- *
- * @param {GitReader} reader - Git reader.
- * @param {string} repositoryRoot - Repository root.
- * @returns {Promise<HeadFileDifference[]>} Hidden local changes.
- */
-export async function listHiddenLocalChanges(reader, repositoryRoot) {
-  const hiddenPaths = await listUncheckedIndexPaths(reader);
-  const isInWorkingTree = (/** @type {string} */ filePath) => lstatSync(path.join(repositoryRoot, filePath), { throwIfNoEntry: false }) !== undefined;
-  const uncheckedPaths = hiddenPaths.filter(isInWorkingTree);
-  const missingPaths = hiddenPaths.filter((filePath) => !isInWorkingTree(filePath));
-  // A clean filter can map a local edit back to the committed blob, while the release uses the raw bytes.
-  const filteredPaths = await listFilteredFiles(reader, uncheckedPaths);
-  const unfilteredPaths = uncheckedPaths.filter((filePath) => !filteredPaths.includes(filePath));
-
-  return [
-    ...missingPaths.map((file) => ({ file, difference: HEAD_FILE_DIFFERENCE.missingFromWorkingTree })),
-    ...(await listFilesDifferentFromHead(reader, repositoryRoot, unfilteredPaths)),
-    ...filteredPaths.map((file) => ({ file, difference: HEAD_FILE_DIFFERENCE.filtered })),
-  ];
-}
-
-/**
- * Lists the repository files this process has loaded as modules since the configuration trace
- * started (the configuration, what it imports and what its hooks or `migrations.check` imported
- * so far), and compares each one with `HEAD`; a module with a `filter` attribute is reported as
- * such instead, since its comparison goes through the filter and not through the bytes Node loaded. It always runs when there is a configuration, even
- * with a clean `git status`: an ignored local override the configuration imports, or a module whose
- * local change Git hides with `skip-worktree`, never shows up there. The run calls it again right
- * before setting local changes aside, with everything loaded until then.
- *
- * @param {GitReader} reader - Git reader.
- * @param {string} repositoryRoot - Repository root.
- * @returns {Promise<{ configModules: ConfigModuleGraph | null, uncommittedConfigModules: HeadFileDifference[], inspectedModuleUrls: string[] }>} Module
- *   graph (`null` without configuration), the modules that differ from `HEAD`, and the `file:`
- *   URLs of the modules this inspection covered (the graph of the configuration), the only
- *   already loaded modules the late module guard may take as compared with `HEAD`.
- */
-export async function inspectConfigModules(reader, repositoryRoot) {
-  const configFile = findCreateVersionConfigFile(repositoryRoot);
-
-  if (!configFile) {
-    return { configModules: null, uncommittedConfigModules: [], inspectedModuleUrls: [] };
-  }
-
-  const configModules = listConfigModules(repositoryRoot, configFile);
-
-  if (!configModules.loaded) {
-    return { configModules, uncommittedConfigModules: [], inspectedModuleUrls: [] };
-  }
-
-  /** @type {HeadFileDifference[]} */
-  const externalModules = configModules.externalFiles.map((file) => ({ file, difference: HEAD_FILE_DIFFERENCE.outsideRepository }));
-  /** @type {HeadFileDifference[]} */
-  const implicitModules = configModules.implicitPaths.map((file) => ({ file, difference: HEAD_FILE_DIFFERENCE.implicitPath }));
-  // A filtered module is compared with HEAD through its clean filter, which can hide what Node ran.
-  const filteredModules = await listFilteredFiles(reader, configModules.files);
-  const unfilteredModules = configModules.files.filter((file) => !filteredModules.includes(file));
-  const uncommittedConfigModules = [
-    ...(await listFilesDifferentFromHead(reader, repositoryRoot, unfilteredModules)),
-    ...filteredModules.map((file) => ({ file, difference: HEAD_FILE_DIFFERENCE.filtered })),
-    ...externalModules,
-    ...implicitModules,
-  ];
-  return { configModules, uncommittedConfigModules, inspectedModuleUrls: listConfigModuleUrls(repositoryRoot, configFile) };
-}
-
-/**
  * Gathers the complete release snapshot.
  *
  * @param {{
@@ -381,9 +296,9 @@ export async function collectReleaseState({
 
   onProgress("Leyendo el estado de Git");
   const currentBranch = await reader.tryGit(["symbolic-ref", "--quiet", "--short", "HEAD"]);
-  const statusOutput = await reader.git(["status", "--porcelain"]);
+  // Every untracked file, not only its directory, so the plan sees the extension of each one.
+  const statusOutput = await reader.git(["status", "--porcelain", "--untracked-files=all"]);
   const workingTreeChanges = statusOutput.split("\n").map((line) => line.trimEnd()).filter(Boolean);
-  const hiddenChanges = await listHiddenLocalChanges(reader, repositoryRoot);
   const localMainExists = (await reader.tryGit(["rev-parse", "--verify", "--quiet", MAIN_BRANCH])) !== null;
   const remoteMainExists = (await reader.tryGit(["rev-parse", "--verify", "--quiet", REMOTE_MAIN_REF])) !== null;
   const aheadCommits = localMainExists && remoteMainExists ? await listCommits(reader, `${REMOTE_MAIN_REF}..${MAIN_BRANCH}`) : [];
@@ -426,17 +341,12 @@ export async function collectReleaseState({
     onProgress("Consultando migraciones pendientes");
   }
   const migrations = await readMigrations(checkMigrations);
-  // Inspected last: `migrations.check` runs configuration code that may import more modules.
-  const { configModules, uncommittedConfigModules } = await inspectConfigModules(reader, repositoryRoot);
 
   /** @type {ReleaseSnapshot} */
   const snapshot = {
     packageName: manifest.name,
     currentBranch,
     workingTreeChanges,
-    hiddenChanges,
-    configModules,
-    uncommittedConfigModules,
     branch,
     pullRequest,
     githubError,

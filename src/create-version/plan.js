@@ -24,40 +24,24 @@ import {
   CREATE_VERSION_CONFIG_FILES,
   CREATE_VERSION_FLAG,
   DEFAULT_CHECKS_SCRIPT,
-  HEAD_FILE_DIFFERENCE,
   MAIN_BRANCH,
   MAX_LISTED_ITEMS,
-  MODULE_HOOKS_MINIMUM_NODE_VERSION,
   MIGRATION_STATUS,
   NPM_AUTH_STATUS,
   NPM_DIST_TAG,
   NPM_LOOKUP_STATUS,
+  PORCELAIN_RENAME_SEPARATOR,
+  PORCELAIN_STATUS_WIDTH,
   PULL_REQUEST_STATE,
   RELEASE_MODE,
   RELEASE_STEP,
+  UNSETTABLE_ASIDE_EXTENSIONS,
   VERSION_PREFIX_PATTERN,
 } from "../constants/create-version.js";
 import { RELEASE_TYPE } from "../constants/versions.js";
 import { compareReleaseVersions, findHighestStableVersion, isReleaseCommitSubject, isStableReleaseVersion, isStableVersionAbove, toReleaseTag } from "../versions.js";
 import { DEFAULT_PROJECT_COMMANDS } from "../package-manager.js";
-import { listPorcelainPaths } from "./git-status.js";
 import { describeNpmAuthProblem, describeNpmFirstPublicationWarning } from "./npm-auth.js";
-
-/** Names of the configuration files, as the hints quote them. */
-const CONFIG_FILES_LABEL = CREATE_VERSION_CONFIG_FILES.join(" o ");
-
-/** How the blockers describe each {@link HEAD_FILE_DIFFERENCE} of a file. */
-const HEAD_FILE_DIFFERENCE_LABELS = Object.freeze({
-  [HEAD_FILE_DIFFERENCE.missingFromWorkingTree]: "falta en el working tree (por ejemplo, quedó fuera de un sparse checkout), así que los checks y la publicación no lo incluirían",
-  [HEAD_FILE_DIFFERENCE.notCommitted]: "no está commiteado: Git lo ignora, nunca se agregó o solo está en staging",
-  [HEAD_FILE_DIFFERENCE.typeChanged]: "no es el mismo tipo de archivo que en HEAD, por ejemplo un enlace simbólico",
-  [HEAD_FILE_DIFFERENCE.contentChanged]: "su contenido es distinto del de HEAD",
-  [HEAD_FILE_DIFFERENCE.executableBitChanged]: "su permiso de ejecución es distinto del de HEAD",
-  [HEAD_FILE_DIFFERENCE.outsideRepository]: "está fuera del repositorio, por ejemplo detrás de un enlace simbólico, y HEAD no lo respalda",
-  [HEAD_FILE_DIFFERENCE.filtered]: "tiene un atributo filter en .gitattributes, así que no se puede comprobar que lo que usa el release sea lo commiteado",
-  [HEAD_FILE_DIFFERENCE.implicitPath]:
-    "se importa sin la ruta completa del archivo (sin extensión, como carpeta, o por un alias #… de imports o un nombre de paquete), así que no se puede comprobar qué archivo cargó Node: importalo con su ruta relativa completa, con extensión (por ejemplo ./settings.js)",
-});
 
 /**
  * @typedef {{ sha?: string, subject: string, body?: string }} ReleaseCommit
@@ -66,15 +50,11 @@ const HEAD_FILE_DIFFERENCE_LABELS = Object.freeze({
  * @typedef {import("./npm.js").NpmLookup} NpmLookup
  * @typedef {import("./npm.js").NpmAuthCheck} NpmAuthCheck
  * @typedef {import("./config.js").MigrationCheck} MigrationCheck
- * @typedef {import("./head-files.js").HeadFileDifference} HeadFileDifference
  * @typedef {{ sha: string, version: string | null, subject?: string | null, tagged?: boolean }} LastReleaseSnapshot
  *   Newest commit of `origin/main` that changed `version`; `tagged` when `vX.Y.Z` points at it.
  * @typedef {{
  *   currentBranch: string | null,
  *   workingTreeChanges: string[],
- *   hiddenChanges?: HeadFileDifference[],
- *   configModules?: import("./config-modules.js").ConfigModuleGraph | null,
- *   uncommittedConfigModules?: HeadFileDifference[],
  *   branch?: FeatureBranchSnapshot | null,
  *   pullRequest?: PullRequestSnapshot | null,
  *   githubError?: string | null,
@@ -293,9 +273,7 @@ function findBlockers(state, ignoreLocalChanges, commands) {
       title: `Hay ${blockingChanges.length} archivo(s) sin commitear`,
       details: [
         ...blockingChanges.slice(0, MAX_LISTED_ITEMS),
-        blockingChanges.some(isConfigChange)
-          ? `Commitealos en una rama (o git stash) y volvé a correr ${commands.createVersion}: ${CONFIG_FILES_LABEL} no se puede apartar con --${CREATE_VERSION_FLAG.ignoreLocalChanges}, porque el release lo usa tal como está en el working tree.`
-          : `Commitealos en una rama (o git stash) y volvé a correr ${commands.createVersion}, o corré ${commands.createVersion} --${CREATE_VERSION_FLAG.ignoreLocalChanges} para apartarlos durante el release.`,
+        `Commitealos en una rama (o git stash) y volvé a correr ${commands.createVersion}, o corré ${commands.createVersion} --${CREATE_VERSION_FLAG.ignoreLocalChanges} para apartarlos durante el release.`,
       ],
     });
   }
@@ -313,14 +291,13 @@ function findBlockers(state, ignoreLocalChanges, commands) {
 }
 
 /**
- * Tells whether a `git status --porcelain` line only changes `CHANGELOG.md`: a rename from or to
- * another path also changes that path, so it is not a changelog-only change.
+ * Tells whether a `git status --porcelain` line is a change of `CHANGELOG.md`.
  *
  * @param {string} line - Porcelain line.
- * @returns {boolean} `true` when every path of the line is `CHANGELOG.md`.
+ * @returns {boolean} `true` when the line reports `CHANGELOG.md`.
  */
 function isChangelogChange(line) {
-  return listPorcelainPaths(line).every((changedPath) => changedPath === CHANGELOG_FILE);
+  return line.slice(PORCELAIN_STATUS_WIDTH) === CHANGELOG_FILE;
 }
 
 /**
@@ -333,6 +310,66 @@ function isChangelogChange(line) {
  */
 export function listLocalChangesToSetAside(state, mode) {
   return mode === RELEASE_MODE.newRelease ? state.workingTreeChanges.filter((line) => !isChangelogChange(line)) : state.workingTreeChanges;
+}
+
+/**
+ * Lists the paths of a `git status --porcelain` line: the path, or both the original and the new
+ * path of a rename or copy (`R  old.js -> new.js`), without the quotes Git adds to unusual names.
+ *
+ * @param {string} line - Porcelain line.
+ * @returns {string[]} Paths the line reports.
+ */
+function listPorcelainPaths(line) {
+  return line
+    .slice(PORCELAIN_STATUS_WIDTH)
+    .split(PORCELAIN_RENAME_SEPARATOR)
+    .map((changedPath) => changedPath.replace(/^"|"$/gu, ""));
+}
+
+/**
+ * Tells whether a `git status --porcelain` line touches code or data the loaded configuration may
+ * import (see {@link UNSETTABLE_ASIDE_EXTENSIONS}).
+ *
+ * @param {string} line - Porcelain line.
+ * @returns {boolean} `true` when any of its paths has one of those extensions.
+ */
+function isCodeChange(line) {
+  return listPorcelainPaths(line).some((changedPath) => UNSETTABLE_ASIDE_EXTENSIONS.some((extension) => changedPath.endsWith(extension)));
+}
+
+/**
+ * Blocks a runnable `--ignore-local-changes` plan whose changes to set aside include code or data
+ * (`.js`, `.mjs`, `.cjs`, `.ts`, `.json`): the configuration was loaded from the working tree before
+ * setting them aside and may depend on them, so the release would not run the committed code.
+ *
+ * @param {ReleasePlan} plan - Plan.
+ * @param {ReleaseState} state - Snapshot.
+ * @param {boolean} ignoreLocalChanges - Whether `--ignore-local-changes` was chosen.
+ * @param {ProjectCommands} commands - Project commands quoted by the hints.
+ * @returns {ReleasePlan} The same plan, or a blocked plan when a code change would be set aside.
+ */
+function refuseToSetAsideCodeChanges(plan, state, ignoreLocalChanges, commands) {
+  const codeChanges = ignoreLocalChanges && plan.steps.length > 0 ? listLocalChangesToSetAside(state, plan.mode).filter(isCodeChange) : [];
+
+  if (codeChanges.length === 0) {
+    return plan;
+  }
+
+  return {
+    mode: RELEASE_MODE.blocked,
+    steps: [],
+    blockers: [
+      {
+        title: `--${CREATE_VERSION_FLAG.ignoreLocalChanges} no aparta cambios de código ni de datos (${UNSETTABLE_ASIDE_EXTENSIONS.join(", ")})`,
+        details: [
+          ...codeChanges.slice(0, MAX_LISTED_ITEMS),
+          `La configuración ya se cargó con esos cambios y puede depender de ellos: commitealos en una rama o guardalos con git stash, y volvé a correr ${commands.createVersion}.`,
+        ],
+      },
+    ],
+    warnings: [],
+    pendingVersion: null,
+  };
 }
 
 /**
@@ -394,195 +431,37 @@ function requireCleanChangelog(plan, state, commands) {
 }
 
 /**
- * Tells whether a `git status --porcelain` line changes `beez-rp.config.js` or `beez-rp.config.mjs`,
- * including a rename from or to one of them.
+ * Blocks a resume plan while `beez-rp.config.js` or `beez-rp.config.mjs` has uncommitted changes:
+ * the run imports the configuration from the working tree, so resuming would check `versionFiles`
+ * (and run the hooks) with a configuration other than the one of the release commit.
  *
- * @param {string} line - Porcelain line.
- * @returns {boolean} `true` when any path of the line is a configuration file.
- */
-function isConfigChange(line) {
-  return listPorcelainPaths(line).some((changedPath) => CREATE_VERSION_CONFIG_FILES.includes(changedPath));
-}
-
-/**
- * Describes a file that differs from `HEAD`, for a blocker.
- *
- * @param {HeadFileDifference} fileDifference - File and how it differs.
- * @returns {string} Line such as `release/hooks.js (su contenido es distinto del de HEAD)`.
- */
-function describeHeadFileDifference({ file, difference }) {
-  return `${file} (${HEAD_FILE_DIFFERENCE_LABELS[difference]})`;
-}
-
-/**
- * Lists the lines that show the loaded configuration differs from the committed one:
- * `git status --porcelain` lines of the configuration files (which also cover a deleted or renamed
- * one) and every module of the loaded configuration (the file itself included) that differs from
- * `HEAD`, even when `git status` omits it because Git ignores it or hides its change with
- * `skip-worktree` or `assume-unchanged`. A module already named by a porcelain line is not repeated.
- *
- * @param {ReleaseState} state - Snapshot.
- * @returns {string[]} Lines to show, empty when the loaded configuration is the committed one.
- */
-function listConfigDifferences(state) {
-  const configChanges = state.workingTreeChanges.filter(isConfigChange);
-  const listedPaths = new Set(configChanges.flatMap(listPorcelainPaths));
-  const moduleDifferences = (state.uncommittedConfigModules ?? []).filter(({ file }) => !listedPaths.has(file)).map(describeHeadFileDifference);
-  return [...configChanges, ...moduleDifferences];
-}
-
-/**
- * Builds the blocker of a run whose configuration module graph could not be read: without it the
- * plan cannot tell whether the loaded configuration and its modules are the committed ones.
- *
- * @param {string} reason - Why the graph could not be read.
- * @param {ProjectCommands} commands - Project commands quoted by the hint.
- * @returns {ReleaseBlocker} Blocker.
- */
-function configModulesUnknownBlocker(reason, commands) {
-  return {
-    title: `No se pudo saber qué módulos carga ${CONFIG_FILES_LABEL}`,
-    details: [
-      `No se pudo registrar qué módulos cargó: ${reason}.`,
-      `Sin esa lista no se puede asegurar que la configuración y los módulos que carga sean los commiteados: corré ${commands.createVersion} con Node ${MODULE_HOOKS_MINIMUM_NODE_VERSION} o posterior (tiene module.registerHooks), o cargá la configuración con loadCreateVersionConfig antes de diagnosticar si usás collectReleaseState desde tu propio código.`,
-    ],
-  };
-}
-
-/**
- * Builds the blocker of `--ignore-local-changes` when the module trace was not started explicitly:
- * repository code imported before `loadCreateVersionConfig` registered the trace (and everything it
- * imports) is missing from the graph, so a local change in it would reach the release, from Node's
- * cache, after being set aside.
- *
- * @param {ProjectCommands} commands - Project commands quoted by the hint.
- * @returns {ReleaseBlocker} Blocker.
- */
-function lateConfigModuleTraceBlocker(commands) {
-  return {
-    title: "No se pueden apartar los cambios locales: el registro de módulos empezó tarde",
-    details: [
-      `beez-rp empezó a registrar los módulos que carga ${CONFIG_FILES_LABEL} recién al cargarla, así que no ve el código del repositorio que se importó antes; un cambio local en ese código llegaría al release aunque --${CREATE_VERSION_FLAG.ignoreLocalChanges} lo aparte.`,
-      `Corré ${commands.createVersion} --${CREATE_VERSION_FLAG.ignoreLocalChanges}, o, desde tu propio código, llamá a startTracingConfigModules() de beez-rp/module-trace antes de importar beez-rp/create-version o cualquier código del repositorio, y antes de llamar a runCreateVersion o loadCreateVersionConfig.`,
-    ],
-  };
-}
-
-/**
- * Blocks a runnable plan (new release or resume) while the loaded configuration is not the
- * committed one: a configuration file has uncommitted changes (also a deletion or a rename), or the
- * loaded file or any module it loads differs from `HEAD` (an ignored or untracked file, such as a
- * local `beez-rp.config.mjs` that shadows the committed `beez-rp.config.js` or a local override the
- * configuration imports, a symbolic link where `HEAD` has a regular file, or other content), or its
- * module graph could not be read. The run imports the
- * configuration and its modules from the working tree once, before `--ignore-local-changes` sets
- * them aside, and Node keeps them cached (hooks included, with every value they captured), so
- * the release would run with a configuration that is not the committed one: a local edit that drops
- * a `versionFiles` entry would bump without it while the release commit keeps declaring it, and
- * checks, preparation and publication would follow uncommitted instructions. When resuming, the
- * configuration of the pending release is the one committed in it.
- *
- * With `--ignore-local-changes` it also blocks when the module trace was not started explicitly
- * (see {@link lateConfigModuleTraceBlocker}).
- *
- * @param {ReleasePlan} plan - Plan.
+ * @param {ReleasePlan} plan - Resume plan (from `main` or from a detached release tag).
  * @param {ReleaseState} state - Snapshot.
  * @param {ProjectCommands} commands - Project commands quoted by the hints.
- * @param {boolean} ignoreLocalChanges - Whether `--ignore-local-changes` was chosen.
- * @returns {ReleasePlan} The same plan, or a blocked plan when the loaded configuration is not the
- *   committed one or its module graph could not be read (or, setting changes aside, may be incomplete).
+ * @returns {ReleasePlan} The same plan, or a blocked plan when the configuration file is dirty.
  */
-function requireCommittedConfig(plan, state, commands, ignoreLocalChanges) {
-  if (plan.steps.length === 0) {
+function requireCommittedConfig(plan, state, commands) {
+  const configChanges = state.workingTreeChanges.filter((line) => listPorcelainPaths(line).some((changedPath) => CREATE_VERSION_CONFIG_FILES.includes(changedPath)));
+
+  if (plan.mode !== RELEASE_MODE.resume || configChanges.length === 0) {
     return plan;
   }
 
-  if (state.configModules && !state.configModules.loaded) {
-    return { mode: RELEASE_MODE.blocked, steps: [], blockers: [configModulesUnknownBlocker(state.configModules.reason, commands)], warnings: [], pendingVersion: null };
-  }
-
-  if (ignoreLocalChanges && state.configModules && !state.configModules.startedExplicitly) {
-    return { mode: RELEASE_MODE.blocked, steps: [], blockers: [lateConfigModuleTraceBlocker(commands)], warnings: [], pendingVersion: null };
-  }
-
-  const configDifferences = listConfigDifferences(state);
-
-  if (configDifferences.length === 0) {
-    return plan;
-  }
-
-  const notCommittedModules = (state.uncommittedConfigModules ?? []).filter(({ difference }) => difference === HEAD_FILE_DIFFERENCE.notCommitted).map(({ file }) => file);
-  const shadowHint =
-    notCommittedModules.length > 0
-      ? [
-          `${notCommittedModules.join(", ")} no está commiteado y la configuración lo carga: borralo o renombralo para usar la configuración commiteada, o commitealo (git add -f si está ignorado) en una rama y llevalo a ${MAIN_BRANCH}.`,
-        ]
-      : [];
-  const filteredModules = (state.uncommittedConfigModules ?? []).filter(({ difference }) => difference === HEAD_FILE_DIFFERENCE.filtered).map(({ file }) => file);
-  const filterHint =
-    filteredModules.length > 0
-      ? [`Quitale el atributo filter a ${filteredModules.join(", ")} en .gitattributes (git check-attr filter -- <archivo> muestra cuál aplica): el release no carga módulos de la configuración que Git filtra.`]
-      : [];
-  const blocker =
-    plan.mode === RELEASE_MODE.resume
-      ? {
-          title: `La configuración tiene cambios sin commitear y el release ${plan.pendingVersion} ya está commiteado`,
-          details: [
-            ...configDifferences,
-            ...shadowHint,
-            ...filterHint,
-            `Retomar un release usa la configuración de su commit (versionFiles incluido, y los módulos que importa), y apartar los cambios no la recarga: descartalos (git restore) o guardalos (git stash) y volvé a correr ${commands.createVersion}.`,
-          ],
-        }
-      : {
-          title: "La configuración tiene cambios sin commitear",
-          details: [
-            ...configDifferences,
-            ...shadowHint,
-            ...filterHint,
-            `El release usa ${CONFIG_FILES_LABEL} y los módulos que importa tal como están en el working tree (versionFiles, checks, migrations, prepare y publish), y --${CREATE_VERSION_FLAG.ignoreLocalChanges} no los puede apartar porque ya están cargados: commitealos en una rama y llevalos a ${MAIN_BRANCH}, o descartá los cambios (git restore) o guardalos (git stash), y volvé a correr ${commands.createVersion}.`,
-          ],
-        };
-
-  return { mode: RELEASE_MODE.blocked, steps: [], blockers: [blocker], warnings: [], pendingVersion: null };
-}
-
-/**
- * Blocks a runnable plan while a tracked file has local changes that `git status` does not show,
- * because its index entry is marked `skip-worktree` or `assume-unchanged` (`git update-index`).
- * `git stash`, and so `--ignore-local-changes`, cannot set them aside either, yet the release
- * would use them: the configuration and the modules it loads are imported from the working tree,
- * and checks, preparation and publication run on it, while the release commit keeps the indexed
- * content. Blocking every hidden change, instead of guessing which ones reach the release, covers
- * the configuration, its modules and `versionFiles` alike. A marked file missing from the working
- * tree (such as one left out of a sparse checkout) blocks too: the published package would lack it.
- *
- * @param {ReleasePlan} plan - Plan.
- * @param {ReleaseState} state - Snapshot.
- * @param {ProjectCommands} commands - Project commands quoted by the hint.
- * @returns {ReleasePlan} The same plan, or a blocked plan when there are hidden local changes.
- */
-function requireVisibleLocalChanges(plan, state, commands) {
-  const hiddenChanges = state.hiddenChanges ?? [];
-
-  if (plan.steps.length === 0 || hiddenChanges.length === 0) {
-    return plan;
-  }
-
-  const sparseCheckoutHint = hiddenChanges.some(({ difference }) => difference === HEAD_FILE_DIFFERENCE.missingFromWorkingTree)
-    ? [`Si faltan por un sparse checkout, desactivalo (git sparse-checkout disable) para tener todos los archivos trackeados y volvé a correr ${commands.createVersion}.`]
-    : [];
-  const blocker = {
-    title: `Hay ${hiddenChanges.length} archivo(s) con cambios locales que git status no muestra`,
-    details: [
-      ...hiddenChanges.slice(0, MAX_LISTED_ITEMS).map(describeHeadFileDifference),
-      ...sparseCheckoutHint,
-      `Git los marca con skip-worktree o assume-unchanged (git ls-files -v los muestra con S o en minúscula), así que ni git status ni git stash (tampoco --${CREATE_VERSION_FLAG.ignoreLocalChanges}) los ven, pero el release usaría su contenido local mientras el commit de release guarda el de HEAD.`,
-      `Quitá la marca (git update-index --no-skip-worktree -- <archivo> y git update-index --no-assume-unchanged -- <archivo>, en dos comandos), commitealos en una rama o descartalos (git restore), y volvé a correr ${commands.createVersion}.`,
+  return {
+    mode: RELEASE_MODE.blocked,
+    steps: [],
+    blockers: [
+      {
+        title: `La configuración tiene cambios sin commitear y el release ${plan.pendingVersion} ya está commiteado`,
+        details: [
+          ...configChanges,
+          `Retomar un release usa la configuración de su commit (versionFiles incluido): descartá los cambios (git restore) o guardalos (git stash) y volvé a correr ${commands.createVersion}.`,
+        ],
+      },
     ],
+    warnings: [],
+    pendingVersion: null,
   };
-
-  return { mode: RELEASE_MODE.blocked, steps: [], blockers: [blocker], warnings: [], pendingVersion: null };
 }
 
 /**
@@ -905,9 +784,8 @@ function missingChecksBlocker(commands) {
  */
 export function buildReleasePlan(state, capabilities = DEFAULT_CAPABILITIES, planOptions = {}) {
   const commands = capabilities.commands ?? DEFAULT_PROJECT_COMMANDS;
-  // Hidden changes first: their hint (removing the index flag) is needed before any other fix works.
   const ignoreLocalChanges = planOptions.ignoreLocalChanges ?? false;
-  const plan = requireCommittedConfig(requireVisibleLocalChanges(planRelease(state, capabilities, planOptions), state, commands), state, commands, ignoreLocalChanges);
+  const plan = refuseToSetAsideCodeChanges(planRelease(state, capabilities, planOptions), state, ignoreLocalChanges, commands);
   return warnAboutSetAsideChanges(applyNpmAuth(plan, state.npmAuth, commands), state, ignoreLocalChanges);
 }
 
@@ -930,14 +808,14 @@ function planRelease(state, capabilities, { skipUnpublished = false, ignoreLocal
   const detachedVersion = findDetachedReleaseVersion(state);
 
   if (detachedVersion) {
-    const detachedPlan = planDetachedResume(detachedVersion, capabilities, state);
+    const detachedPlan = requireCommittedConfig(planDetachedResume(detachedVersion, capabilities, state), state, commands);
     return ignoreLocalChanges ? detachedPlan : requireCleanChangelog(detachedPlan, state, commands);
   }
 
   const resume = planResume(state, capabilities);
 
   if (resume) {
-    const resumePlan = checkUnpublishedBeforeResume(resume, state, skipUnpublished, commands);
+    const resumePlan = requireCommittedConfig(checkUnpublishedBeforeResume(resume, state, skipUnpublished, commands), state, commands);
     return ignoreLocalChanges ? resumePlan : requireCleanChangelog(resumePlan, state, commands);
   }
 

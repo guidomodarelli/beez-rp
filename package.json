@@ -11,7 +11,7 @@
   "type": "module",
   "sideEffects": false,
   "engines": {
-    "node": ">=22.15"
+    "node": ">=22"
   },
   "packageManager": "pnpm@12.6.0",
   "bin": {
@@ -61,10 +61,6 @@
     "./create-version": {
       "types": "./types/create-version/index.d.ts",
       "default": "./src/create-version/index.js"
-    },
-    "./module-trace": {
-      "types": "./types/create-version/module-trace-bootstrap.d.ts",
-      "default": "./src/create-version/module-trace-bootstrap.js"
     },
     "./constants": {
       "types": "./types/constants/index.d.ts",

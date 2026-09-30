@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -25,13 +25,12 @@ afterEach(() => {
 /**
  * @param {string[]} gitArguments - Git arguments.
  * @param {string} repositoryRoot - Repository.
- * @param {string} [input] - Standard input.
  * @returns {string} Stdout without the trailing newline.
  */
-function runGit(gitArguments, repositoryRoot, input) {
+function runGit(gitArguments, repositoryRoot) {
   const environment = { ...process.env };
   for (const variableName of GIT_HOOK_ENVIRONMENT_VARIABLES) delete environment[variableName];
-  const result = spawnSync("git", gitArguments, { cwd: repositoryRoot, encoding: "utf8", env: environment, input });
+  const result = spawnSync("git", gitArguments, { cwd: repositoryRoot, encoding: "utf8", env: environment });
 
   if (result.status !== 0) {
     throw new Error(`git ${gitArguments.join(" ")} failed: ${result.stderr}`);
@@ -122,7 +121,7 @@ describe("create-version local changes", () => {
       const reader = createGitReader(repositoryRoot);
       const before = snapshotLocalChanges(repositoryRoot, WITHOUT_CHANGELOG);
 
-      const setAside = await setAsideLocalChanges(reader, repositoryRoot, { keepChangelog: true });
+      const setAside = await setAsideLocalChanges(reader, { keepChangelog: true });
       expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe(" M CHANGELOG.md");
 
       commitRelease(repositoryRoot);
@@ -144,7 +143,7 @@ describe("create-version local changes", () => {
       const reader = createGitReader(repositoryRoot);
       const before = snapshotLocalChanges(repositoryRoot);
 
-      const setAside = await setAsideLocalChanges(reader, repositoryRoot, { keepChangelog: false });
+      const setAside = await setAsideLocalChanges(reader, { keepChangelog: false });
       expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe("");
 
       await expect(restoreLocalChanges(reader, repositoryRoot, setAside)).resolves.toEqual({ restored: true });
@@ -161,48 +160,13 @@ describe("create-version local changes", () => {
       runGit(["add", "package.json"], repositoryRoot);
       const reader = createGitReader(repositoryRoot);
 
-      const setAside = await setAsideLocalChanges(reader, repositoryRoot, { keepChangelog: true });
+      const setAside = await setAsideLocalChanges(reader, { keepChangelog: true });
       commitRelease(repositoryRoot);
 
       const restore = await restoreLocalChanges(reader, repositoryRoot, setAside);
       expect(restore).toEqual({ restored: false, reason: expect.stringContaining("stash@{0}") });
       expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe("");
       expect(runGit(["stash", "list", "--format=%H"], repositoryRoot)).toBe(setAside.sha);
-    },
-    GIT_FIXTURE_TEST_TIMEOUT_MS
-  );
-  it(
-    "should refuse to set aside a staged symbolic link, touching nothing",
-    async () => {
-      const repositoryRoot = createRepository();
-      writeFiles(repositoryRoot, { "notes.txt": "draft\n" });
-      // A staged link to app.js, without needing symbolic link privileges on the file system.
-      const linkTarget = runGit(["hash-object", "-w", "--stdin"], repositoryRoot, "app.js");
-      runGit(["update-index", "--add", "--cacheinfo", `120000,${linkTarget},settings.js`], repositoryRoot);
-      const before = snapshotLocalChanges(repositoryRoot);
-      const reader = createGitReader(repositoryRoot);
-
-      await expect(setAsideLocalChanges(reader, repositoryRoot, { keepChangelog: true })).rejects.toThrow("--ignore-local-changes no aparta cambios con enlaces simbólicos: settings.js.");
-      expect(snapshotLocalChanges(repositoryRoot)).toEqual(before);
-      expect(runGit(["stash", "list"], repositoryRoot)).toBe("");
-    },
-    GIT_FIXTURE_TEST_TIMEOUT_MS
-  );
-
-  it(
-    "should refuse to set aside an untracked link to a directory, touching nothing",
-    async () => {
-      const repositoryRoot = createRepository();
-      const linkedDirectory = mkdtempSync(path.join(os.tmpdir(), "beez-rp-local-changes-linked-"));
-      temporaryDirectories.push(linkedDirectory);
-      writeFiles(linkedDirectory, { "settings.js": "export const settings = {};\n" });
-      // A junction on Windows: it needs no symbolic link privilege and Node reports it as a link too.
-      symlinkSync(linkedDirectory, path.join(repositoryRoot, "config"), process.platform === "win32" ? "junction" : "dir");
-      const reader = createGitReader(repositoryRoot);
-
-      await expect(setAsideLocalChanges(reader, repositoryRoot, { keepChangelog: true })).rejects.toThrow("--ignore-local-changes no aparta cambios con enlaces simbólicos: config.");
-      expect(existsSync(path.join(repositoryRoot, "config", "settings.js"))).toBe(true);
-      expect(runGit(["stash", "list"], repositoryRoot)).toBe("");
     },
     GIT_FIXTURE_TEST_TIMEOUT_MS
   );

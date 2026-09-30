@@ -262,113 +262,15 @@ export const RECORD_SEPARATOR = "\x1e";
 /** Width of the `git status --porcelain` state columns before each path. */
 export const PORCELAIN_STATUS_WIDTH = 3;
 
-/** `git status --porcelain` state codes of an entry that also reports its source path (`R` renamed, `C` copied). */
-export const PORCELAIN_SOURCE_PATH_STATUS_CODES = Object.freeze(["R", "C"]);
-
-/** Separates the source path from the new path of a renamed or copied `git status --porcelain` entry. */
+/** Separator between the original and the new path of a renamed or copied `git status --porcelain` entry. */
 export const PORCELAIN_RENAME_SEPARATOR = " -> ";
 
-/** Width of the tag and the space `git ls-files -v` writes before each path. */
-export const LS_FILES_TAG_WIDTH = 2;
-
 /**
- * `git ls-files -v` tag of an index entry marked `skip-worktree`; an entry marked
- * `assume-unchanged` has its tag in lowercase instead. Git does not compare either with the
- * working tree, so `git status` and `git stash` miss their local changes.
+ * Extensions of the files `--ignore-local-changes` refuses to set aside: the configuration is
+ * loaded before the changes are set aside, and it (or a hook) may import code or data from them,
+ * so the release would run with content that is not the committed one.
  */
-export const LS_FILES_SKIP_WORKTREE_TAG = "S";
-
-/** Separates the mode, type and object fields from the path of a `git ls-tree` entry. */
-export const LS_TREE_ENTRY_PATH_SEPARATOR = "\t";
-
-/** Mode `git ls-tree` reports for a committed symbolic link, whose blob holds the link target. */
-export const GIT_SYMBOLIC_LINK_MODE = "120000";
-
-/**
- * Mode `git ls-tree` reports for a submodule (gitlink): its object is the commit the submodule must
- * have checked out, not a blob, so it is compared with the `HEAD` of the submodule checkout.
- */
-export const GIT_SUBMODULE_MODE = "160000";
-
-/**
- * Entry an initialized submodule checkout has at its root (a `.git` file or directory). Without it
- * the submodule directory belongs to the superproject, and `git -C` would read the superproject.
- */
-export const GIT_METADATA_ENTRY_NAME = ".git";
-
-/**
- * Git attribute naming the clean/smudge filter driver of a path (`.gitattributes`): a clean filter
- * can rewrite what Git stores, so the committed blob is no longer the working-tree bytes.
- */
-export const GIT_FILTER_ATTRIBUTE = "filter";
-
-/** Values `git check-attr` reports for an attribute that does not apply to a path. */
-export const GIT_INACTIVE_ATTRIBUTE_VALUES = Object.freeze(["unspecified", "unset"]);
-
-/**
- * Pathspecs (`attr:` magic) that select the files whose `filter` attribute is inactive: unspecified
- * (`!filter`) or unset (`-filter`), the same states as {@link GIT_INACTIVE_ATTRIBUTE_VALUES}.
- */
-export const UNFILTERED_FILE_PATHSPECS = Object.freeze([`:(attr:!${GIT_FILTER_ATTRIBUTE})`, `:(attr:-${GIT_FILTER_ATTRIBUTE})`]);
-
-/** Fields `git check-attr -z` writes per path and attribute: path, attribute and value. */
-export const CHECK_ATTR_FIELDS_PER_ENTRY = 3;
-
-/**
- * Ways a working-tree file that the release loads or uses can differ from `HEAD`, the commit the
- * release is built on:
- *
- * - `notCommitted`: `HEAD` has no such file (it is untracked, ignored or only staged).
- * - `typeChanged`: the working-tree entry is not the same kind of file as in `HEAD` (for example,
- *   a symbolic link or a directory where `HEAD` has a regular file).
- * - `contentChanged`: same kind of file, different content.
- * - `executableBitChanged`: same content, but the file is executable where `HEAD` has it as plain,
- *   or the other way around (only where Git tracks the executable bit, `core.fileMode`).
- * - `outsideRepository`: the file is outside the repository (for example, reached through a
- *   directory of the repository replaced by a symbolic link), so `HEAD` cannot vouch for it.
- * - `filtered`: Git applies a `filter` attribute to the file, so comparing it with `HEAD` goes
- *   through the filter and cannot prove that the bytes Node loaded are the committed ones.
- * - `implicitPath`: a module imported without its full relative path, so the file Node picked
- *   cannot be checked.
- * - `missingFromWorkingTree`: a tracked file hidden from `git status` (`skip-worktree`, such as
- *   an entry left out of a sparse checkout, or `assume-unchanged`) is missing from the working
- *   tree, so checks and `npm publish` would work without it.
- */
-export const HEAD_FILE_DIFFERENCE = Object.freeze({
-  missingFromWorkingTree: "missingFromWorkingTree",
-  notCommitted: "notCommitted",
-  typeChanged: "typeChanged",
-  contentChanged: "contentChanged",
-  executableBitChanged: "executableBitChanged",
-  outsideRepository: "outsideRepository",
-  filtered: "filtered",
-  implicitPath: "implicitPath",
-});
-
-/** URL scheme of the modules Node loads from a file, the only ones the configuration module graph lists. */
-export const FILE_URL_SCHEME = "file:";
-
-/** Directory of installed dependencies: the configuration module graph never lists files inside it. */
-export const NODE_MODULES_DIRECTORY = "node_modules";
-
-/** Delimiter of a path that Git quotes as a C string literal (special characters, or spaces in a rename). */
-export const GIT_QUOTED_PATH_DELIMITER = '"';
-
-/** Escape character inside a path quoted by Git. */
-export const GIT_QUOTED_PATH_ESCAPE = "\\";
-
-/**
- * Characters Git writes after {@link GIT_QUOTED_PATH_ESCAPE}, with the character each one stands for.
- *
- * @type {Readonly<Record<string, string>>}
- */
-export const GIT_QUOTED_PATH_ESCAPES = Object.freeze({ a: "\x07", b: "\b", t: "\t", n: "\n", v: "\v", f: "\f", r: "\r", '"': '"', "\\": "\\" });
-
-/** Octal byte escape (`\303`) Git writes inside a quoted path for every non-ASCII byte. */
-export const GIT_QUOTED_PATH_OCTAL_BYTE_PATTERN = /^[0-7]{3}/u;
-
-/** Radix of {@link GIT_QUOTED_PATH_OCTAL_BYTE_PATTERN}. */
-export const OCTAL_RADIX = 8;
+export const UNSETTABLE_ASIDE_EXTENSIONS = Object.freeze([".js", ".mjs", ".cjs", ".ts", ".json"]);
 
 /** Maximum commits listed in a box. */
 export const MAX_LISTED_COMMITS = 12;
@@ -560,32 +462,3 @@ export const MAIN_SYNCED_RESTART_MESSAGE = buildMainSyncedRestartMessage(DEFAULT
 
 /** Exit code of a release stopped by a failed step, invalid arguments or configuration. */
 export const FAILURE_EXIT_CODE = 1;
-
-/**
- * Modes `git ls-tree` reports for a regular file (plain or executable). Any other mode of a
- * `versionFiles` entry in the release commit (`120000` symbolic link, `160000` submodule) means the
- * commit does not carry the file with the version itself.
- */
-export const GIT_REGULAR_FILE_MODES = Object.freeze(["100644", "100755"]);
-
-/** Mode `git ls-tree` reports for an executable regular file. */
-export const GIT_EXECUTABLE_FILE_MODE = "100755";
-
-/**
- * Git setting that says whether the working tree keeps the executable bit of files. Git sets it to
- * `false` where the file system cannot (typically Windows), and then ignores that bit.
- */
-export const GIT_FILE_MODE_SETTING = "core.fileMode";
-
-/**
- * Owner execute permission bit (`S_IXUSR`) of a working-tree file: the only bit Git reads to record
- * a file as executable (`100755`), so `0654` is still a plain file for Git.
- */
-export const OWNER_EXECUTE_PERMISSION_BIT = 0o100;
-
-/**
- * First Node version with `module.registerHooks`, the synchronous module hook that lists the modules
- * `beez-rp.config.(m)js` loads (ESM and CommonJS alike). Older versions cannot tell whether the
- * loaded configuration is the committed one, so the plan blocks every release.
- */
-export const MODULE_HOOKS_MINIMUM_NODE_VERSION = "22.15.0";

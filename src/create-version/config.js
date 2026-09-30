@@ -27,7 +27,6 @@ import {
 import { RELEASE_COMMIT_BUILT_IN_FILES } from "../constants/version-files.js";
 import { RELEASE_TYPE_ORDER } from "../constants/versions.js";
 import { DEFAULT_PROJECT_COMMANDS, describeProjectCommands, detectPackageManager } from "../package-manager.js";
-import { ensureTracingConfigModules } from "./config-modules.js";
 
 /**
  * @typedef {import("./process.js").GitReader} GitReader
@@ -67,8 +66,8 @@ import { ensureTracingConfigModules } from "./config-modules.js";
  *   lockfile) when `package.json` declares a `ci` script; `false` skips the checks on purpose.
  *   `versionFiles` lists files (relative to the root) whose marked lines get the new version in the
  *   release commit: `beez-rp-version` / `x-release-please-version` lines and
- *   `beez-rp-start-version`…`beez-rp-end` blocks. Each entry must be a file tracked by Git, written
- *   with `/` or `\` separators.
+ *   `beez-rp-start-version`…`beez-rp-end` blocks. Entries may use `/` or `\` and are resolved to the
+ *   `/`-separated form (`.\src\cli.js` → `src/cli.js`); each must be a file tracked by Git.
  * @typedef {{
  *   projectName: string | null,
  *   changelog: { audience: string, language: "es" | "en" },
@@ -86,9 +85,7 @@ import { ensureTracingConfigModules } from "./config-modules.js";
  * }} ResolvedCreateVersionConfig
  *   `checks` is empty when they are skipped on purpose and `null` when none are configured nor
  *   found, which blocks a new release. `commands` are the project's package manager commands, used
- *   by the default checks and by every "run it again" hint. `versionFiles` holds every entry in
- *   `/`-separated form without `./` segments (`.\src\cli.js` → `src/cli.js`), the form the file
- *   system, Git and the messages use.
+ *   by the default checks and by every "run it again" hint.
  * @typedef {{ packageScripts?: Record<string, unknown>, commands?: ProjectCommands }} ConfigResolutionContext
  */
 
@@ -246,7 +243,8 @@ export function resolveCreateVersionConfig(rawConfig, { packageScripts = {}, com
   if (!isStringList(configuredVersionFiles) || configuredVersionFiles.some((filePath) => !isPathInsideRoot(filePath))) {
     throw invalidField("versionFiles", "a list of file paths relative to the project root, inside it");
   }
-  const builtInVersionFile = configuredVersionFiles.find(isReleaseCommitBuiltInFile);
+  const versionFiles = configuredVersionFiles.map(toSlashSeparatedPath);
+  const builtInVersionFile = versionFiles.find((filePath) => RELEASE_COMMIT_BUILT_IN_FILES.includes(filePath));
   if (builtInVersionFile !== undefined) {
     throw invalidField(
       "versionFiles",
@@ -266,7 +264,7 @@ export function resolveCreateVersionConfig(rawConfig, { packageScripts = {}, com
     publish: /** @type {"npm" | ReleaseHook | null} */ (publish),
     artifact: /** @type {string | null} */ (artifact),
     summary,
-    versionFiles: configuredVersionFiles.map(toSlashSeparatedPath),
+    versionFiles,
     commands,
   };
 }
@@ -284,65 +282,34 @@ function isPathInsideRoot(filePath) {
 
 /**
  * Converts a configured path, written with `/` or `\` separators on any platform, to the
- * `/`-separated form without `./` segments, so the file system (where POSIX would read a `\` as part
- * of the name), Git and the messages all name the same file.
+ * `/`-separated form without `./` segments nor a trailing `/`: the form the file system, Git and
+ * the messages use.
  *
  * @param {string} filePath - Configured path, already known to stay inside the root.
  * @returns {string} Path relative to the root with `/` separators, such as `src/cli.js`.
  */
 function toSlashSeparatedPath(filePath) {
-  return path.posix.normalize(filePath.replaceAll("\\", "/"));
-}
-
-/**
- * Tells whether a configured path names, under any separator spelling (`./CHANGELOG.md`,
- * `.\package.json`), a file the release commit already writes. Letter case is compared exactly:
- * on a case-sensitive file system `Package.json` is another file, and the release checks on disk
- * whether an entry is the same file as `package.json` or `CHANGELOG.md` under another spelling.
- *
- * @param {string} filePath - Configured path, already known to stay inside the root.
- * @returns {boolean} Whether it is `package.json` or `CHANGELOG.md` at the root.
- */
-function isReleaseCommitBuiltInFile(filePath) {
-  const normalizedPath = toSlashSeparatedPath(filePath).replace(/\/+$/u, "");
-  return RELEASE_COMMIT_BUILT_IN_FILES.includes(normalizedPath);
-}
-
-/**
- * Finds the configuration file `create-version` loads: the first of
- * {@link CREATE_VERSION_CONFIG_FILES} present in the working tree, whether Git tracks it or not.
- *
- * @param {string} repositoryRoot - Repository root.
- * @returns {string | null} File name relative to the root, or `null` when none exists.
- */
-export function findCreateVersionConfigFile(repositoryRoot) {
-  return CREATE_VERSION_CONFIG_FILES.find((fileName) => existsSync(path.join(repositoryRoot, fileName))) ?? null;
+  return path.posix.normalize(filePath.replaceAll("\\", "/")).replace(/\/+$/u, "");
 }
 
 /**
  * Imports `beez-rp.config.mjs` or `beez-rp.config.js` from the repository root and validates it.
  * It is imported once per process: after syncing `main` the command stops and asks to run it
- * again, so a new process imports the updated file and everything it imports. The module trace of
- * `config-modules.js` starts first (once per process) when nobody started it, so the diagnosis can
- * compare every module the configuration loads with `HEAD`; custom tooling that sets local changes
- * aside must start it earlier with `startTracingConfigModules` (`beez-rp/module-trace`), before importing
- * this module or repository code.
+ * again, so a new process imports the updated file and everything it imports.
  *
  * @param {string} repositoryRoot - Repository root.
  * @returns {Promise<ResolvedCreateVersionConfig>} Resolved configuration.
  * @throws {Error} When the file is missing, fails to load or is invalid.
  */
 export async function loadCreateVersionConfig(repositoryRoot) {
-  const configFile = findCreateVersionConfigFile(repositoryRoot);
+  const configPath = CREATE_VERSION_CONFIG_FILES.map((fileName) => path.join(repositoryRoot, fileName)).find((candidate) => existsSync(candidate));
 
-  if (!configFile) {
+  if (!configPath) {
     throw new Error(
       `beez-rp create-version: ${CREATE_VERSION_CONFIG_FILES.join(" or ")} not found in ${repositoryRoot}; create it with at least changelog.audience`
     );
   }
 
-  const configPath = path.join(repositoryRoot, configFile);
-  ensureTracingConfigModules();
   let module;
   try {
     module = await import(pathToFileURL(configPath).href);

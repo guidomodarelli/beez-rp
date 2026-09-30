@@ -13,21 +13,14 @@
  * - `beez-rp guard-publish` is the `prepublishOnly` guard: it exits with `1`
  *   and explains why when pnpm, yarn or bun publishes, and with `0` otherwise.
  *
- * The module trace of `create-version` starts before any other module loads: the only static import
- * is `module-trace-bootstrap.js`, which imports nothing but Node built-ins, and every other module
- * (constants included) is imported afterwards. A module Node resolved before the trace started never
- * shows up in it, nor do its imports, and when beez-rp releases its own checkout those modules are
- * part of the release. The trace starts for every command: it only records import edges.
- *
  * @module beez-rp-cli
  */
 
-import { startTracingConfigModules } from "../src/create-version/module-trace-bootstrap.js";
-
-startTracingConfigModules();
-
-const { BUILD_DECISION, DECISION_EXIT_CODE, GATE_FAILURE_EXIT_CODE } = await import("../src/constants/build-gate.js");
-const { CLI_COMMAND } = await import("../src/constants/cli.js");
+import { decideBuildForCheckout } from "../src/build-gate.js";
+import { BUILD_DECISION, DECISION_EXIT_CODE, GATE_FAILURE_EXIT_CODE } from "../src/constants/build-gate.js";
+import { CLI_COMMAND } from "../src/constants/cli.js";
+import { runCreateVersion } from "../src/create-version/run.js";
+import { decidePublishGuardForEnvironment } from "../src/guard-publish.js";
 
 /** Usage printed for unknown commands. */
 const USAGE = `Usage: beez-rp ${CLI_COMMAND.ignoreBuild} | beez-rp ${CLI_COMMAND.createVersion} [options] | beez-rp ${CLI_COMMAND.guardPublish}`;
@@ -35,17 +28,14 @@ const USAGE = `Usage: beez-rp ${CLI_COMMAND.ignoreBuild} | beez-rp ${CLI_COMMAND
 const [command, ...commandArguments] = process.argv.slice(2);
 
 if (command === CLI_COMMAND.createVersion) {
-  const { runCreateVersion } = await import("../src/create-version/run.js");
   process.exitCode = await runCreateVersion({ repositoryRoot: process.cwd(), argv: commandArguments });
 } else if (command === CLI_COMMAND.guardPublish) {
-  const { decidePublishGuardForEnvironment } = await import("../src/guard-publish.js");
   const decision = decidePublishGuardForEnvironment();
   if (decision.message) {
     console.error(decision.message);
   }
   process.exitCode = decision.exitCode;
 } else if (command === CLI_COMMAND.ignoreBuild) {
-  const { decideBuildForCheckout } = await import("../src/build-gate.js");
   try {
     const decision = decideBuildForCheckout(process.cwd());
     console.log(decision.reason);
