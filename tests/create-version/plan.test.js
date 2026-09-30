@@ -242,6 +242,25 @@ describe("create-version plan", () => {
     expect(newRelease.blockers.map((blocker) => blocker.title)).toEqual(["La configuración tiene cambios sin commitear"]);
   });
 
+  it("should block a new release and a resume while the loaded configuration is an ignored file that git status does not list", () => {
+    const npm = { status: NPM_LOOKUP_STATUS.ok, publishedVersions: ["0.1.0"], reason: null };
+    const resume = buildReleasePlan(createMainState({ headVersion: "0.2.0", headSubject: "0.2.0", npm, untrackedConfigFile: "beez-rp.config.mjs" }), NPM_PACKAGE);
+    const newRelease = buildReleasePlan(createMainState({ untrackedConfigFile: "beez-rp.config.mjs" }), DEPLOYED_APP, { ignoreLocalChanges: true });
+
+    for (const plan of [resume, newRelease]) {
+      expect(plan.mode).toBe(RELEASE_MODE.blocked);
+      expect(plan.steps).toEqual([]);
+      expect(plan.blockers[0].details[0]).toBe("!! beez-rp.config.mjs");
+      expect(plan.blockers[0].details[1]).toContain("beez-rp.config.mjs no está commiteado");
+    }
+  });
+
+  it("should list an untracked configuration once when git status already shows it", () => {
+    const plan = buildReleasePlan(createMainState({ workingTreeChanges: ["?? beez-rp.config.mjs"], untrackedConfigFile: "beez-rp.config.mjs" }), DEPLOYED_APP, { ignoreLocalChanges: true });
+
+    expect(plan.blockers[0].details.filter((detail) => detail.endsWith(" beez-rp.config.mjs"))).toEqual(["?? beez-rp.config.mjs"]);
+  });
+
   it("should not take a rename of CHANGELOG.md for a changelog-only change, because it also changes another path", () => {
     const plan = buildReleasePlan(createMainState({ workingTreeChanges: ["R  CHANGELOG.md -> docs/CHANGELOG.md"] }), DEPLOYED_APP);
 

@@ -268,6 +268,9 @@ export const PORCELAIN_SOURCE_PATH_STATUS_CODES = Object.freeze(["R", "C"]);
 /** Separates the source path from the new path of a renamed or copied `git status --porcelain` entry. */
 export const PORCELAIN_RENAME_SEPARATOR = " -> ";
 
+/** State columns `git status --porcelain --ignored` writes before an ignored path. */
+export const IGNORED_PORCELAIN_PREFIX = "!! ";
+
 /** Delimiter of a path that Git quotes as a C string literal (special characters, or spaces in a rename). */
 export const GIT_QUOTED_PATH_DELIMITER = '"';
 
@@ -484,3 +487,21 @@ export const FAILURE_EXIT_CODE = 1;
  * commit does not carry the file with the version itself.
  */
 export const GIT_REGULAR_FILE_MODES = Object.freeze(["100644", "100755"]);
+
+/**
+ * Argument a shell prints in a copyable command without quotes: letters, digits, `_`, `.`, `/` and
+ * `-` mean nothing to POSIX shells, cmd.exe nor PowerShell.
+ */
+export const SHELL_SAFE_ARGUMENT_PATTERN = /^[\w./-]+$/u;
+
+/** Quote that makes a POSIX shell read everything up to the next one literally. */
+export const POSIX_SHELL_QUOTE = "'";
+
+/** Closes the quoted text, adds an escaped `'` and reopens it: a POSIX single-quoted string cannot contain `'`. */
+export const POSIX_ESCAPED_SHELL_QUOTE = "'\\''";
+
+/** Quote cmd.exe and PowerShell both read as the delimiter of one argument with spaces or metacharacters. */
+export const WINDOWS_SHELL_QUOTE = '"';
+
+/** Platform whose shells (cmd.exe, PowerShell) use {@link WINDOWS_SHELL_QUOTE}. */
+export const WINDOWS_PLATFORM = "win32";

@@ -24,6 +24,7 @@ import {
   CREATE_VERSION_CONFIG_FILES,
   CREATE_VERSION_FLAG,
   DEFAULT_CHECKS_SCRIPT,
+  IGNORED_PORCELAIN_PREFIX,
   MAIN_BRANCH,
   MAX_LISTED_ITEMS,
   MIGRATION_STATUS,
@@ -56,6 +57,7 @@ const CONFIG_FILES_LABEL = CREATE_VERSION_CONFIG_FILES.join(" o ");
  * @typedef {{
  *   currentBranch: string | null,
  *   workingTreeChanges: string[],
+ *   untrackedConfigFile?: string | null,
  *   branch?: FeatureBranchSnapshot | null,
  *   pullRequest?: PullRequestSnapshot | null,
  *   githubError?: string | null,
@@ -386,39 +388,65 @@ function isConfigChange(line) {
 }
 
 /**
- * Blocks a runnable plan (new release or resume) while the configuration file has uncommitted
- * changes. The run imports the configuration from the working tree once, before
- * `--ignore-local-changes` sets it aside, so the release would run with a configuration that is
- * not the committed one: a local edit that drops a `versionFiles` entry would bump without it
- * while the release commit keeps declaring it, and checks, preparation and publication would
- * follow uncommitted instructions. When resuming, the configuration of the pending release is the
- * one committed in it.
+ * Lists the lines that show the loaded configuration file differs from the committed one: its
+ * uncommitted changes (`git status --porcelain` lines) and, when the loaded file is not tracked but
+ * `git status` omits it because Git ignores it, a `!! <file>` line (the notation of
+ * `git status --porcelain --ignored`), since it shadows the committed configuration.
+ *
+ * @param {ReleaseState} state - Snapshot.
+ * @returns {string[]} Lines to show, empty when the loaded configuration is the committed one.
+ */
+function listConfigDifferences(state) {
+  const configChanges = state.workingTreeChanges.filter(isConfigChange);
+  const untrackedConfigFile = state.untrackedConfigFile ?? null;
+  const listedByStatus = configChanges.some((line) => listPorcelainPaths(line).includes(untrackedConfigFile ?? ""));
+
+  return untrackedConfigFile && !listedByStatus ? [...configChanges, `${IGNORED_PORCELAIN_PREFIX}${untrackedConfigFile}`] : configChanges;
+}
+
+/**
+ * Blocks a runnable plan (new release or resume) while the loaded configuration file is not the
+ * committed one: it has uncommitted changes, or it is an ignored file that Git never tracked (such
+ * as a local `beez-rp.config.mjs` that shadows the committed `beez-rp.config.js`). The run imports
+ * the configuration from the working tree once, before `--ignore-local-changes` sets it aside, so
+ * the release would run with a configuration that is not the committed one: a local edit that drops
+ * a `versionFiles` entry would bump without it while the release commit keeps declaring it, and
+ * checks, preparation and publication would follow uncommitted instructions. When resuming, the
+ * configuration of the pending release is the one committed in it.
  *
  * @param {ReleasePlan} plan - Plan.
  * @param {ReleaseState} state - Snapshot.
  * @param {ProjectCommands} commands - Project commands quoted by the hints.
- * @returns {ReleasePlan} The same plan, or a blocked plan when the configuration file is dirty.
+ * @returns {ReleasePlan} The same plan, or a blocked plan when the loaded configuration is not the committed one.
  */
 function requireCommittedConfig(plan, state, commands) {
-  const configChanges = state.workingTreeChanges.filter(isConfigChange);
+  const configDifferences = listConfigDifferences(state);
 
-  if (plan.steps.length === 0 || configChanges.length === 0) {
+  if (plan.steps.length === 0 || configDifferences.length === 0) {
     return plan;
   }
 
+  const untrackedConfigFile = state.untrackedConfigFile ?? null;
+  const shadowHint = untrackedConfigFile
+    ? [
+        `${untrackedConfigFile} no está commiteado (Git lo ignora o nunca se agregó) y es el archivo de configuración que se carga: borralo o renombralo para usar la configuración commiteada, o commitealo (git add -f si está ignorado) en una rama y llevalo a ${MAIN_BRANCH}.`,
+      ]
+    : [];
   const blocker =
     plan.mode === RELEASE_MODE.resume
       ? {
           title: `La configuración tiene cambios sin commitear y el release ${plan.pendingVersion} ya está commiteado`,
           details: [
-            ...configChanges,
+            ...configDifferences,
+            ...shadowHint,
             `Retomar un release usa la configuración de su commit (versionFiles incluido), y apartar los cambios no la recarga: descartalos (git restore) o guardalos (git stash) y volvé a correr ${commands.createVersion}.`,
           ],
         }
       : {
           title: "La configuración tiene cambios sin commitear",
           details: [
-            ...configChanges,
+            ...configDifferences,
+            ...shadowHint,
             `El release usa ${CONFIG_FILES_LABEL} tal como está en el working tree (versionFiles, checks, prepare y publish), y --${CREATE_VERSION_FLAG.ignoreLocalChanges} no lo puede apartar porque ya está cargado: commitealo en una rama y llevalo a ${MAIN_BRANCH}, o descartá los cambios (git restore) o guardalos (git stash), y volvé a correr ${commands.createVersion}.`,
           ],
         };

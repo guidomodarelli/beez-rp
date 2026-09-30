@@ -18,6 +18,7 @@ import path from "node:path";
 
 import { readUnreleased } from "../changelog.js";
 import { CHANGELOG_FILE } from "../constants/changelog.js";
+import { GIT_LITERAL_PATHSPEC_PREFIX } from "../constants/version-files.js";
 import {
   MAIN_BRANCH,
   MIGRATION_STATUS,
@@ -32,6 +33,7 @@ import {
   VERSION_FIELD_CHANGE_PATTERN,
 } from "../constants/create-version.js";
 import { toReleaseTag } from "../versions.js";
+import { findCreateVersionConfigFile } from "./config.js";
 import { checkNpmPublishAccess, lookupPublishedVersions, resolvePublishRegistry } from "./npm.js";
 import { createGitReader, listCommits, readPackageVersionAt, runCaptured } from "./process.js";
 
@@ -264,6 +266,27 @@ function confirmFirstPublication(npmAuth, npm) {
 }
 
 /**
+ * Finds the configuration file the run loads when Git does not track it: an ignored
+ * `beez-rp.config.mjs` shadows a committed `beez-rp.config.js` without showing up in
+ * `git status --porcelain`, so the release would follow instructions that are not committed.
+ *
+ * @param {GitReader} reader - Git reader.
+ * @param {string} repositoryRoot - Repository root.
+ * @returns {Promise<string | null>} Name of the loaded configuration file when it is not in the
+ *   Git index, or `null` when it is tracked or there is none.
+ */
+async function findUntrackedConfigFile(reader, repositoryRoot) {
+  const configFile = findCreateVersionConfigFile(repositoryRoot);
+
+  if (!configFile) {
+    return null;
+  }
+
+  const trackedListing = await reader.git(["ls-files", "--", `${GIT_LITERAL_PATHSPEC_PREFIX}${configFile}`]);
+  return trackedListing === "" ? configFile : null;
+}
+
+/**
  * Gathers the complete release snapshot.
  *
  * @param {{
@@ -298,6 +321,7 @@ export async function collectReleaseState({
   const currentBranch = await reader.tryGit(["symbolic-ref", "--quiet", "--short", "HEAD"]);
   const statusOutput = await reader.git(["status", "--porcelain"]);
   const workingTreeChanges = statusOutput.split("\n").map((line) => line.trimEnd()).filter(Boolean);
+  const untrackedConfigFile = await findUntrackedConfigFile(reader, repositoryRoot);
   const localMainExists = (await reader.tryGit(["rev-parse", "--verify", "--quiet", MAIN_BRANCH])) !== null;
   const remoteMainExists = (await reader.tryGit(["rev-parse", "--verify", "--quiet", REMOTE_MAIN_REF])) !== null;
   const aheadCommits = localMainExists && remoteMainExists ? await listCommits(reader, `${REMOTE_MAIN_REF}..${MAIN_BRANCH}`) : [];
@@ -346,6 +370,7 @@ export async function collectReleaseState({
     packageName: manifest.name,
     currentBranch,
     workingTreeChanges,
+    untrackedConfigFile,
     branch,
     pullRequest,
     githubError,

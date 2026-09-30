@@ -94,6 +94,7 @@ import { restoreLocalChanges, setAsideLocalChanges } from "./local-changes.js";
 import { describeProjectCommands, detectPackageManager } from "../package-manager.js";
 import { buildReleasePlan, buildReleaseUsage, listLocalChangesToSetAside, parseReleaseArguments } from "./plan.js";
 import { createGitReader, listCommits, runCommandLine, runInherited } from "./process.js";
+import { joinShellArguments } from "./shell-arguments.js";
 import { collectReleaseState } from "./state.js";
 
 /**
@@ -782,7 +783,7 @@ function rewriteMarkedVersions(context, filePath, content, version, untouchedNot
  *
  * @param {ReleaseContext} context - Release context.
  * @param {string} version - Version being released.
- * @returns {Promise<{ filePath: string, content: string }[]>} Files to write, relative to the root.
+ * @returns {Promise<{ filePath: string, originalContent: string, content: string }[]>} Files to write, relative to the root, with their content before the release.
  * @throws {ReleaseStepError} When a file is missing, goes through a symbolic link, is not tracked by
  *   Git, has block markers paired wrongly or none of its lines is marked.
  */
@@ -797,10 +798,63 @@ async function prepareVersionFileUpdates(context, version) {
 
   await requireTrackedVersionFiles(context);
 
-  return context.config.versionFiles.map((filePath) => ({
-    filePath,
-    content: rewriteMarkedVersions(context, filePath, readFileSync(path.join(context.repositoryRoot, filePath), "utf8"), version, "no se tocó la versión"),
-  }));
+  return context.config.versionFiles.map((filePath) => {
+    const originalContent = readFileSync(path.join(context.repositoryRoot, filePath), "utf8");
+    return { filePath, originalContent, content: rewriteMarkedVersions(context, filePath, originalContent, version, "no se tocó la versión") };
+  });
+}
+
+/**
+ * Writes the files of the release commit, restoring every one of them to its original content when
+ * any write fails (a read-only file, a denying ACL, a full disk), so a failed bump never leaves
+ * `package.json`, `CHANGELOG.md` or a `versionFiles` entry half rewritten.
+ *
+ * @param {ReleaseContext} context - Release context.
+ * @param {{ filePath: string, originalContent: string, content: string }[]} fileUpdates - Files relative to the root, in writing order.
+ * @returns {void}
+ * @throws {ReleaseStepError} When a write fails, after restoring the files; the message also lists
+ *   the files that could not be restored.
+ */
+function writeReleaseFiles(context, fileUpdates) {
+  /** @type {{ filePath: string, originalContent: string }[]} */
+  const touchedFiles = [];
+
+  try {
+    for (const { filePath, originalContent, content } of fileUpdates) {
+      touchedFiles.push({ filePath, originalContent });
+      writeFileSync(path.join(context.repositoryRoot, filePath), content);
+    }
+  } catch (error) {
+    const failedPath = touchedFiles.at(-1)?.filePath ?? "";
+    const unrestoredPaths = touchedFiles.filter(({ filePath, originalContent }) => !restoreFileContent(path.join(context.repositoryRoot, filePath), originalContent)).map(({ filePath }) => filePath);
+    const restoreNote =
+      unrestoredPaths.length === 0
+        ? "se restauraron package.json, CHANGELOG.md y versionFiles, así que no se tocó la versión"
+        : `no se pudieron restaurar ${unrestoredPaths.join(", ")}: recuperalos con git restore antes de reintentar`;
+    throw new ReleaseStepError(
+      `No se pudo escribir ${failedPath} para el release (${error instanceof Error ? error.message : String(error)}).`,
+      `Revisá que el archivo se pueda escribir (permisos, atributo de solo lectura) y volvé a correr ${context.commands.createVersion}; ${restoreNote}.`,
+      { cause: error }
+    );
+  }
+}
+
+/**
+ * Writes back the original content of a release file after a failed write.
+ *
+ * @param {string} absolutePath - File to restore.
+ * @param {string} originalContent - Content before the release.
+ * @returns {boolean} Whether the file holds its original content again.
+ */
+function restoreFileContent(absolutePath, originalContent) {
+  try {
+    if (readFileSync(absolutePath, "utf8") !== originalContent) {
+      writeFileSync(absolutePath, originalContent);
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -833,6 +887,32 @@ async function verifyReleasedVersionFiles(context, version) {
         `Actualizá sus líneas marcadas a ${version} dentro del commit de release (git commit --amend, y recreá el tag ${toReleaseTag(version)} si ya existe en local) y volvé a correr ${context.commands.createVersion}; no se subió ni publicó nada.`
       );
     }
+  }
+}
+
+/**
+ * Checks, right after the release commit and before its tag, that Git stored the prepared
+ * versions: a `.gitattributes` clean filter may change or drop a marked version while staging, and
+ * the commit would carry the previous one. The commit stays local and untagged, so the next run
+ * resumes it and checks it again before pushing.
+ *
+ * @param {VersionFilesContext} context - Release context.
+ * @param {string} version - Version just committed.
+ * @returns {Promise<void>}
+ * @throws {ReleaseStepError} When a `versionFiles` entry of the new commit does not carry `version`.
+ */
+async function verifyCommittedVersionFiles(context, version) {
+  try {
+    await verifyReleasedVersionFiles(context, version);
+  } catch (error) {
+    if (!(error instanceof ReleaseStepError)) {
+      throw error;
+    }
+    throw new ReleaseStepError(
+      `${error.message} Git guardó en el commit ${version} otro contenido que el preparado (por ejemplo, por un filtro clean de .gitattributes); no se creó el tag ${toReleaseTag(version)}.`,
+      `Revisá los filtros de .gitattributes de ese archivo (git check-attr filter -- <archivo>). ${error.hint}`,
+      { cause: error }
+    );
   }
 }
 
@@ -878,10 +958,11 @@ async function bumpVersionStep(context) {
   }
 
   const changelogPath = path.join(context.repositoryRoot, CHANGELOG_FILE);
+  const changelog = readFileSync(changelogPath, "utf8");
   let releasedChangelog;
 
   try {
-    releasedChangelog = releaseUnreleased(readFileSync(changelogPath, "utf8"), nextRelease.version, new Date().toISOString().split("T")[0]);
+    releasedChangelog = releaseUnreleased(changelog, nextRelease.version, new Date().toISOString().split("T")[0]);
   } catch (error) {
     throw new ReleaseStepError(
       `CHANGELOG.md no está listo: ${error instanceof Error ? error.message : String(error)}`,
@@ -892,11 +973,11 @@ async function bumpVersionStep(context) {
 
   const versionFileUpdates = await prepareVersionFileUpdates(context, nextRelease.version);
   print(renderBox({ title: `CHANGELOG · ${UNRELEASED_HEADING} → [${nextRelease.version}]`, lines: readWorkingUnreleased(context.repositoryRoot).body.split("\n"), tone: BOX_TONE.info }));
-  writeFileSync(manifestPath, manifest.replace(PACKAGE_VERSION_FIELD_PATTERN, `$1${nextRelease.version}$2`));
-  writeFileSync(changelogPath, releasedChangelog);
-  for (const { filePath, content } of versionFileUpdates) {
-    writeFileSync(path.join(context.repositoryRoot, filePath), content);
-  }
+  writeReleaseFiles(context, [
+    { filePath: PACKAGE_MANIFEST_FILE, originalContent: manifest, content: manifest.replace(PACKAGE_VERSION_FIELD_PATTERN, `$1${nextRelease.version}$2`) },
+    { filePath: CHANGELOG_FILE, originalContent: changelog, content: releasedChangelog },
+    ...versionFileUpdates,
+  ]);
 
   const tag = toReleaseTag(nextRelease.version);
   const versionFilePaths = versionFileUpdates.map(({ filePath }) => filePath);
@@ -912,8 +993,9 @@ async function bumpVersionStep(context) {
     context,
     ["commit", "--quiet", "-m", nextRelease.version],
     "El commit de versión falló",
-    `Corregí el error, descartá el cambio con git checkout -- ${[PACKAGE_MANIFEST_FILE, CHANGELOG_FILE, ...versionFilePaths].join(" ")} y volvé a correr ${context.commands.createVersion}.`
+    `Corregí el error, descartá el cambio con git checkout -- ${joinShellArguments([PACKAGE_MANIFEST_FILE, CHANGELOG_FILE, ...versionFilePaths])} y volvé a correr ${context.commands.createVersion}.`
   );
+  await verifyCommittedVersionFiles(context, nextRelease.version);
   await runGitStep(context, ["tag", "-a", tag, "-m", nextRelease.version], `No se pudo crear el tag ${tag}`, `Si ya existe, revisalo con git show ${tag}.`);
 
   context.version = nextRelease.version;

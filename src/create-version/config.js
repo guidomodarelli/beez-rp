@@ -306,6 +306,17 @@ function isReleaseCommitBuiltInFile(filePath) {
 }
 
 /**
+ * Finds the configuration file `create-version` loads: the first of
+ * {@link CREATE_VERSION_CONFIG_FILES} present in the working tree, whether Git tracks it or not.
+ *
+ * @param {string} repositoryRoot - Repository root.
+ * @returns {string | null} File name relative to the root, or `null` when none exists.
+ */
+export function findCreateVersionConfigFile(repositoryRoot) {
+  return CREATE_VERSION_CONFIG_FILES.find((fileName) => existsSync(path.join(repositoryRoot, fileName))) ?? null;
+}
+
+/**
  * Imports `beez-rp.config.mjs` or `beez-rp.config.js` from the repository root and validates it.
  * It is imported once per process: after syncing `main` the command stops and asks to run it
  * again, so a new process imports the updated file and everything it imports.
@@ -315,14 +326,15 @@ function isReleaseCommitBuiltInFile(filePath) {
  * @throws {Error} When the file is missing, fails to load or is invalid.
  */
 export async function loadCreateVersionConfig(repositoryRoot) {
-  const configPath = CREATE_VERSION_CONFIG_FILES.map((fileName) => path.join(repositoryRoot, fileName)).find((candidate) => existsSync(candidate));
+  const configFile = findCreateVersionConfigFile(repositoryRoot);
 
-  if (!configPath) {
+  if (!configFile) {
     throw new Error(
       `beez-rp create-version: ${CREATE_VERSION_CONFIG_FILES.join(" or ")} not found in ${repositoryRoot}; create it with at least changelog.audience`
     );
   }
 
+  const configPath = path.join(repositoryRoot, configFile);
   let module;
   try {
     module = await import(pathToFileURL(configPath).href);
