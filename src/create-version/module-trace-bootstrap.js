@@ -13,9 +13,10 @@
  * @module create-version/module-trace-bootstrap
  */
 
+import { realpathSync } from "node:fs";
 import module from "node:module";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 /**
  * URL scheme of the modules loaded from a file. Kept here, not in `src/constants/`, because this
@@ -27,11 +28,23 @@ const FILE_URL_SCHEME = "file:";
 const RELATIVE_SPECIFIER_PREFIXES = Object.freeze(["./", "../"]);
 
 /**
- * @typedef {{ moduleUrlsByParent: Map<string, Set<string>>, requestedUrlsByParent: Map<string, Set<string>>, moduleUrlByRequestedUrl: Map<string, string> }} ModuleTrace
+ * Directory of installed dependencies, whose modules are never checked against the tracked files.
+ * Same value as `NODE_MODULES_DIRECTORY` of `src/constants/create-version.js`, kept here because
+ * this bootstrap cannot import repository modules (see the module description).
+ */
+const NODE_MODULES_DIRECTORY = "node_modules";
+
+/** Segment of a relative path that leaves its base directory. */
+const PARENT_DIRECTORY_SEGMENT = "..";
+
+/**
+ * @typedef {{ moduleUrlsByParent: Map<string, Set<string>>, requestedUrlsByParent: Map<string, Set<string>>, aliasedModuleUrlsByParent: Map<string, Set<string>>, moduleUrlByRequestedUrl: Map<string, string> }} ModuleTrace
  *   Import edges of this process, keyed by the URL of the importing module: the URLs of the modules
  *   each one resolved (any scheme, such as `file:` with their real path, where Node loads them, or
- *   `data:`), and the `file:` URLs its specifiers named before Node followed symbolic links; plus
- *   the module each requested path resolved to. The edges are kept for the whole process (Node
+ *   `data:`), the `file:` URLs its specifiers named before Node followed symbolic links, and the
+ *   `file:` modules it reached through a specifier that is not a file path (a `#alias` of the
+ *   `imports` field of `package.json`, or a package name), whose path before Node followed
+ *   symbolic links is unknown; plus the module each requested path resolved to. The edges are kept for the whole process (Node
  *   never resolves a cached module again), and each configuration only walks the ones reachable
  *   from its own file, so loading the configuration of another repository in the same process does
  *   not mix both graphs.
@@ -43,6 +56,45 @@ const RELATIVE_SPECIFIER_PREFIXES = Object.freeze(["./", "../"]);
 /** Trace of this process; `null` until the first start. */
 /** @type {ModuleTraceState | null} */
 let moduleTraceState = null;
+
+/**
+ * @typedef {{ canonicalRoot: string, trackedPaths: Set<string> }} TrackedModuleGuard
+ *   Real path of the repository whose modules must be tracked by Git, and its tracked paths,
+ *   relative to the root and separated with `/` like `git ls-files`.
+ */
+
+/** Guard active while the release steps run; `null` while repository modules load freely. */
+/** @type {TrackedModuleGuard | null} */
+let trackedModuleGuard = null;
+
+/**
+ * Stops a module that loads for the first time while the guard is active when it is a repository
+ * file (by its real path, outside `node_modules`) that Git does not track: an ignored or untracked
+ * helper that a hook imports only when it runs never went through the comparison with `HEAD`.
+ * Throwing from the resolution keeps Node from evaluating the module.
+ *
+ * @param {string} moduleUrl - URL Node resolved, with the real path of a file.
+ * @throws {Error} When the active guard does not find the module among the tracked files.
+ */
+function requireTrackedModule(moduleUrl) {
+  if (!trackedModuleGuard || !moduleUrl.startsWith(FILE_URL_SCHEME)) {
+    return;
+  }
+
+  const relativePath = path.relative(trackedModuleGuard.canonicalRoot, fileURLToPath(moduleUrl));
+  const segments = relativePath.split(path.sep);
+
+  if (relativePath === "" || path.isAbsolute(relativePath) || segments[0] === PARENT_DIRECTORY_SEGMENT || segments.includes(NODE_MODULES_DIRECTORY)) {
+    return;
+  }
+
+  const repositoryPath = segments.join("/");
+  if (!trackedModuleGuard.trackedPaths.has(repositoryPath)) {
+    throw new Error(
+      `beez-rp no carga ${repositoryPath} durante el release: Git no lo trackea (lo ignora .gitignore o nunca se commiteó), así que no se pudo comparar con HEAD. Commitealo en una rama y llevalo a main, o dejá de importarlo desde los hooks de beez-rp.config.(m)js, y volvé a correr el release.`
+    );
+  }
+}
 
 /**
  * Resolves a specifier to the `file:` URL it names before Node follows symbolic links.
@@ -94,10 +146,11 @@ function startModuleTrace(startedExplicitly) {
   }
 
   /** @type {ModuleTrace} */
-  const trace = { moduleUrlsByParent: new Map(), requestedUrlsByParent: new Map(), moduleUrlByRequestedUrl: new Map() };
+  const trace = { moduleUrlsByParent: new Map(), requestedUrlsByParent: new Map(), aliasedModuleUrlsByParent: new Map(), moduleUrlByRequestedUrl: new Map() };
   module.registerHooks({
     resolve(specifier, context, nextResolve) {
       const resolution = nextResolve(specifier, context);
+      requireTrackedModule(resolution.url);
       const parentUrl = context.parentURL ?? "";
       // Every edge is kept, whatever its scheme: a `data:` module can import a repository file by
       // its `file:` URL, and that file is only reachable through it.
@@ -107,6 +160,8 @@ function startModuleTrace(startedExplicitly) {
       if (requestedUrl) {
         addToGroup(trace.requestedUrlsByParent, parentUrl, requestedUrl);
         trace.moduleUrlByRequestedUrl.set(requestedUrl, resolution.url);
+      } else if (resolution.url.startsWith(FILE_URL_SCHEME)) {
+        addToGroup(trace.aliasedModuleUrlsByParent, parentUrl, resolution.url);
       }
       return resolution;
     },
@@ -136,6 +191,25 @@ export function startTracingConfigModules() {
  */
 export function ensureTracingConfigModules() {
   startModuleTrace(false);
+}
+
+/**
+ * Makes the module hook reject, until {@link allowUntrackedRepositoryModules}, every repository
+ * module loaded for the first time that Git does not track (see {@link requireTrackedModule}). The
+ * run calls it right after its last comparison of the loaded modules with `HEAD`, before the
+ * release steps run configuration code (hooks, `migrations.apply`) that may import more modules.
+ * Without `module.registerHooks` nothing is checked, but the plan already blocks such a run.
+ *
+ * @param {string} repositoryRoot - Repository root.
+ * @param {string[]} trackedPaths - Tracked paths (`git ls-files`), relative to the root and separated with `/`.
+ */
+export function requireTrackedRepositoryModules(repositoryRoot, trackedPaths) {
+  trackedModuleGuard = { canonicalRoot: realpathSync.native(repositoryRoot), trackedPaths: new Set(trackedPaths) };
+}
+
+/** Lifts the guard of {@link requireTrackedRepositoryModules} once the release steps end. */
+export function allowUntrackedRepositoryModules() {
+  trackedModuleGuard = null;
 }
 
 /**

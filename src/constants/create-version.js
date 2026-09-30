@@ -322,8 +322,14 @@ export const CHECK_ATTR_FIELDS_PER_ENTRY = 3;
  *   directory of the repository replaced by a symbolic link), so `HEAD` cannot vouch for it.
  * - `filtered`: Git applies a `filter` attribute to the file, so comparing it with `HEAD` goes
  *   through the filter and cannot prove that the bytes Node loaded are the committed ones.
+ * - `implicitPath`: a module imported without its full relative path, so the file Node picked
+ *   cannot be checked.
+ * - `missingFromWorkingTree`: a tracked file hidden from `git status` (`skip-worktree`, such as
+ *   an entry left out of a sparse checkout, or `assume-unchanged`) is missing from the working
+ *   tree, so checks and `npm publish` would work without it.
  */
 export const HEAD_FILE_DIFFERENCE = Object.freeze({
+  missingFromWorkingTree: "missingFromWorkingTree",
   notCommitted: "notCommitted",
   typeChanged: "typeChanged",
   contentChanged: "contentChanged",

@@ -48,6 +48,7 @@ const CONFIG_FILES_LABEL = CREATE_VERSION_CONFIG_FILES.join(" o ");
 
 /** How the blockers describe each {@link HEAD_FILE_DIFFERENCE} of a file. */
 const HEAD_FILE_DIFFERENCE_LABELS = Object.freeze({
+  [HEAD_FILE_DIFFERENCE.missingFromWorkingTree]: "falta en el working tree (por ejemplo, quedó fuera de un sparse checkout), así que los checks y la publicación no lo incluirían",
   [HEAD_FILE_DIFFERENCE.notCommitted]: "no está commiteado: Git lo ignora, nunca se agregó o solo está en staging",
   [HEAD_FILE_DIFFERENCE.typeChanged]: "no es el mismo tipo de archivo que en HEAD, por ejemplo un enlace simbólico",
   [HEAD_FILE_DIFFERENCE.contentChanged]: "su contenido es distinto del de HEAD",
@@ -55,7 +56,7 @@ const HEAD_FILE_DIFFERENCE_LABELS = Object.freeze({
   [HEAD_FILE_DIFFERENCE.outsideRepository]: "está fuera del repositorio, por ejemplo detrás de un enlace simbólico, y HEAD no lo respalda",
   [HEAD_FILE_DIFFERENCE.filtered]: "tiene un atributo filter en .gitattributes, así que no se puede comprobar que lo que usa el release sea lo commiteado",
   [HEAD_FILE_DIFFERENCE.implicitPath]:
-    "se importa sin la ruta completa del archivo (sin extensión o como carpeta), así que no se puede comprobar qué archivo cargó Node: importalo con su ruta completa, con extensión (por ejemplo ./settings.js)",
+    "se importa sin la ruta completa del archivo (sin extensión, como carpeta, o por un alias #… de imports o un nombre de paquete), así que no se puede comprobar qué archivo cargó Node: importalo con su ruta relativa completa, con extensión (por ejemplo ./settings.js)",
 });
 
 /**
@@ -553,7 +554,8 @@ function requireCommittedConfig(plan, state, commands, ignoreLocalChanges) {
  * would use them: the configuration and the modules it loads are imported from the working tree,
  * and checks, preparation and publication run on it, while the release commit keeps the indexed
  * content. Blocking every hidden change, instead of guessing which ones reach the release, covers
- * the configuration, its modules and `versionFiles` alike.
+ * the configuration, its modules and `versionFiles` alike. A marked file missing from the working
+ * tree (such as one left out of a sparse checkout) blocks too: the published package would lack it.
  *
  * @param {ReleasePlan} plan - Plan.
  * @param {ReleaseState} state - Snapshot.
@@ -567,10 +569,14 @@ function requireVisibleLocalChanges(plan, state, commands) {
     return plan;
   }
 
+  const sparseCheckoutHint = hiddenChanges.some(({ difference }) => difference === HEAD_FILE_DIFFERENCE.missingFromWorkingTree)
+    ? [`Si faltan por un sparse checkout, desactivalo (git sparse-checkout disable) para tener todos los archivos trackeados y volvé a correr ${commands.createVersion}.`]
+    : [];
   const blocker = {
     title: `Hay ${hiddenChanges.length} archivo(s) con cambios locales que git status no muestra`,
     details: [
       ...hiddenChanges.slice(0, MAX_LISTED_ITEMS).map(describeHeadFileDifference),
+      ...sparseCheckoutHint,
       `Git los marca con skip-worktree o assume-unchanged (git ls-files -v los muestra con S o en minúscula), así que ni git status ni git stash (tampoco --${CREATE_VERSION_FLAG.ignoreLocalChanges}) los ven, pero el release usaría su contenido local mientras el commit de release guarda el de HEAD.`,
       `Quitá la marca (git update-index --no-skip-worktree -- <archivo> y git update-index --no-assume-unchanged -- <archivo>, en dos comandos), commitealos en una rama o descartalos (git restore), y volvé a correr ${commands.createVersion}.`,
     ],

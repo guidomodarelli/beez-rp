@@ -89,6 +89,7 @@ import { ReleaseStepError } from "./errors.js";
 import { listUncheckedIndexPaths } from "./git-status.js";
 import { listFilteredFiles } from "./git-attributes.js";
 import { findSymbolicLinkSegment } from "./head-files.js";
+import { allowUntrackedRepositoryModules, requireTrackedRepositoryModules } from "./module-trace-bootstrap.js";
 import {
   buildNpmAuthConfigLine,
   checkNpmPublishAccess,
@@ -1059,25 +1060,75 @@ async function listUnpreparedReleaseCommitPaths(context, preparedTree) {
 }
 
 /**
- * Undoes a release commit that differs from the prepared index (a hook changed a release file or
- * staged another change), before it is tagged: the commit is dropped with `git reset --soft`, so
- * changes outside the release files stay staged for the user to review, and the release files go
- * back to their content and staging before the release.
+ * Lists the tracked paths whose working-tree content differs from `HEAD` (`git diff HEAD`, staged
+ * or not).
+ *
+ * @param {ReleaseContext} context - Release context.
+ * @returns {Promise<string[]>} Repository-relative paths.
+ */
+async function listPathsDifferentFromHead(context) {
+  return (await context.reader.git(["diff", "--name-only", "-z", "HEAD"])).split("\0").filter(Boolean);
+}
+
+/**
+ * Lists the paths a commit hook left modified in the working tree without staging them: every
+ * release file that no longer matches the release commit, and any other tracked file that matched
+ * `HEAD` before the release and does not anymore. The commit holds the prepared content, but checks
+ * of the tag, `prepare` and `npm publish` would use the working-tree bytes.
+ *
+ * @param {ReleaseContext} context - Release context.
+ * @param {ReleaseFileUpdate[]} fileUpdates - Files the release wrote.
+ * @param {string[]} pathsDifferentBeforeRelease - Paths that differed from `HEAD` before writing the release files.
+ * @returns {Promise<string[]>} Paths left modified by the commit.
+ */
+async function listPathsModifiedDuringReleaseCommit(context, fileUpdates, pathsDifferentBeforeRelease) {
+  const releaseFilePaths = new Set(fileUpdates.map(({ filePath }) => filePath));
+  const earlierChanges = new Set(pathsDifferentBeforeRelease);
+  return (await listPathsDifferentFromHead(context)).filter((filePath) => releaseFilePaths.has(filePath) || !earlierChanges.has(filePath));
+}
+
+/**
+ * Builds the failure of a release commit that differs from the prepared index (a hook changed a
+ * release file or staged another change).
+ *
+ * @param {string} version - Version of the undone commit.
+ * @param {string[]} unpreparedPaths - Paths where the commit differs from the prepared index.
+ * @returns {ReleaseStepError} Failure.
+ */
+function unpreparedReleaseCommitError(version, unpreparedPaths) {
+  return new ReleaseStepError(
+    `El commit de versión ${version} incluía cambios que beez-rp no preparó: ${unpreparedPaths.slice(0, MAX_LISTED_ITEMS).join(", ")} (por ejemplo, los modificó o stageó un hook pre-commit o commit-msg); no se creó el tag ${toReleaseTag(version)}.`,
+    "Los cambios fuera de package.json, CHANGELOG.md y versionFiles quedaron en staging (revisalos con git diff --cached, commitealos en una rama o descartalos); los de esos archivos se descartaron. Evitá que los hooks modifiquen o stageen archivos durante el commit de release."
+  );
+}
+
+/**
+ * Builds the failure of a release commit after which a hook left files modified without staging them.
+ *
+ * @param {string} version - Version of the undone commit.
+ * @param {string[]} modifiedPaths - Paths left modified in the working tree.
+ * @returns {ReleaseStepError} Failure.
+ */
+function modifiedDuringReleaseCommitError(version, modifiedPaths) {
+  return new ReleaseStepError(
+    `Después del commit de versión ${version} quedaron cambios sin stagear en ${modifiedPaths.slice(0, MAX_LISTED_ITEMS).join(", ")} (por ejemplo, los modificó un hook pre-commit o commit-msg sin stagearlos): el release usaría esos bytes y no los del commit; no se creó el tag ${toReleaseTag(version)}.`,
+    "Los cambios fuera de package.json, CHANGELOG.md y versionFiles quedaron en el working tree (revisalos con git diff, commitealos en una rama o descartalos); los de esos archivos se descartaron. Evitá que los hooks modifiquen archivos durante el commit de release."
+  );
+}
+
+/**
+ * Undoes a release commit before it is tagged (a hook changed a release file, staged another
+ * change or left files modified): the commit is dropped with `git reset --soft`, so changes outside
+ * the release files stay for the user to review, and the release files go back to their content
+ * and staging before the release.
  *
  * @param {ReleaseContext} context - Release context.
  * @param {ReleaseFileUpdate[]} fileUpdates - Files the release wrote.
  * @param {string | null} indexTree - Tree of the index before staging.
- * @param {string} version - Version of the undone commit.
- * @param {string[]} unpreparedPaths - Paths where the commit differs from the prepared index.
+ * @param {ReleaseStepError} failure - Why the commit is undone.
  * @returns {Promise<ReleaseStepError>} Failure to throw.
  */
-async function undoReleaseCommitWithUnpreparedChanges(context, fileUpdates, indexTree, version, unpreparedPaths) {
-  const listedPaths = unpreparedPaths.slice(0, MAX_LISTED_ITEMS).join(", ");
-  const failure = new ReleaseStepError(
-    `El commit de versión ${version} incluía cambios que beez-rp no preparó: ${listedPaths} (por ejemplo, los modificó o stageó un hook pre-commit o commit-msg); no se creó el tag ${toReleaseTag(version)}.`,
-    "Los cambios fuera de package.json, CHANGELOG.md y versionFiles quedaron en staging (revisalos con git diff --cached, commitealos en una rama o descartalos); los de esos archivos se descartaron. Evitá que los hooks modifiquen o stageen archivos durante el commit de release."
-  );
-
+async function undoReleaseCommit(context, fileUpdates, indexTree, failure) {
   if ((await context.reader.tryGit(["reset", "--soft", "--quiet", "HEAD^"])) === null) {
     return new ReleaseStepError(
       failure.message,
@@ -1211,6 +1262,9 @@ async function bumpVersionStep(context) {
   ];
   // The index before staging, so a failed commit puts it back exactly (a CHANGELOG.md the user staged stays staged).
   const indexTree = await context.reader.tryGit(["write-tree"]);
+  // Tracked changes that exist before the release (such as a CHANGELOG.md kept in the working tree),
+  // so only what the commit hooks leave modified stops the release.
+  const pathsDifferentBeforeRelease = await listPathsDifferentFromHead(context);
   writeReleaseFiles(context, releaseFileUpdates);
 
   const tag = toReleaseTag(nextRelease.version);
@@ -1239,7 +1293,13 @@ async function bumpVersionStep(context) {
   const unpreparedPaths = await listUnpreparedReleaseCommitPaths(context, preparedTree);
 
   if (unpreparedPaths.length > 0) {
-    throw await undoReleaseCommitWithUnpreparedChanges(context, releaseFileUpdates, indexTree, nextRelease.version, unpreparedPaths);
+    throw await undoReleaseCommit(context, releaseFileUpdates, indexTree, unpreparedReleaseCommitError(nextRelease.version, unpreparedPaths));
+  }
+
+  const modifiedPaths = await listPathsModifiedDuringReleaseCommit(context, releaseFileUpdates, pathsDifferentBeforeRelease);
+
+  if (modifiedPaths.length > 0) {
+    throw await undoReleaseCommit(context, releaseFileUpdates, indexTree, modifiedDuringReleaseCommitError(nextRelease.version, modifiedPaths));
   }
 
   await verifyCommittedVersionFiles(context, nextRelease.version);
@@ -1783,7 +1843,8 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   // here, right before local changes are set aside and the steps run configuration code. A module
   // loaded for the first time after this point comes from the working tree without the set-aside
   // changes (tracked files hidden with skip-worktree or assume-unchanged already block the
-  // diagnosis); only an ignored file first imported by a step escapes this check.
+  // diagnosis); an ignored or untracked file first imported by a step is rejected by the module
+  // guard below instead.
   const recheckedPlan = buildReleasePlan({ ...state, ...(await inspectConfigModules(reader, repositoryRoot)) }, capabilities, { ...planOptions, ignoreLocalChanges: options.ignoreLocalChanges });
 
   if (recheckedPlan.blockers.length > 0) {
@@ -1791,6 +1852,7 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
     return 0;
   }
 
+  const trackedPaths = (await reader.git(["ls-files", "-z"])).split("\0").filter(Boolean);
   const changesToSetAside = options.ignoreLocalChanges ? listLocalChangesToSetAside(state, plan.mode) : [];
   let setAside = null;
 
@@ -1806,9 +1868,15 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
     print(`${ICON.info} ${changesToSetAside.length} cambio(s) sin commitear apartados con git stash; al terminar vuelven igual: lo staged staged y el resto sin stagear.`);
   }
 
+  // From here on, a repository module the steps load for the first time must be tracked by Git:
+  // an ignored or untracked helper that a hook imports only when it runs was never compared with
+  // HEAD (tracked ones were: git status is clean or set aside, and hidden changes block the plan).
+  requireTrackedRepositoryModules(repositoryRoot, trackedPaths);
+
   try {
     return await runPlanSteps(context, plan, remoteUrl, startedAt);
   } finally {
+    allowUntrackedRepositoryModules();
     if (setAside) {
       const restore = await restoreLocalChanges(reader, repositoryRoot, setAside);
       print(

@@ -27,7 +27,9 @@
  * configuration reads with `fs` instead of importing them are not modules and are not listed. A
  * repository file imported without its full path (`require("./settings")`, or a folder with its
  * `index.js`) is listed apart: the symbolic links on the way to the file Node picked cannot be
- * checked from the path the specifier named, so the plan asks to import it by its full path.
+ * checked from the path the specifier named, so the plan asks to import it by its full path. The
+ * same goes for a repository module reached through a `#alias` (`imports` of `package.json`) or a
+ * package name: Node only reports its real path, so the plan asks to import it by its relative path.
  *
  * @module create-version/config-modules
  */
@@ -50,8 +52,10 @@ export { ensureTracingConfigModules } from "./module-trace-bootstrap.js";
  *   loaded from outside the repository, outside `node_modules` and beez-rp itself. `implicitPaths`
  *   are the repository paths (relative, with `/`) that a specifier named without being the file
  *   Node loaded, such as `require("./settings")` (Node adds `.js`, `.json`… or loads a folder's
- *   `index.js`): the symbolic links on the way to the file Node picked cannot be checked from them,
- *   so they must be imported by their full path.
+ *   `index.js`), and the repository modules (outside `node_modules`) reached through a specifier
+ *   that is not a file path (a `#alias` of `imports` or a package name, where Node only reports
+ *   the real path): the symbolic links on the way to the file Node picked cannot be checked from
+ *   them, so they must be imported by their full relative path.
  *   `startedExplicitly` tells whether the trace was started with `startTracingConfigModules`
  *   (as the CLI does before importing anything else) rather than by `loadCreateVersionConfig` itself,
  *   when repository code imported earlier may be missing from the graph.
@@ -71,8 +75,9 @@ const BEEZ_RP_PACKAGE_ROOT = realpathSync.native(fileURLToPath(new URL("../..", 
  *
  * @param {ModuleTrace} trace - Trace of this process.
  * @param {string} configRequestedUrl - `file:` URL `loadCreateVersionConfig` imported.
- * @returns {{ moduleUrls: Set<string>, requestedUrls: Set<string> } | null} Graph of the
- *   configuration, or `null` when this process never imported that file after the trace started.
+ * @returns {{ moduleUrls: Set<string>, requestedUrls: Set<string>, aliasedModuleUrls: Set<string> } | null} Graph of the
+ *   configuration (with the `file:` modules reached through a specifier that is not a file path),
+ *   or `null` when this process never imported that file after the trace started.
  */
 function collectReachableModules(trace, configRequestedUrl) {
   const configModuleUrl = trace.moduleUrlByRequestedUrl.get(configRequestedUrl);
@@ -83,12 +88,16 @@ function collectReachableModules(trace, configRequestedUrl) {
 
   const moduleUrls = new Set([configModuleUrl]);
   const requestedUrls = new Set([configRequestedUrl]);
+  const aliasedModuleUrls = new Set();
   const pendingUrls = [configModuleUrl];
 
   while (pendingUrls.length > 0) {
     const parentUrl = /** @type {string} */ (pendingUrls.pop());
     for (const requestedUrl of trace.requestedUrlsByParent.get(parentUrl) ?? []) {
       requestedUrls.add(requestedUrl);
+    }
+    for (const aliasedModuleUrl of trace.aliasedModuleUrlsByParent.get(parentUrl) ?? []) {
+      aliasedModuleUrls.add(aliasedModuleUrl);
     }
     for (const moduleUrl of trace.moduleUrlsByParent.get(parentUrl) ?? []) {
       if (!moduleUrls.has(moduleUrl)) {
@@ -98,7 +107,7 @@ function collectReachableModules(trace, configRequestedUrl) {
     }
   }
 
-  return { moduleUrls, requestedUrls };
+  return { moduleUrls, requestedUrls, aliasedModuleUrls };
 }
 
 /**
@@ -255,6 +264,16 @@ export function listConfigModules(repositoryRoot, configFile) {
     // the links on the way to the file it picked were not checked above.
     const relativeSegments = path.relative(containingRoot, requestedPath).split(path.sep);
     if (!relativeSegments.includes(NODE_MODULES_DIRECTORY) && !statSync(requestedPath, { throwIfNoEntry: false })?.isFile()) {
+      implicitPaths.add(relativeSegments.join("/"));
+    }
+  }
+  // A repository module reached through a `#alias` or a package name: Node only reports its real
+  // path, so the symbolic links (even ignored ones) on the way to it cannot be checked.
+  for (const aliasedModuleUrl of configGraph?.aliasedModuleUrls ?? []) {
+    const canonicalPath = toCanonicalPath(fileURLToPath(aliasedModuleUrl));
+    const relativeSegments = path.relative(canonicalRoot, canonicalPath).split(path.sep);
+
+    if (isInsideDirectory(canonicalRoot, canonicalPath) && canonicalPath !== canonicalRoot && !relativeSegments.includes(NODE_MODULES_DIRECTORY)) {
       implicitPaths.add(relativeSegments.join("/"));
     }
   }

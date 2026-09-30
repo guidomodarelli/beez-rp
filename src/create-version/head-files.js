@@ -27,7 +27,7 @@ import { createGitReader, readGitBlob } from "./process.js";
 
 /**
  * @typedef {import("./process.js").GitReader} GitReader
- * @typedef {"notCommitted" | "typeChanged" | "contentChanged" | "executableBitChanged" | "outsideRepository" | "filtered" | "implicitPath"} HeadFileDifferenceKind
+ * @typedef {"notCommitted" | "typeChanged" | "contentChanged" | "executableBitChanged" | "outsideRepository" | "filtered" | "implicitPath" | "missingFromWorkingTree"} HeadFileDifferenceKind
  * @typedef {{ file: string, difference: HeadFileDifferenceKind }} HeadFileDifference
  *   `file` is relative to the repository root and separated with `/`, or absolute for
  *   `outsideRepository`.
@@ -84,13 +84,14 @@ async function tracksExecutableBit(reader) {
 
 /**
  * Tells whether a working-tree submodule directory matches its committed gitlink: an initialized
- * submodule must have the recorded commit checked out, and one never initialized is an empty
- * directory, as Git leaves it. Git reads the submodule itself only when its root has a `.git`
- * entry; otherwise `git -C` would answer for the superproject.
+ * submodule must have the recorded commit checked out with a clean working tree of its own (no
+ * modified, staged or untracked files, as `git status --porcelain` of the submodule reports), and
+ * one never initialized is an empty directory, as Git leaves it. Git reads the submodule itself
+ * only when its root has a `.git` entry; otherwise `git -C` would answer for the superproject.
  *
  * @param {string} absolutePath - Submodule directory in the working tree.
  * @param {string} object - Commit the gitlink records.
- * @returns {Promise<boolean>} `true` when the submodule is the committed one or was never initialized.
+ * @returns {Promise<boolean>} `true` when the submodule is the committed one, clean, or was never initialized.
  */
 async function hasCommittedSubmoduleCommit(absolutePath, object) {
   const entries = readdirSync(absolutePath);
@@ -99,8 +100,15 @@ async function hasCommittedSubmoduleCommit(absolutePath, object) {
     return entries.length === 0;
   }
 
-  const checkedOutCommit = await createGitReader(absolutePath).tryGit(["rev-parse", "--verify", "HEAD"]);
-  return checkedOutCommit?.trim() === object;
+  const submoduleReader = createGitReader(absolutePath);
+  const checkedOutCommit = await submoduleReader.tryGit(["rev-parse", "--verify", "HEAD"]);
+
+  if (checkedOutCommit?.trim() !== object) {
+    return false;
+  }
+
+  // At the recorded commit, its own working tree must be clean too: checks and publication use it.
+  return (await submoduleReader.tryGit(["status", "--porcelain"]))?.trim() === "";
 }
 
 /**

@@ -277,8 +277,9 @@ function confirmFirstPublication(npmAuth, npm) {
  * Lists the tracked files marked `skip-worktree` or `assume-unchanged` whose working-tree entry
  * differs from `HEAD`: `git status --porcelain` and `git stash` skip those entries, so the local
  * change (new content, or another kind of file such as a symbolic link) would reach the release
- * unseen. Entries missing from the working tree (a sparse checkout) are skipped: nothing local of
- * them can be loaded or released. An entry with a `filter` attribute is reported as such even when
+ * unseen. An entry missing from the working tree (such as one left out of a sparse checkout) is
+ * reported too: checks and `npm publish` run on the working tree, so the published package would
+ * lack a tracked file. An entry with a `filter` attribute is reported as such even when
  * it matches `HEAD`: Git compares it through its clean filter, which can map a local edit back to
  * the committed blob, while checks and `npm publish` use the raw working-tree bytes.
  *
@@ -287,12 +288,16 @@ function confirmFirstPublication(npmAuth, npm) {
  * @returns {Promise<HeadFileDifference[]>} Hidden local changes.
  */
 async function listHiddenLocalChanges(reader, repositoryRoot) {
-  const uncheckedPaths = (await listUncheckedIndexPaths(reader)).filter((filePath) => lstatSync(path.join(repositoryRoot, filePath), { throwIfNoEntry: false }) !== undefined);
+  const hiddenPaths = await listUncheckedIndexPaths(reader);
+  const isInWorkingTree = (/** @type {string} */ filePath) => lstatSync(path.join(repositoryRoot, filePath), { throwIfNoEntry: false }) !== undefined;
+  const uncheckedPaths = hiddenPaths.filter(isInWorkingTree);
+  const missingPaths = hiddenPaths.filter((filePath) => !isInWorkingTree(filePath));
   // A clean filter can map a local edit back to the committed blob, while the release uses the raw bytes.
   const filteredPaths = await listFilteredFiles(reader, uncheckedPaths);
   const unfilteredPaths = uncheckedPaths.filter((filePath) => !filteredPaths.includes(filePath));
 
   return [
+    ...missingPaths.map((file) => ({ file, difference: HEAD_FILE_DIFFERENCE.missingFromWorkingTree })),
     ...(await listFilesDifferentFromHead(reader, repositoryRoot, unfilteredPaths)),
     ...filteredPaths.map((file) => ({ file, difference: HEAD_FILE_DIFFERENCE.filtered })),
   ];

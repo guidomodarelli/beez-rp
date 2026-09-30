@@ -2437,6 +2437,133 @@ describe("beez-rp create-version command", () => {
   );
 
   it(
+    "should not release while a submodule marked skip-worktree is at the recorded commit but has untracked files of its own",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      const submoduleRoot = path.join(repositoryRoot, "vendor", "lib");
+      mkdirSync(submoduleRoot, { recursive: true });
+      runGit(["init", "--quiet", "--initial-branch=main"], submoduleRoot);
+      writeFileSync(path.join(submoduleRoot, "index.js"), "export const value = 1;\n");
+      runGit(["add", "index.js"], submoduleRoot);
+      runGit(["-c", "user.email=lib@example.test", "-c", "user.name=Lib Fixture", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "lib"], submoduleRoot);
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", "};"]);
+      runGit(["update-index", "--skip-worktree", "--", "vendor/lib"], repositoryRoot);
+      writeFileSync(path.join(submoduleRoot, "local-override.js"), "export const value = 2;\n");
+
+      const blocked = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(blocked.status, blocked.output).toBe(0);
+      expect(flattenOutput(blocked.output)).toContain("archivo(s) con cambios locales que git status no muestra");
+      expect(flattenOutput(blocked.output)).toContain("vendor/lib (su contenido es distinto del de HEAD)");
+      expect(runGit(["log", "-1", "--format=%s", "main"], repositoryRoot)).toBe("chore: configure releases");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should not release from a sparse checkout that leaves a tracked file out of the working tree, and say how to disable it",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      mkdirSync(path.join(repositoryRoot, "lib"));
+      writeFileSync(path.join(repositoryRoot, "lib", "extra.js"), "export const extra = true;\n");
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", "};"]);
+      runGit(["sparse-checkout", "set", "--no-cone", "/*", "!/lib/"], repositoryRoot);
+
+      expect(existsSync(path.join(repositoryRoot, "lib", "extra.js"))).toBe(false);
+
+      const blocked = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(blocked.status, blocked.output).toBe(0);
+      expect(flattenOutput(blocked.output)).toContain("lib/extra.js (falta en el working tree (por ejemplo, quedó fuera de un sparse checkout)");
+      expect(flattenOutput(blocked.output)).toContain("git sparse-checkout disable");
+      expect(runGit(["log", "-1", "--format=%s", "main"], repositoryRoot)).toBe("chore: configure releases");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should undo the release commit without tagging it when a commit hook leaves a release file and another tracked file modified without staging them",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      writeFileSync(path.join(repositoryRoot, "VERSION.txt"), "0.1.0 <!-- beez-rp-version -->\n");
+      writeFileSync(path.join(repositoryRoot, "notes.txt"), "notes\n");
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", '  versionFiles: ["VERSION.txt"],', "};"]);
+      const manifest = readFileSync(path.join(repositoryRoot, "package.json"), "utf8");
+      // A formatter-like hook that rewrites files but never stages them: the commit keeps the prepared bytes.
+      writeFileSync(path.join(repositoryRoot, ".git", "hooks", "pre-commit"), '#!/bin/sh\necho "formatted" >> VERSION.txt\necho "formatted" >> notes.txt\n', { mode: 0o755 });
+
+      const release = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(release.status, release.output).toBe(1);
+      expect(flattenOutput(release.output)).toContain("Después del commit de versión 0.2.0 quedaron cambios sin stagear en VERSION.txt, notes.txt");
+      expect(runGit(["log", "-1", "--format=%s", "main"], repositoryRoot)).toBe("chore: configure releases");
+      expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+      expect(runGit(["log", "-1", "--format=%s", "main"], remoteRoot)).toBe("chore: configure releases");
+      expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe("M notes.txt");
+      expect(readFileSync(path.join(repositoryRoot, "package.json"), "utf8")).toBe(manifest);
+      expect(readFileSync(path.join(repositoryRoot, "VERSION.txt"), "utf8")).toBe("0.1.0 <!-- beez-rp-version -->\n");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should stop a release hook that imports, only when it runs, a repository module Git ignores, before evaluating it",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      const hookLog = path.join(path.dirname(repositoryRoot), "hooks.log");
+      const writeHelper = (/** @type {string} */ fileName, /** @type {string} */ marker) =>
+        writeFileSync(path.join(repositoryRoot, "release", fileName), `import { appendFileSync } from "node:fs";\nappendFileSync(${JSON.stringify(hookLog)}, "${marker}\\n");\n`);
+      mkdirSync(path.join(repositoryRoot, "release"));
+      writeHelper("tracked-helper.js", "tracked");
+      writeFileSync(path.join(repositoryRoot, ".gitignore"), "release/local-helper.js\n");
+      // Neither the configuration nor the diagnosis imports the helpers: only prepare does, when it runs.
+      pushConfiguration(repositoryRoot, [
+        "export default {",
+        '  changelog: { audience: "equipo" },',
+        "  checks: false,",
+        "  prepare: async () => {",
+        '    await import("./release/tracked-helper.js");',
+        '    await import("./release/local-helper.js");',
+        "  },",
+        "};",
+      ]);
+      writeHelper("local-helper.js", "ignored");
+
+      const release = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(release.status, release.output).toBe(1);
+      expect(flattenOutput(release.output)).toContain("beez-rp no carga release/local-helper.js durante el release: Git no lo trackea");
+      expect(readFileSync(hookLog, "utf8")).toBe("tracked\n");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+      expect(runGit(["log", "-1", "--format=%s", "main"], remoteRoot)).toBe("chore: configure releases");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should not release while the configuration imports a repository module through a #alias of package.json imports, and ask for its relative path",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository("0.1.0", { imports: { "#settings": "./release/settings.js" } });
+      mkdirSync(path.join(repositoryRoot, "release"));
+      writeFileSync(path.join(repositoryRoot, "release", "settings.js"), 'export const audience = "equipo";\n');
+      // Node reports only the real path of the alias target, so a link on the way (even an ignored one) goes unseen.
+      pushConfiguration(repositoryRoot, ['import { audience } from "#settings";', "export default {", "  changelog: { audience },", "  checks: false,", "};"]);
+
+      const blocked = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(blocked.status, blocked.output).toBe(0);
+      expect(flattenOutput(blocked.output)).toContain("La configuración tiene cambios sin commitear");
+      expect(flattenOutput(blocked.output)).toContain("release/settings.js (se importa sin la ruta completa del archivo (sin extensión, como carpeta, o por un alias #… de imports");
+      expect(runGit(["log", "-1", "--format=%s", "main"], repositoryRoot)).toBe("chore: configure releases");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
     "should keep the configuration modules of each repository apart when one process loads the configuration of two repositories",
     () => {
       const repositories = [createReleasedRepository().repositoryRoot, createReleasedRepository().repositoryRoot];
