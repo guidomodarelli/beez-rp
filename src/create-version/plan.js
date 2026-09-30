@@ -32,6 +32,7 @@ import {
   NPM_LOOKUP_STATUS,
   PORCELAIN_RENAME_SEPARATOR,
   PORCELAIN_STATUS_WIDTH,
+  PROJECT_NPM_CONFIG_FILE,
   PULL_REQUEST_STATE,
   RELEASE_MODE,
   RELEASE_STEP,
@@ -336,18 +337,21 @@ function listPorcelainPaths(line) {
 
 /**
  * Tells whether a `git status --porcelain` line touches code or data the loaded configuration may
- * import (see {@link UNSETTABLE_ASIDE_EXTENSIONS}).
+ * import (see {@link UNSETTABLE_ASIDE_EXTENSIONS}), or a `.npmrc` the diagnosis already read to
+ * resolve the registry and credentials.
  *
  * @param {string} line - Porcelain line.
- * @returns {boolean} `true` when any of its paths has one of those extensions.
+ * @returns {boolean} `true` when any of its paths has one of those extensions or is a `.npmrc`.
  */
 export function isCodeChange(line) {
-  return listPorcelainPaths(line).some((changedPath) => UNSETTABLE_ASIDE_EXTENSIONS.some((extension) => changedPath.endsWith(extension)));
+  return listPorcelainPaths(line).some(
+    (changedPath) => changedPath.split("/").at(-1) === PROJECT_NPM_CONFIG_FILE || UNSETTABLE_ASIDE_EXTENSIONS.some((extension) => changedPath.endsWith(extension))
+  );
 }
 
 /**
  * Blocks a runnable `--ignore-local-changes` plan whose changes to set aside include code or data
- * (`.js`, `.mjs`, `.cjs`, `.ts`, `.json`): the configuration was loaded from the working tree before
+ * (`.js`, `.mjs`, `.cjs`, `.ts`, `.json`, `.npmrc`): the configuration was loaded from the working tree before
  * setting them aside and may depend on them, so the release would not run the committed code.
  *
  * @param {ReleasePlan} plan - Plan.
@@ -376,7 +380,7 @@ function refuseToSetAsideCodeChanges(plan, state, ignoreLocalChanges, commands) 
  */
 export function codeChangesToSetAsideBlocker(codeChanges, commands) {
   return {
-    title: `--${CREATE_VERSION_FLAG.ignoreLocalChanges} no aparta cambios de código ni de datos (${UNSETTABLE_ASIDE_EXTENSIONS.join(", ")})`,
+    title: `--${CREATE_VERSION_FLAG.ignoreLocalChanges} no aparta cambios de código ni de datos (${[...UNSETTABLE_ASIDE_EXTENSIONS, PROJECT_NPM_CONFIG_FILE].join(", ")})`,
     details: [
       ...codeChanges.slice(0, MAX_LISTED_ITEMS),
       `La configuración ya se cargó con esos cambios y puede depender de ellos: commitealos en una rama o guardalos con git stash, y volvé a correr ${commands.createVersion}.`,

@@ -214,6 +214,7 @@ describe("create-version plan", () => {
     { name: "a rename into a module", change: "R  notes.md -> lib/helper.cjs" },
     { name: "a rename out of a module", change: "R  lib/helper.mjs -> notes.md" },
     { name: "a quoted module name", change: String.raw` M "src/m\303\263dulo.js"` },
+    { name: "a modified project .npmrc", change: " M .npmrc" },
   ])("should block --ignore-local-changes, also in a resume, when the changes to set aside include $name", ({ change }) => {
     const npm = { status: NPM_LOOKUP_STATUS.ok, publishedVersions: ["0.1.0"], reason: null };
     const states = [createMainState({ workingTreeChanges: [change, " M CHANGELOG.md"] }), createMainState({ headVersion: "0.2.0", headSubject: "0.2.0", npm, workingTreeChanges: [change] })];

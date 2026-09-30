@@ -189,11 +189,67 @@ describe("create-version in monorepo mode", () => {
       const release = await runCliAsync(repositoryRoot, ["--bump", "minor"], npmEnvironment(registry.registryUrl));
 
       expect(release.status, release.output).toBe(1);
-      expect(flattenOutput(release.output)).toContain("@acme/widget@1.1.0 ya está publicada en npm.");
+      expect(flattenOutput(release.output)).toContain("@acme/widget@1.1.0 no es mayor que 1.1.0, la versión más alta publicada en npm.");
       expect(runGit(["rev-parse", "HEAD"], repositoryRoot)).toBe(featureSha);
       expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe("");
       expect(runGit(["tag", "--list", "widget-v1.1.0"], repositoryRoot)).toBe("");
       expect(runGit(["rev-parse", "main"], remoteRoot)).toBe(featureSha);
+      expect(registry.publications).toEqual([]);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "does not write the release when a chosen version is below the highest one on npm, which would move latest back",
+    async () => {
+      const { repositoryRoot, remoteRoot } = createReleasedMonorepo();
+      pushCoreFeature(repositoryRoot);
+      const featureSha = runGit(["rev-parse", "HEAD"], repositoryRoot);
+      const registry = await startRegistry({ packages: { "@acme/widget": { maintainers: [OWNER_USER], versions: ["1.0.0", "2.0.0"] } } });
+
+      const release = await runCliAsync(repositoryRoot, ["--bump", "patch"], npmEnvironment(registry.registryUrl));
+
+      expect(release.status, release.output).toBe(1);
+      expect(flattenOutput(release.output)).toContain("@acme/widget@1.0.1 no es mayor que 2.0.0, la versión más alta publicada en npm.");
+      expect(runGit(["rev-parse", "HEAD"], repositoryRoot)).toBe(featureSha);
+      expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe("");
+      expect(runGit(["tag", "--list", "widget-v1.0.1"], repositoryRoot)).toBe("");
+      expect(runGit(["rev-parse", "main"], remoteRoot)).toBe(featureSha);
+      expect(registry.publications).toEqual([]);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "does not write the release when a package tag already exists locally or is not a valid Git ref name",
+    async () => {
+      const { repositoryRoot, remoteRoot } = createReleasedMonorepo();
+      pushCoreFeature(repositoryRoot);
+      const featureSha = runGit(["rev-parse", "HEAD"], repositoryRoot);
+      const registry = await startRegistry();
+      runGit(["tag", "widget-v1.1.0", "HEAD~1"], repositoryRoot);
+
+      const existing = await runCliAsync(repositoryRoot, ["--bump", "minor"], npmEnvironment(registry.registryUrl));
+
+      expect(existing.status, existing.output).toBe(1);
+      expect(flattenOutput(existing.output)).toContain("El tag widget-v1.1.0 ya existe en local.");
+      expect(runGit(["rev-parse", "HEAD"], repositoryRoot)).toBe(featureSha);
+      expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe("");
+
+      runGit(["tag", "-d", "widget-v1.1.0"], repositoryRoot);
+      const config = readFileSync(path.join(repositoryRoot, "beez-rp.config.js"), "utf8");
+      writeFileSync(path.join(repositoryRoot, "beez-rp.config.js"), config.replace('packages: "workspaces",', 'packages: "workspaces",\n  tagFormat: "{component}~v{version}",'));
+      commitAll(repositoryRoot, "chore: use an invalid tag format");
+      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+      const configSha = runGit(["rev-parse", "HEAD"], repositoryRoot);
+
+      const invalid = await runCliAsync(repositoryRoot, ["--bump", "minor"], npmEnvironment(registry.registryUrl));
+
+      expect(invalid.status, invalid.output).toBe(1);
+      expect(flattenOutput(invalid.output)).toContain('El tag widget~v1.1.0 no es un nombre de tag válido para Git (tagFormat "{component}~v{version}").');
+      expect(runGit(["rev-parse", "HEAD"], repositoryRoot)).toBe(configSha);
+      expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe("");
+      expect(runGit(["rev-parse", "main"], remoteRoot)).toBe(configSha);
       expect(registry.publications).toEqual([]);
     },
     GIT_FIXTURE_TEST_TIMEOUT_MS

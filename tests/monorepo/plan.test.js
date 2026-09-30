@@ -175,6 +175,17 @@ describe("buildMonorepoPlan", () => {
     expect(plan.blockers[0]?.details).not.toContain(" M packages/widget/README.md");
   });
 
+  it("does not set aside a modified .npmrc with --ignore-local-changes, since the diagnosis already resolved the registry from it", () => {
+    const state = monorepoState({ workingTreeChanges: [" M .npmrc", " M packages/widget/.npmrc", " M packages/widget/README.md"] });
+
+    const plan = buildMonorepoPlan(state, NPM_PACKAGE, { tagFormat: TAG_FORMAT, ignoreLocalChanges: true });
+
+    expect(plan.mode).toBe(RELEASE_MODE.blocked);
+    expect(plan.blockers[0]?.title).toContain(".npmrc");
+    expect(plan.blockers[0]?.details).toEqual(expect.arrayContaining([" M .npmrc", " M packages/widget/.npmrc"]));
+    expect(plan.blockers[0]?.details).not.toContain(" M packages/widget/README.md");
+  });
+
   it("chooses the versions before applying migrations, so skipping every package leaves the database untouched", () => {
     const state = monorepoState({ migrations: { status: MIGRATION_STATUS.pending, pending: ["001_init"], target: "db", reason: null } });
 

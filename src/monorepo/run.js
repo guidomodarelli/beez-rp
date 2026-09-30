@@ -71,7 +71,7 @@ import {
   syncMainStep,
 } from "../create-version/run.js";
 import { BOX_TONE, ICON, formatDuration, measureActiveMs, paint, print, renderBanner, renderBox, renderRow, renderStepHeader, select, startSpinner } from "../terminal-ui.js";
-import { bumpReleaseVersion, isStableReleaseVersion, suggestReleaseType } from "../versions.js";
+import { bumpReleaseVersion, compareReleaseVersions, findHighestStableVersion, isStableReleaseVersion, suggestReleaseType } from "../versions.js";
 import { buildMonorepoPlan, listMonorepoChangesToSetAside, listPackagesToAuthenticate } from "./plan.js";
 import { buildMonorepoReleaseSubject } from "./release-commit.js";
 import { collectMonorepoState } from "./state.js";
@@ -192,6 +192,30 @@ function readWorkingVersion(context, unit) {
 }
 
 /**
+ * Checks, before anything is written, that the release tag of a package is a valid Git ref name and
+ * does not exist locally, so `git tag` cannot fail after the release commit.
+ *
+ * @param {MonorepoContext} context - Context.
+ * @param {string} tag - Tag the release would create.
+ * @returns {Promise<void>}
+ * @throws {ReleaseStepError} When the tag is invalid or already exists.
+ */
+async function assertTagCanBeCreated(context, tag) {
+  if ((await context.reader.tryGit(["check-ref-format", `refs/tags/${tag}`])) === null) {
+    throw new ReleaseStepError(
+      `El tag ${tag} no es un nombre de tag válido para Git (tagFormat "${context.tagFormat}").`,
+      `No se escribió nada. Ajustá tagFormat o el nombre del paquete y volvé a correr ${context.commands.createVersion}.`
+    );
+  }
+  if (await context.reader.tryGit(["rev-parse", "--verify", "--quiet", `refs/tags/${tag}`])) {
+    throw new ReleaseStepError(
+      `El tag ${tag} ya existe en local.`,
+      `No se escribió nada. Revisalo con git show ${tag}; si sobra, borralo con git tag -d ${tag} y volvé a correr ${context.commands.createVersion}.`
+    );
+  }
+}
+
+/**
  * Asks (or takes from the flags) the version of every package with changes; a package can be left
  * out of this release.
  *
@@ -235,10 +259,13 @@ async function chooseVersionsStep(context) {
     }
 
     const version = bumpReleaseVersion(currentVersion, /** @type {"patch" | "minor" | "major"} */ (choice));
-    if (packageSnapshot.npm?.publishedVersions.includes(version)) {
+    // As in single-package mode: a version not above the highest one on npm is either already
+    // published or would move `latest` back.
+    const highestPublished = findHighestStableVersion(packageSnapshot.npm?.publishedVersions ?? []);
+    if (highestPublished && compareReleaseVersions(version, highestPublished) <= 0) {
       throw new ReleaseStepError(
-        `${unit.name}@${version} ya está publicada en npm.`,
-        `No se escribió nada. Llevá la versión de ${unit.manifestPath} a la última publicada o elegí otro tipo de versión, y volvé a correr ${context.commands.createVersion}.`
+        `${unit.name}@${version} no es mayor que ${highestPublished}, la versión más alta publicada en npm.`,
+        `No se escribió nada. Llevá la versión de ${unit.manifestPath} a ${highestPublished} o elegí otro tipo de versión, y volvé a correr ${context.commands.createVersion}.`
       );
     }
     context.chosen.push({ unit, snapshot: packageSnapshot, version, tag: formatPackageTag(context.tagFormat, unit, version), commitSha: null });
@@ -251,6 +278,10 @@ async function chooseVersionsStep(context) {
       `Dos paquetes del release generan el mismo tag ${duplicatedTag.tag} (tagFormat "${context.tagFormat}").`,
       `No se escribió nada. Usá {name} en tagFormat, o carpetas de paquete con nombres distintos, y volvé a correr ${context.commands.createVersion}.`
     );
+  }
+
+  for (const { tag } of context.chosen) {
+    await assertTagCanBeCreated(context, tag);
   }
 
   if (context.chosen.length === 0) {
