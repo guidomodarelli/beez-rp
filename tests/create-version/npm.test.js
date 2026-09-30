@@ -109,6 +109,11 @@ describe("buildNpmPublishArguments", () => {
   it("keeps an artifact that is already explicitly relative", () => {
     expect(buildNpmPublishArguments("./releases/pkg-1.9.0.tgz")).toEqual(["publish", "./releases/pkg-1.9.0.tgz", ...PUBLISH_OPTIONS]);
   });
+
+  it("passes the resolved registry explicitly and rejects one unsafe on the command line", () => {
+    expect(buildNpmPublishArguments(null, "https://npm.example.test/team")).toEqual(["publish", ...PUBLISH_OPTIONS, "--registry", "https://npm.example.test/team"]);
+    expect(() => buildNpmPublishArguments(null, "https://npm.example.test/a&b/")).toThrow("caracteres no permitidos");
+  });
 });
 
 describe("publish registry resolution", () => {

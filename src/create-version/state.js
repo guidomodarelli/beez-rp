@@ -115,7 +115,7 @@ export async function findLastRelease(reader, revision) {
  * @param {string} branchName - Head branch.
  * @returns {Promise<{ pullRequest: PullRequestSnapshot | null, githubError: string | null }>} Pull request or error.
  */
-async function lookupPullRequest(repositoryRoot, branchName) {
+export async function lookupPullRequest(repositoryRoot, branchName) {
   const result = await runCaptured("gh", ["pr", "view", branchName, "--json", PULL_REQUEST_JSON_FIELDS], { cwd: repositoryRoot });
 
   if (result.status === 0) {
@@ -177,7 +177,7 @@ export function readChangelogState(repositoryRoot) {
  * @param {(() => Promise<MigrationCheck> | MigrationCheck) | null} checkMigrations - Adapter bound to its hook context.
  * @returns {Promise<MigrationCheck | null>} Migration state, or `null` for projects without migrations.
  */
-async function readMigrations(checkMigrations) {
+export async function readMigrations(checkMigrations) {
   if (!checkMigrations) {
     return null;
   }
@@ -199,7 +199,7 @@ async function readMigrations(checkMigrations) {
  * @returns {Promise<import("./npm.js").NpmLookup>} Published versions, or a failed lookup when the registry is invalid
  *   or npm cannot report it.
  */
-async function lookupNpmOnPublishRegistry(lookupNpm, manifest, repositoryRoot) {
+export async function lookupNpmOnPublishRegistry(lookupNpm, manifest, repositoryRoot) {
   const registry = await resolveRegistrySafely(manifest, repositoryRoot);
 
   return registry.registryUrl === null
@@ -230,7 +230,7 @@ async function resolveRegistrySafely(manifest, repositoryRoot) {
  * @param {string} repositoryRoot - Repository root.
  * @returns {Promise<import("./npm.js").NpmAuthCheck>} Check result; an `unknown` one when the registry cannot be resolved.
  */
-async function checkNpmAuthOnPublishRegistry(checkAccess, manifest, repositoryRoot) {
+export async function checkNpmAuthOnPublishRegistry(checkAccess, manifest, repositoryRoot) {
   const registry = await resolveRegistrySafely(manifest, repositoryRoot);
 
   return registry.registryUrl === null
@@ -248,7 +248,7 @@ async function checkNpmAuthOnPublishRegistry(checkAccess, manifest, repositoryRo
  * @param {import("./npm.js").NpmLookup | null} npm - Published versions, or `null` when npm is not tracked.
  * @returns {import("./npm.js").NpmAuthCheck} The same check, or a `notOwner` one when the package already has versions.
  */
-function confirmFirstPublication(npmAuth, npm) {
+export function confirmFirstPublication(npmAuth, npm) {
   const publishedCount = npm?.publishedVersions.length ?? 0;
 
   if (!npmAuth.firstPublication || publishedCount === 0) {
@@ -261,6 +261,61 @@ function confirmFirstPublication(npmAuth, npm) {
     firstPublication: false,
     reason: `npm view lista versiones publicadas de ${npmAuth.packageName} (${publishedCount}), pero npm owner ls respondió ${NPM_NOT_FOUND_CODE}: el token no tiene acceso al paquete.`,
   };
+}
+
+/**
+ * @typedef {{
+ *   currentBranch: string | null,
+ *   workingTreeChanges: string[],
+ *   branch: import("./plan.js").FeatureBranchSnapshot | null,
+ *   pullRequest: PullRequestSnapshot | null,
+ *   githubError: string | null,
+ *   main: { aheadCommits: import("./process.js").CommitRecord[], behindCount: number },
+ *   remoteMainExists: boolean,
+ * }} RepositorySnapshot
+ *   What every release mode reads from Git before looking at packages: the branch and its pull
+ *   request, the working tree and `main` compared with `origin/main`.
+ */
+
+/**
+ * Fetches `origin` and reads the repository part of the snapshot, shared by the single-package and
+ * the monorepo modes.
+ *
+ * @param {{
+ *   repositoryRoot: string,
+ *   reader: GitReader,
+ *   onProgress: (label: string) => void,
+ *   lookupPullRequestFor: typeof lookupPullRequest,
+ * }} options - Repository, reader, progress callback and pull request adapter.
+ * @returns {Promise<RepositorySnapshot>} Repository snapshot.
+ */
+export async function readRepositorySnapshot({ repositoryRoot, reader, onProgress, lookupPullRequestFor }) {
+  onProgress("Sincronizando con origin (fetch)");
+  await reader.git(["fetch", RELEASE_REMOTE, "--prune", "--tags", "--quiet"]);
+
+  onProgress("Leyendo el estado de Git");
+  const currentBranch = await reader.tryGit(["symbolic-ref", "--quiet", "--short", "HEAD"]);
+  // Every untracked file, not only its directory, so the plan sees the extension of each one; with
+  // core.quotePath off, non-ASCII paths come verbatim instead of octal-escaped.
+  const statusOutput = await reader.git(["-c", "core.quotePath=false", "status", "--porcelain", "--untracked-files=all"]);
+  const workingTreeChanges = statusOutput.split("\n").map((line) => line.trimEnd()).filter(Boolean);
+  const localMainExists = (await reader.tryGit(["rev-parse", "--verify", "--quiet", MAIN_BRANCH])) !== null;
+  const remoteMainExists = (await reader.tryGit(["rev-parse", "--verify", "--quiet", REMOTE_MAIN_REF])) !== null;
+  const aheadCommits = localMainExists && remoteMainExists ? await listCommits(reader, `${REMOTE_MAIN_REF}..${MAIN_BRANCH}`) : [];
+  const behindCount =
+    localMainExists && remoteMainExists ? Number((await reader.tryGit(["rev-list", "--count", `${MAIN_BRANCH}..${REMOTE_MAIN_REF}`])) ?? 0) : 0;
+
+  let branch = null;
+  let pullRequest = null;
+  let githubError = null;
+
+  if (currentBranch && currentBranch !== MAIN_BRANCH) {
+    onProgress(`Revisando la rama ${currentBranch} y su PR`);
+    branch = await readFeatureBranch(reader, currentBranch);
+    ({ pullRequest, githubError } = await lookupPullRequestFor(repositoryRoot, currentBranch));
+  }
+
+  return { currentBranch, workingTreeChanges, branch, pullRequest, githubError, main: { aheadCommits, behindCount }, remoteMainExists };
 }
 
 /**
@@ -290,20 +345,8 @@ export async function collectReleaseState({
   lookupPullRequestFor = lookupPullRequest,
 }) {
   const reader = createGitReader(repositoryRoot);
-
-  onProgress("Sincronizando con origin (fetch)");
-  await reader.git(["fetch", RELEASE_REMOTE, "--prune", "--tags", "--quiet"]);
-
-  onProgress("Leyendo el estado de Git");
-  const currentBranch = await reader.tryGit(["symbolic-ref", "--quiet", "--short", "HEAD"]);
-  // Every untracked file, not only its directory, so the plan sees the extension of each one.
-  const statusOutput = await reader.git(["status", "--porcelain", "--untracked-files=all"]);
-  const workingTreeChanges = statusOutput.split("\n").map((line) => line.trimEnd()).filter(Boolean);
-  const localMainExists = (await reader.tryGit(["rev-parse", "--verify", "--quiet", MAIN_BRANCH])) !== null;
-  const remoteMainExists = (await reader.tryGit(["rev-parse", "--verify", "--quiet", REMOTE_MAIN_REF])) !== null;
-  const aheadCommits = localMainExists && remoteMainExists ? await listCommits(reader, `${REMOTE_MAIN_REF}..${MAIN_BRANCH}`) : [];
-  const behindCount =
-    localMainExists && remoteMainExists ? Number((await reader.tryGit(["rev-list", "--count", `${MAIN_BRANCH}..${REMOTE_MAIN_REF}`])) ?? 0) : 0;
+  const repository = await readRepositorySnapshot({ repositoryRoot, reader, onProgress, lookupPullRequestFor });
+  const { currentBranch, workingTreeChanges, branch, pullRequest, githubError, main, remoteMainExists } = repository;
   const headVersion = await readPackageVersionAt(reader, "HEAD");
   const headSubject = await reader.tryGit(["log", "-1", "--format=%s", "HEAD"]);
   const headSha = await reader.tryGit(["rev-parse", "HEAD"]);
@@ -318,16 +361,6 @@ export async function collectReleaseState({
   const releasedVersion = remoteMainExists ? await readPackageVersionAt(reader, REMOTE_MAIN_REF) : null;
   const lastRelease = remoteMainExists ? await findLastRelease(reader, REMOTE_MAIN_REF) : null;
   const unreleasedCommits = remoteMainExists ? await listCommits(reader, lastRelease ? `${lastRelease.sha}..${REMOTE_MAIN_REF}` : REMOTE_MAIN_REF) : [];
-
-  let branch = null;
-  let pullRequest = null;
-  let githubError = null;
-
-  if (currentBranch && currentBranch !== MAIN_BRANCH) {
-    onProgress(`Revisando la rama ${currentBranch} y su PR`);
-    branch = await readFeatureBranch(reader, currentBranch);
-    ({ pullRequest, githubError } = await lookupPullRequestFor(repositoryRoot, currentBranch));
-  }
 
   const manifest = JSON.parse(readFileSync(path.join(repositoryRoot, PACKAGE_MANIFEST_FILE), "utf8"));
   let npm = null;
@@ -350,7 +383,7 @@ export async function collectReleaseState({
     branch,
     pullRequest,
     githubError,
-    main: { aheadCommits, behindCount },
+    main,
     headVersion,
     headSubject,
     headSha,

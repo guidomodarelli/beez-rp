@@ -678,13 +678,17 @@ export async function withNpmAuthConfig(authConfigLine, operation, parentDirecto
  * such as `releases/1.9.0-abc/pkg-1.9.0.tgz` as a package spec instead of a file.
  *
  * @param {string | null} [artifactPath] - Archive relative to the root, already checked with `isSafeArtifactPath`; `null` publishes the working tree.
+ * @param {string | null} [registryUrl] - Registry from {@link resolvePublishRegistry} passed as `--registry`, so npm
+ *   publishes where it was resolved even from a checkout without the project `.npmrc`; `null` leaves it to npm's config.
  * @returns {string[]} Arguments that follow `npm`.
+ * @throws {Error} When the registry is not a valid http(s) URL or has characters unsafe on the Windows shell.
  */
-export function buildNpmPublishArguments(artifactPath = null) {
+export function buildNpmPublishArguments(artifactPath = null, registryUrl = null) {
   const publishTarget = artifactPath
     ? [artifactPath.startsWith(LOCAL_PATH_PREFIX) ? artifactPath : `${LOCAL_PATH_PREFIX}${artifactPath}`]
     : [];
-  return ["publish", ...publishTarget, "--access", "public", "--tag", NPM_DIST_TAG];
+  const registryOptions = registryUrl ? buildRegistryOptions(registryUrl, null, "npm publish") : [];
+  return ["publish", ...publishTarget, "--access", "public", "--tag", NPM_DIST_TAG, ...registryOptions];
 }
 
 /**
@@ -712,14 +716,15 @@ export function buildNpmPublishEnvironment(environment = process.env) {
  * also why its output cannot be parsed, and a failure is explained afterwards
  * with {@link checkNpmPublishAccess}.
  *
- * @param {string} repositoryRoot - Package root.
- * @param {{ authConfigLine: string, artifactPath?: string | null }} publication - Registry credential line from
- *   {@link buildNpmAuthConfigLine}, and the archive relative to the root (already checked with `isSafeArtifactPath`);
- *   without `artifactPath` the working tree is published.
+ * @param {string} repositoryRoot - Repository root, where `NPM_TOKEN` is looked up; also the package root unless `packageRoot` is given.
+ * @param {{ authConfigLine: string, artifactPath?: string | null, packageRoot?: string, registryUrl?: string | null }} publication - Registry credential
+ *   line from {@link buildNpmAuthConfigLine}, the archive relative to the package root (already checked with
+ *   `isSafeArtifactPath`; without it the working tree is published), the directory of a workspace package and the
+ *   registry to pass explicitly (see {@link buildNpmPublishArguments}).
  * @returns {Promise<{ exitCode: number, missingToken: boolean }>} npm exit code, or a missing-token result without running npm.
  * @throws {Error} When the temporary config path could break out of its shell quotes.
  */
-export async function publishToNpm(repositoryRoot, { authConfigLine, artifactPath = null }) {
+export async function publishToNpm(repositoryRoot, { authConfigLine, artifactPath = null, packageRoot = repositoryRoot, registryUrl = null }) {
   const { token } = resolveNpmToken(repositoryRoot);
 
   if (!token) {
@@ -732,11 +737,11 @@ export async function publishToNpm(repositoryRoot, { authConfigLine, artifactPat
     }
 
     // The command line is constant apart from validated paths; the token only travels through the environment.
-    const publishArguments = buildNpmPublishArguments(artifactPath);
+    const publishArguments = buildNpmPublishArguments(artifactPath, registryUrl);
     const env = buildNpmTokenEnvironment(token);
     return USES_SHELL_FOR_PACKAGE_MANAGERS
-      ? runInherited(`npm ${publishArguments.join(" ")} --userconfig "${userConfigPath}"`, [], { cwd: repositoryRoot, shell: true, env })
-      : runInherited("npm", [...publishArguments, "--userconfig", userConfigPath], { cwd: repositoryRoot, env });
+      ? runInherited(`npm ${publishArguments.join(" ")} --userconfig "${userConfigPath}"`, [], { cwd: packageRoot, shell: true, env })
+      : runInherited("npm", [...publishArguments, "--userconfig", userConfigPath], { cwd: packageRoot, env });
   });
 
   return { exitCode, missingToken: false };

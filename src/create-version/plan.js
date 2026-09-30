@@ -32,6 +32,7 @@ import {
   NPM_LOOKUP_STATUS,
   PORCELAIN_RENAME_SEPARATOR,
   PORCELAIN_STATUS_WIDTH,
+  PROJECT_NPM_CONFIG_FILE,
   PULL_REQUEST_STATE,
   RELEASE_MODE,
   RELEASE_STEP,
@@ -81,7 +82,8 @@ import { describeNpmAuthProblem, describeNpmFirstPublicationWarning } from "./np
  * @typedef {{ id: string, title: string, detail?: string }} ReleasePlanStep
  * @typedef {{ title: string, details: string[] }} ReleaseBlocker
  * @typedef {{ mode: string, steps: ReleasePlanStep[], blockers: ReleaseBlocker[], warnings: string[], pendingVersion: string | null }} ReleasePlan
- * @typedef {{ bump: "patch" | "minor" | "major" | null, setVersion: string | null, dryRun: boolean, skipUnpublished: boolean, ignoreLocalChanges: boolean, help: boolean }} ReleaseOptions
+ * @typedef {{ bump: "patch" | "minor" | "major" | null, setVersion: string | null, dryRun: boolean, skipUnpublished: boolean, ignoreLocalChanges: boolean, acceptSuggested: boolean, help: boolean }} ReleaseOptions
+ *   `acceptSuggested` takes the release type the commits suggest instead of asking.
  * @typedef {{ version: string, latestPublished: string | null, resumable: boolean }} UnpublishedRelease
  * @typedef {{ skipUnpublished?: boolean, ignoreLocalChanges?: boolean }} PlanOptions
  *   `skipUnpublished` plans a new release even when the last release is missing from npm.
@@ -107,6 +109,7 @@ export const RELEASE_USAGE = [
   "  --dry-run                  Diagnostica y muestra el plan sin cambiar nada.",
   "  --skip-unpublished         Crea un release nuevo aunque el último release no esté en npm (lo saltea).",
   "  --ignore-local-changes     Publica aunque haya cambios sin commitear: se apartan (git stash) y se restauran al final.",
+  "  --accept-suggested         Toma la versión sugerida por los commits sin preguntar (en un monorepo, la de cada paquete).",
   "  --help                     Muestra esta ayuda.",
 ].join("\n");
 
@@ -140,6 +143,7 @@ export function parseReleaseArguments(argv) {
         [CREATE_VERSION_FLAG.dryRun]: { type: "boolean", default: false },
         [CREATE_VERSION_FLAG.skipUnpublished]: { type: "boolean", default: false },
         [CREATE_VERSION_FLAG.ignoreLocalChanges]: { type: "boolean", default: false },
+        [CREATE_VERSION_FLAG.acceptSuggested]: { type: "boolean", default: false },
         [CREATE_VERSION_FLAG.help]: { type: "boolean", short: CREATE_VERSION_FLAG.helpShort, default: false },
       },
     }));
@@ -159,6 +163,10 @@ export function parseReleaseArguments(argv) {
     throw new Error("Usá --bump o --set-version, no los dos a la vez.");
   }
 
+  if (values[CREATE_VERSION_FLAG.acceptSuggested] && (bump !== undefined || setVersion !== undefined)) {
+    throw new Error("--accept-suggested elige la versión sugerida: no se combina con --bump ni con --set-version.");
+  }
+
   return {
     bump: /** @type {ReleaseOptions["bump"]} */ (bump ?? null),
     // A typed `v1.2.0` means `1.2.0`; the version rules validate the rest.
@@ -166,6 +174,7 @@ export function parseReleaseArguments(argv) {
     dryRun: Boolean(values[CREATE_VERSION_FLAG.dryRun]),
     skipUnpublished: Boolean(values[CREATE_VERSION_FLAG.skipUnpublished]),
     ignoreLocalChanges: Boolean(values[CREATE_VERSION_FLAG.ignoreLocalChanges]),
+    acceptSuggested: Boolean(values[CREATE_VERSION_FLAG.acceptSuggested]),
     help: Boolean(values[CREATE_VERSION_FLAG.help]),
   };
 }
@@ -319,7 +328,7 @@ export function listLocalChangesToSetAside(state, mode) {
  * @param {string} line - Porcelain line.
  * @returns {string[]} Paths the line reports.
  */
-function listPorcelainPaths(line) {
+export function listPorcelainPaths(line) {
   return line
     .slice(PORCELAIN_STATUS_WIDTH)
     .split(PORCELAIN_RENAME_SEPARATOR)
@@ -328,18 +337,21 @@ function listPorcelainPaths(line) {
 
 /**
  * Tells whether a `git status --porcelain` line touches code or data the loaded configuration may
- * import (see {@link UNSETTABLE_ASIDE_EXTENSIONS}).
+ * import (see {@link UNSETTABLE_ASIDE_EXTENSIONS}), or a `.npmrc` the diagnosis already read to
+ * resolve the registry and credentials.
  *
  * @param {string} line - Porcelain line.
- * @returns {boolean} `true` when any of its paths has one of those extensions.
+ * @returns {boolean} `true` when any of its paths has one of those extensions or is a `.npmrc`.
  */
-function isCodeChange(line) {
-  return listPorcelainPaths(line).some((changedPath) => UNSETTABLE_ASIDE_EXTENSIONS.some((extension) => changedPath.endsWith(extension)));
+export function isCodeChange(line) {
+  return listPorcelainPaths(line).some(
+    (changedPath) => changedPath.split("/").at(-1) === PROJECT_NPM_CONFIG_FILE || UNSETTABLE_ASIDE_EXTENSIONS.some((extension) => changedPath.endsWith(extension))
+  );
 }
 
 /**
  * Blocks a runnable `--ignore-local-changes` plan whose changes to set aside include code or data
- * (`.js`, `.mjs`, `.cjs`, `.ts`, `.json`): the configuration was loaded from the working tree before
+ * (`.js`, `.mjs`, `.cjs`, `.ts`, `.json`, `.npmrc`): the configuration was loaded from the working tree before
  * setting them aside and may depend on them, so the release would not run the committed code.
  *
  * @param {ReleasePlan} plan - Plan.
@@ -355,20 +367,24 @@ function refuseToSetAsideCodeChanges(plan, state, ignoreLocalChanges, commands) 
     return plan;
   }
 
+  return { mode: RELEASE_MODE.blocked, steps: [], blockers: [codeChangesToSetAsideBlocker(codeChanges, commands)], warnings: [], pendingVersion: null };
+}
+
+/**
+ * Explains why `--ignore-local-changes` cannot set aside code or data changes (see
+ * {@link UNSETTABLE_ASIDE_EXTENSIONS}); shared with the monorepo mode.
+ *
+ * @param {string[]} codeChanges - `git status --porcelain` lines of the code or data changes.
+ * @param {ProjectCommands} commands - Project commands quoted by the hints.
+ * @returns {ReleaseBlocker} Blocker listing them.
+ */
+export function codeChangesToSetAsideBlocker(codeChanges, commands) {
   return {
-    mode: RELEASE_MODE.blocked,
-    steps: [],
-    blockers: [
-      {
-        title: `--${CREATE_VERSION_FLAG.ignoreLocalChanges} no aparta cambios de código ni de datos (${UNSETTABLE_ASIDE_EXTENSIONS.join(", ")})`,
-        details: [
-          ...codeChanges.slice(0, MAX_LISTED_ITEMS),
-          `La configuración ya se cargó con esos cambios y puede depender de ellos: commitealos en una rama o guardalos con git stash, y volvé a correr ${commands.createVersion}.`,
-        ],
-      },
+    title: `--${CREATE_VERSION_FLAG.ignoreLocalChanges} no aparta cambios de código ni de datos (${[...UNSETTABLE_ASIDE_EXTENSIONS, PROJECT_NPM_CONFIG_FILE].join(", ")})`,
+    details: [
+      ...codeChanges.slice(0, MAX_LISTED_ITEMS),
+      `La configuración ya se cargó con esos cambios y puede depender de ellos: commitealos en una rama o guardalos con git stash, y volvé a correr ${commands.createVersion}.`,
     ],
-    warnings: [],
-    pendingVersion: null,
   };
 }
 
@@ -470,7 +486,7 @@ function requireCommittedConfig(plan, state, commands) {
  * @param {ReleaseCommit[]} commits - Foreign commits.
  * @returns {ReleaseBlocker} Blocker.
  */
-function foreignCommitsBlocker(commits) {
+export function foreignCommitsBlocker(commits) {
   return {
     title: `${MAIN_BRANCH} local tiene ${commits.length} commit(s) que no están en origin`,
     details: [
@@ -763,7 +779,7 @@ function applyNpmAuth(plan, npmAuth, commands) {
  * @param {ProjectCommands} commands - Project commands quoted by the hints.
  * @returns {ReleaseBlocker} Blocker.
  */
-function missingChecksBlocker(commands) {
+export function missingChecksBlocker(commands) {
   return {
     title: "El proyecto no valida nada antes de publicar",
     details: [

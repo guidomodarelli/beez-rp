@@ -75,6 +75,7 @@ pnpm cv --set-version X.Y.Z    # solo la siguiente patch, minor o major
 pnpm cv --dry-run              # diagnóstico y plan, sin cambiar nada
 pnpm cv --skip-unpublished     # release nuevo aunque el último no esté en npm (lo saltea)
 pnpm cv --ignore-local-changes # publica aunque haya cambios sin commitear (se apartan y se restauran)
+pnpm cv --accept-suggested     # toma la versión sugerida por los commits sin preguntar
 ```
 
 Sin `--bump` ni `--set-version`, el comando pregunta la versión sin ninguna opción preseleccionada: se elige con su número, o con `↑`/`k` y `↓`/`j`/`Tab` más Enter (Enter no hace nada hasta marcar una). La opción que sugieren los commits lleva una estrella, pero no se elige sola. Sin terminal interactiva (CI) hay que pasar `--bump` o `--set-version`.
@@ -83,7 +84,7 @@ Si hay cambios sin commitear y son lo único que frena el release, el comando lo
 
 Con `--ignore-local-changes`, los cambios sin commitear (staged, sin stagear y archivos nuevos) se apartan con `git stash` antes del primer paso y se restauran al terminar, también si un paso falla: ni los checks, ni la preparación, ni la publicación los ven, y el commit de versión solo lleva `package.json`, `CHANGELOG.md` y `versionFiles`. En un release nuevo, `CHANGELOG.md` queda en el working tree porque el bump lo commitea. La restauración es exacta o no toca nada: lo que estaba staged vuelve staged, lo que estaba solo en el working tree vuelve sin stagear y los archivos nuevos vuelven sin trackear. Si alguna parte choca con el commit de versión (por ejemplo, un cambio en la línea `version` de `package.json`), no se escribe nada, la entrada queda en `git stash` y el comando lo avisa; igual que si el proceso se corta, se recuperan con `git stash pop --index`.
 
-`--ignore-local-changes` no aparta cambios en archivos `.js`, `.mjs`, `.cjs`, `.ts` ni `.json`: la configuración ya se cargó desde el working tree y puede depender de ellos. El plan, también con `--dry-run`, se bloquea y pide commitearlos o guardarlos con `git stash`.
+`--ignore-local-changes` no aparta cambios en archivos `.js`, `.mjs`, `.cjs`, `.ts` ni `.json`, ni en ningún `.npmrc`: la configuración ya se cargó desde el working tree y puede depender de ellos, y el diagnóstico ya resolvió el registry y las credenciales desde el `.npmrc`. El plan, también con `--dry-run`, se bloquea y pide commitearlos o guardarlos con `git stash`.
 
 El comando sale solo desde `main`, limpio y al día con origin (solo `CHANGELOG.md` puede quedar sin commitear en un release nuevo, porque el bump lo commitea; para retomar un release ya commiteado, también tiene que estar limpio). En una rama feature explica qué falta: pushear, abrir o mergear el PR (con `gh`). La única excepción es publicar un release que falta en npm desde su tag (ver [Versiones sin publicar](#versiones-sin-publicar)).
 
@@ -139,6 +140,34 @@ Sin `artifact`, `publish: "npm"` publica el working tree. Con `artifact` publica
 Ejemplo de `prepare` que deja `releases/{version}-{sha256}/{name}-{version}.tgz`: `pnpm build`, `npm pack --ignore-scripts --pack-destination releases/<version>-tmp/` y renombrar la carpeta con el SHA-256 del tarball.
 
 Si no hay tarball o la verificación falla, no se publica nada y volver a correr el comando retoma preparación y publicación.
+
+### Monorepo
+
+Con `packages` en el config, cada paquete publicable del monorepo tiene su propia versión, su `CHANGELOG.md`, su tag y su publicación:
+
+```js
+export default {
+  changelog: { audience: "quien consume {name}" }, // {name}: el paquete de cada CHANGELOG
+  packages: "workspaces",                          // los workspaces del package.json raíz, o ["packages/*", "!packages/internal"]
+  tagFormat: "{component}-v{version}",             // por defecto: widget-v1.2.0 ({component} es la carpeta; también {name})
+  checks: ["bun run ci"],
+  prepare: ["bun install --frozen-lockfile", "bun run build"], // una vez para todos los paquetes
+  publish: "npm",
+};
+```
+
+- Paquetes: los workspaces con `name` que no son `private`. Un paquete tiene cambios cuando un commit toca su carpeta, o la de un paquete `private` del que depende (directa o transitivamente, en cualquier campo de dependencias): los paquetes internos suelen ir bundleados en quien los usa, así que un cambio ahí sale con un release de cada consumidor. Los patrones son rutas relativas a la raíz: uno con `..` o absoluto corta el comando, igual que un `package.json` inválido en una carpeta que coincide con un patrón, o uno que no es `private` sin `name` o sin un `version` estable `X.Y.Z` (se indica la ruta y el motivo).
+- Último release de cada paquete: el último commit de `origin/main` que cambió el `version` de su `package.json`.
+- Versión: por cada paquete con cambios pregunta patch, minor o major (la sugerida por sus commits lleva una estrella) o "No publicar ahora". `--bump` aplica el mismo tipo a todos y `--accept-suggested` toma la sugerida de cada uno; `--set-version` no aplica. Si una versión elegida no es mayor que la más alta publicada en npm (ya está publicada o movería `latest` hacia atrás), si dos paquetes elegidos darían el mismo tag (por ejemplo, dos carpetas `server` con `{component}`), si un tag no es un nombre válido para Git o ya existe en local, o si el `[Unreleased]` de un paquete elegido usa secciones no válidas, se corta sin escribir nada. Un `[Unreleased]` inválido en un paquete que no sale no bloquea a los demás: el plan (también con `--dry-run`) solo lo avisa.
+- `[Unreleased]` vacío: Codex lo completa en la carpeta del paquete, solo con sus commits.
+- Las versiones se eligen antes de aplicar migraciones: si no sale ningún paquete, no se toca la base de datos.
+- Los `CHANGELOG.md` de los paquetes pueden quedar sin commitear durante el plan, pero antes de escribir el commit de release el comando se corta sin tocar nada si hay algo staged que no es de los paquetes elegidos, o si el `CHANGELOG.md` de un paquete que no sale tiene cambios. Como en un solo paquete, `--ignore-local-changes` no aparta cambios en `.js`, `.mjs`, `.cjs`, `.ts`, `.json` (incluidos los `package.json` de los workspaces) ni `.npmrc`.
+- `summary`: una línea con `{version}` o `{name}` se muestra una vez por paquete publicado, con su versión y su nombre; las demás, una sola vez.
+- Un solo commit de release (`release: @scope/a@1.2.0, @scope/b@0.3.1`) con un tag anotado por paquete; `main` y los tags suben con `git push --atomic`.
+- `versionFiles` sigue siendo relativo a la raíz: cada archivo toma la versión del paquete que lo contiene y solo cambia cuando ese paquete sale (no puede ser el `package.json` ni el `CHANGELOG.md` de un paquete: el commit de release ya los escribe), con las mismas validaciones, el mismo rollback y la misma verificación del commit de release. Al retomar un release no se verifica la versión de esos archivos.
+- `prepare` corre una vez (su contexto trae `releases` con nombre, versión y carpeta); `publish: "npm"` publica cada paquete desde su carpeta, en orden de dependencias (primero los que otros instalan). `artifact`, si se usa, es relativo a la carpeta de cada paquete. Con o sin `artifact`, npm no publica si `prepare` modificó archivos versionados o si el `package.json` del paquete usa `workspace:`, `catalog:` o `jsr:` en `dependencies`, `peerDependencies` u `optionalDependencies`. Un `publish` propio corre una vez por paquete.
+- Retoma: si el commit de release quedó solo en local, retoma el push y la publicación. Si un release ya está en origin con su tag y falta en npm, lo publica antes de cualquier release nuevo, preparándolo desde su propio commit en un worktree temporal (no hace falta desacoplar HEAD) aunque `main` haya avanzado. Se publica en el registry que resolvió el diagnóstico en el repositorio (también el de un `.npmrc` sin trackear). Si un tag local ya existe y apunta a otro commit que el de release, no se sube nada. Si el paquete cambió de `name` desde su commit de release, ese release no se publica. Una versión menor que la más alta de npm no se publica (movería `latest` hacia atrás) y se avisa. `--skip-unpublished` saltea esos releases pendientes (lo advierte el plan) y planifica el release nuevo.
+- No aplican `ignore-build` ni la publicación desde HEAD desacoplado.
 
 ### Token de npm
 

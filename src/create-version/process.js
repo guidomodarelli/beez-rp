@@ -120,26 +120,30 @@ export function parseCommitLog(output) {
 }
 
 /**
- * Lists the commits of a revision range.
+ * Lists the commits of a revision range, optionally only those touching some paths.
  *
  * @param {GitReader} reader - Git reader.
  * @param {string} range - Revision range such as `abc..origin/main`.
+ * @param {readonly string[]} [paths] - Paths relative to the root; every commit when empty.
  * @returns {Promise<CommitRecord[]>} Commits, newest first.
  */
-export async function listCommits(reader, range) {
-  const output = await reader.tryGit(["log", `--format=%H${FIELD_SEPARATOR}%s${FIELD_SEPARATOR}%b${RECORD_SEPARATOR}`, range]);
+export async function listCommits(reader, range, paths = []) {
+  const pathArguments = paths.length > 0 ? ["--", ...paths] : [];
+  const output = await reader.tryGit(["log", `--format=%H${FIELD_SEPARATOR}%s${FIELD_SEPARATOR}%b${RECORD_SEPARATOR}`, range, ...pathArguments]);
   return output ? parseCommitLog(output) : [];
 }
 
 /**
- * Reads `package.json` at a revision.
+ * Reads a `package.json` at a revision.
  *
  * @param {GitReader} reader - Git reader.
  * @param {string} revision - Revision such as `HEAD`, `v1.2.0` or `origin/main`.
+ * @param {string} [manifestPath] - Manifest path relative to the root, with `/` separators (a
+ *   workspace package's `packages/x/package.json`); the root `package.json` by default.
  * @returns {Promise<Record<string, unknown> | null>} Parsed manifest, or `null` when missing, unreadable or not a JSON object.
  */
-export async function readPackageManifestAt(reader, revision) {
-  const manifest = await reader.tryGit(["show", `${revision}:${PACKAGE_MANIFEST_FILE}`]);
+export async function readPackageManifestAt(reader, revision, manifestPath = PACKAGE_MANIFEST_FILE) {
+  const manifest = await reader.tryGit(["show", `${revision}:${manifestPath}`]);
 
   try {
     const parsed = manifest ? JSON.parse(manifest) : null;
@@ -150,13 +154,14 @@ export async function readPackageManifestAt(reader, revision) {
 }
 
 /**
- * Reads the `version` field of `package.json` at a revision.
+ * Reads the `version` field of a `package.json` at a revision.
  *
  * @param {GitReader} reader - Git reader.
  * @param {string} revision - Revision such as `HEAD` or `origin/main`.
+ * @param {string} [manifestPath] - Manifest path relative to the root; the root `package.json` by default.
  * @returns {Promise<string | null>} Version, or `null` when unreadable.
  */
-export async function readPackageVersionAt(reader, revision) {
-  const manifest = await readPackageManifestAt(reader, revision);
+export async function readPackageVersionAt(reader, revision, manifestPath = PACKAGE_MANIFEST_FILE) {
+  const manifest = await readPackageManifestAt(reader, revision, manifestPath);
   return typeof manifest?.version === "string" ? manifest.version : null;
 }

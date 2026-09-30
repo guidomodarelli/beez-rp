@@ -114,17 +114,26 @@ import { collectReleaseState } from "./state.js";
  *   registryUrl: string | null,
  *   commands: import("../package-manager.js").ProjectCommands,
  * }} ReleaseContext
+ * @typedef {{
+ *   repositoryRoot: string,
+ *   reader: GitReader,
+ *   config: ResolvedCreateVersionConfig,
+ *   commands: import("../package-manager.js").ProjectCommands,
+ *   state: { migrations: import("./config.js").MigrationCheck | null },
+ * }} StepContext
+ *   What the steps shared with the monorepo mode read: both release contexts satisfy it.
+ * @typedef {{ mode: string, steps: import("./plan.js").ReleasePlanStep[], blockers: import("./plan.js").ReleaseBlocker[], warnings: string[] }} RenderablePlan
  */
 
 /** Raised when the user cancels on purpose; ends the run without an error box. */
-class ReleaseCancelledError extends Error {}
+export class ReleaseCancelledError extends Error {}
 
 /**
  * Raised after syncing `main` brought new commits: the diagnosis, the plan and the configuration
  * (with every module it imports) belong to the previous `main`, so the run ends without an error
  * and asks to run the command again in a new process.
  */
-class MainSyncedRestartError extends Error {}
+export class MainSyncedRestartError extends Error {}
 
 /** Answers of the pending-migrations prompt. */
 const MIGRATION_CHOICE = Object.freeze({ apply: "apply", skip: "skip", cancel: "cancel" });
@@ -139,7 +148,7 @@ const LOCAL_CHANGES_CHOICE = Object.freeze({ ignore: "ignore", cancel: "cancel" 
  * @param {string[]} changes - `git status --porcelain` lines that would be set aside.
  * @returns {Promise<boolean>} `true` to set them aside and go on.
  */
-async function askToIgnoreLocalChanges(changes) {
+export async function askToIgnoreLocalChanges(changes) {
   const lines = changes.slice(0, MAX_LISTED_ITEMS).map((line) => `${ICON.bullet} ${line}`);
   if (changes.length > MAX_LISTED_ITEMS) {
     lines.push(paint("gray", `… y ${changes.length - MAX_LISTED_ITEMS} más`));
@@ -187,7 +196,7 @@ export function createHookContext(repositoryRoot, reader, version) {
  * @param {string} title - Box title.
  * @returns {string} Box.
  */
-function renderCommitList(commits, title) {
+export function renderCommitList(commits, title) {
   const lines = commits.slice(0, MAX_LISTED_COMMITS).map((commit) => `${ICON.bullet} ${commit.subject}`);
 
   if (commits.length > MAX_LISTED_COMMITS) {
@@ -203,7 +212,7 @@ function renderCommitList(commits, title) {
  * @param {string} repositoryRoot - Repository root.
  * @returns {{ matches: boolean, pinned: string } | null} Comparison, or `null` without `.nvmrc`.
  */
-function checkPinnedNodeVersion(repositoryRoot) {
+export function checkPinnedNodeVersion(repositoryRoot) {
   const pinnedPath = path.join(repositoryRoot, PINNED_NODE_VERSION_FILE);
 
   if (!existsSync(pinnedPath)) {
@@ -312,7 +321,7 @@ function renderDiagnosis(state, repositoryRoot) {
  * @param {import("./npm.js").NpmAuthCheck} npmAuth - Credential check.
  * @returns {string} Row.
  */
-function renderNpmAuthRow(npmAuth) {
+export function renderNpmAuthRow(npmAuth) {
   const source = describeNpmTokenSource(npmAuth);
 
   switch (npmAuth.status) {
@@ -336,10 +345,10 @@ function renderNpmAuthRow(npmAuth) {
 /**
  * Renders the plan or its blockers.
  *
- * @param {import("./plan.js").ReleasePlan} plan - Plan.
+ * @param {RenderablePlan} plan - Plan.
  * @returns {string} Box.
  */
-function renderPlan(plan) {
+export function renderPlan(plan) {
   if (plan.blockers.length > 0) {
     const lines = plan.blockers.flatMap((blocker, index) => [
       ...(index > 0 ? [""] : []),
@@ -365,13 +374,13 @@ function renderPlan(plan) {
 /**
  * Runs Git with visible output and fails the step on error.
  *
- * @param {ReleaseContext} context - Release context.
+ * @param {StepContext} context - Release context.
  * @param {string[]} gitArguments - Git arguments.
  * @param {string} failureMessage - Spanish message when it fails.
  * @param {string} hint - Spanish next action.
  * @returns {Promise<void>}
  */
-async function runGitStep(context, gitArguments, failureMessage, hint) {
+export async function runGitStep(context, gitArguments, failureMessage, hint) {
   const exitCode = await runInherited("git", gitArguments, { cwd: context.repositoryRoot });
 
   if (exitCode !== 0) {
@@ -382,12 +391,12 @@ async function runGitStep(context, gitArguments, failureMessage, hint) {
 /**
  * Runs configured command lines in order, stopping at the first failure.
  *
- * @param {ReleaseContext} context - Release context.
+ * @param {StepContext} context - Release context.
  * @param {string[]} commandLines - Commands from `beez-rp.config.js`.
  * @param {string} hint - Spanish next action when one fails.
  * @returns {Promise<void>}
  */
-async function runConfiguredCommands(context, commandLines, hint) {
+export async function runConfiguredCommands(context, commandLines, hint) {
   for (const commandLine of commandLines) {
     print(paint("gray", `$ ${commandLine}`));
     const exitCode = await runCommandLine(commandLine, context.repositoryRoot);
@@ -441,7 +450,7 @@ function requireReleaseVersion(context) {
  * @param {ResolvedCreateVersionConfig} config - Resolved configuration.
  * @returns {import("./plan.js").ReleaseCapabilities} Capabilities for `buildReleasePlan`.
  */
-function describeReleaseCapabilities(config) {
+export function describeReleaseCapabilities(config) {
   return {
     checks: (config.checks?.length ?? 0) > 0,
     checksMissing: config.checks === null,
@@ -458,12 +467,12 @@ function describeReleaseCapabilities(config) {
  * its modules at startup) come from the previous `main`, so the command must run again in a new
  * process to diagnose with the new code and configuration.
  *
- * @param {ReleaseContext} context - Release context.
+ * @param {StepContext} context - Release context.
  * @returns {Promise<void>}
  * @throws {ReleaseStepError} When the fast-forward fails.
  * @throws {MainSyncedRestartError} When `main` moved and the command has to run again.
  */
-async function syncMainStep(context) {
+export async function syncMainStep(context) {
   const headBeforeSync = await context.reader.git(["rev-parse", "HEAD"]);
   await runGitStep(
     context,
@@ -481,10 +490,10 @@ async function syncMainStep(context) {
 /**
  * Shows the pending migrations, asks for confirmation and applies them through the project adapter.
  *
- * @param {ReleaseContext} context - Release context.
+ * @param {StepContext} context - Release context.
  * @returns {Promise<void>}
  */
-async function applyMigrationsStep(context) {
+export async function applyMigrationsStep(context) {
   const adapter = context.config.migrations;
   const migrations = context.state.migrations;
 
@@ -563,10 +572,10 @@ async function generateChangelogStep(context) {
 /**
  * Runs the configured checks before touching the version.
  *
- * @param {ReleaseContext} context - Release context.
+ * @param {StepContext} context - Release context.
  * @returns {Promise<void>}
  */
-async function runChecksStep(context) {
+export async function runChecksStep(context) {
   await runConfiguredCommands(context, context.config.checks ?? [], "Corregí el error de arriba; todavía no se tocó la versión.");
 }
 
@@ -578,7 +587,7 @@ async function runChecksStep(context) {
  */
 
 /**
- * @typedef {Pick<ReleaseContext, "repositoryRoot" | "config" | "reader" | "commands">} VersionFilesContext
+ * @typedef {Pick<StepContext, "repositoryRoot" | "config" | "reader" | "commands">} VersionFilesContext
  */
 
 /** Strict UTF-8 decoder: invalid bytes throw instead of turning into U+FFFD, and a byte order mark is kept as text. */
@@ -594,7 +603,7 @@ const STRICT_UTF8_DECODER = new TextDecoder("utf-8", { fatal: true, ignoreBOM: t
  * @returns {{ originalBytes: Buffer, text: string }} Bytes on disk and their text.
  * @throws {ReleaseStepError} When the file is not valid UTF-8.
  */
-function readReleaseFile(context, filePath, fileLabel) {
+export function readReleaseFile(context, filePath, fileLabel) {
   const originalBytes = readFileSync(path.join(context.repositoryRoot, filePath));
 
   try {
@@ -606,6 +615,31 @@ function readReleaseFile(context, filePath, fileLabel) {
       { cause: error }
     );
   }
+}
+
+/**
+ * Writes a new version into the top-level `version` of a manifest, keeping the rest of its bytes.
+ * The text replacement changes the first `"version"` field of the file, so the result is parsed to
+ * confirm it was the top-level one and not nested metadata.
+ *
+ * @param {VersionFilesContext} context - Release context.
+ * @param {string} filePath - Manifest path relative to the root, as the messages name it.
+ * @param {string} text - Manifest content.
+ * @param {string} version - Version to write.
+ * @returns {string} Manifest content with the new top-level `version`.
+ * @throws {ReleaseStepError} When the first `"version"` of the file is not the top-level one.
+ */
+export function rewriteManifestVersion(context, filePath, text, version) {
+  const content = text.replace(PACKAGE_VERSION_FIELD_PATTERN, `$1${version}$2`);
+
+  if (JSON.parse(content).version !== version) {
+    throw new ReleaseStepError(
+      `${filePath} tiene un campo "version" anidado antes del "version" de primer nivel: el release reescribiría ese otro campo.`,
+      `Mové el "version" de primer nivel antes de cualquier objeto con su propio "version" y volvé a correr ${context.commands.createVersion}; no se tocó la versión.`
+    );
+  }
+
+  return content;
 }
 
 /**
@@ -690,17 +724,18 @@ function rewriteMarkedVersions(context, filePath, content, version, untouchedNot
 }
 
 /**
- * Computes the new content of every configured `versionFiles` entry before anything is written, so
+ * Computes the new content of `versionFiles` entries before anything is written, so
  * a missing, non-regular (symlink or directory), untracked, non-UTF-8 or unmarked file stops the release with the version untouched.
  *
  * @param {VersionFilesContext} context - Release context.
+ * @param {readonly string[]} versionFiles - Entries that get `version`: every configured one, or in a
+ *   monorepo the ones inside the package being released.
  * @param {string} version - Version being released.
  * @returns {Promise<ReleaseFileUpdate[]>} Files to write, with their bytes before the release.
  * @throws {ReleaseStepError} When a file is missing, is not a regular file, is not tracked by Git, is not valid UTF-8, has
  *   block markers paired wrongly or none of its lines is marked.
  */
-async function prepareVersionFileUpdates(context, version) {
-  const { versionFiles } = context.config;
+export async function prepareVersionFileUpdates(context, versionFiles, version) {
   const untouchedNote = "no se tocó la versión";
 
   for (const filePath of versionFiles) {
@@ -738,7 +773,7 @@ async function prepareVersionFileUpdates(context, version) {
  * of the release files go back to the tree the index had before staging, and every release file to
  * its original bytes.
  *
- * @param {ReleaseContext} context - Release context.
+ * @param {VersionFilesContext} context - Release context.
  * @param {ReleaseFileUpdate[]} fileUpdates - Files of the release commit.
  * @param {string | null} indexTree - Tree of the index before staging, or `null` when Git could not write it.
  * @param {ReleaseStepError} failure - What failed.
@@ -804,15 +839,16 @@ async function verifyReleasedVersionFiles(context, version) {
 
 /**
  * Stops the release when an earlier step (such as a check running a formatter with `--fix`) changed
- * `package.json` or a `versionFiles` entry: the plan requires them clean, so any difference from
+ * a `package.json` or a `versionFiles` entry: the plan requires them clean, so any difference from
  * `HEAD` would be read as the original content and shipped in the release commit.
  *
  * @param {VersionFilesContext} context - Release context.
+ * @param {readonly string[]} filePaths - Manifests and `versionFiles` entries the release rewrites.
  * @returns {Promise<void>}
  * @throws {ReleaseStepError} When any of those files differs from `HEAD`.
  */
-async function assertReleaseFilesMatchHead(context) {
-  const releasePathspecs = [PACKAGE_MANIFEST_FILE, ...context.config.versionFiles].map(toLiteralPathspec);
+export async function assertReleaseFilesMatchHead(context, filePaths) {
+  const releasePathspecs = filePaths.map(toLiteralPathspec);
   const changedPaths = (await context.reader.git(["diff", "--name-only", "-z", "HEAD", "--", ...releasePathspecs])).split("\0").filter(Boolean);
 
   if (changedPaths.length > 0) {
@@ -824,6 +860,57 @@ async function assertReleaseFilesMatchHead(context) {
 }
 
 /**
+ * Writes the release files, stages them literally and creates the release commit, checking that it
+ * holds exactly the prepared tree. Any failure (or a hook that changes the commit) rolls the files and
+ * their staging back and undoes the commit, so no tag is created.
+ *
+ * @param {StepContext} context - Release context.
+ * @param {ReleaseFileUpdate[]} releaseFiles - Files of the release commit, with their bytes before the release.
+ * @param {string} subject - Subject of the release commit.
+ * @returns {Promise<void>}
+ * @throws {ReleaseStepError} When writing, staging or committing fails, or the commit differs from the prepared tree.
+ */
+export async function commitReleaseFiles(context, releaseFiles, subject) {
+  // The index before staging, so a rollback puts it back exactly (a CHANGELOG.md the user staged stays staged).
+  const indexTree = await context.reader.tryGit(["write-tree"]);
+  let preparedTree = "";
+
+  try {
+    for (const { filePath, content } of releaseFiles) {
+      try {
+        writeFileSync(path.join(context.repositoryRoot, filePath), content);
+      } catch (error) {
+        throw new ReleaseStepError(`No se pudo escribir ${filePath} para el release (${error instanceof Error ? error.message : String(error)}).`, "Revisá que se pueda escribir (permisos, solo lectura).", {
+          cause: error,
+        });
+      }
+    }
+    await runGitStep(context, ["add", "--", ...releaseFiles.map(({ filePath }) => toLiteralPathspec(filePath))], "No se pudo stagear package.json, CHANGELOG.md y versionFiles", "Revisá git status.");
+    // What the commit must hold: a hook that changes or stages anything else makes it differ.
+    preparedTree = await context.reader.git(["write-tree"]);
+    await runGitStep(context, ["commit", "--quiet", "-m", subject], "El commit de versión falló", "Corregí el error (por ejemplo, un hook pre-commit que lo rechaza).");
+  } catch (error) {
+    const failure =
+      error instanceof ReleaseStepError
+        ? error
+        : new ReleaseStepError(`No se pudo preparar el commit de versión ${subject} (${error instanceof Error ? error.message : String(error)}).`, "Revisá git status.", { cause: error });
+    throw await rollBackRelease(context, releaseFiles, indexTree, failure);
+  }
+
+  if ((await context.reader.git(["rev-parse", "HEAD^{tree}"])) !== preparedTree) {
+    const unpreparedPaths = await context.reader.git(["diff", "--name-only", preparedTree, "HEAD"]);
+    const failure = new ReleaseStepError(
+      `El commit de versión ${subject} incluía cambios que beez-rp no preparó: ${unpreparedPaths.split("\n").slice(0, MAX_LISTED_ITEMS).join(", ")} (por ejemplo, de un hook). Se deshizo el commit y no se creó el tag.`,
+      "Revisá el hook y esos cambios."
+    );
+    if ((await context.reader.tryGit(["reset", "--soft", "--quiet", "HEAD^"])) === null) {
+      throw new ReleaseStepError(failure.message, `No se pudo deshacer el commit: corré git reset --soft HEAD^, revisá git status y volvé a correr ${context.commands.createVersion}.`);
+    }
+    throw await rollBackRelease(context, releaseFiles, indexTree, failure);
+  }
+}
+
+/**
  * Chooses the next version (flags or prompt), releases the CHANGELOG
  * `[Unreleased]` block and creates the release commit and annotated tag.
  *
@@ -831,7 +918,7 @@ async function assertReleaseFilesMatchHead(context) {
  * @returns {Promise<void>}
  */
 async function bumpVersionStep(context) {
-  await assertReleaseFilesMatchHead(context);
+  await assertReleaseFilesMatchHead(context, [PACKAGE_MANIFEST_FILE, ...context.config.versionFiles]);
   // Re-read the manifest: syncing main may have brought a newer version.
   const manifest = readReleaseFile(context, PACKAGE_MANIFEST_FILE, PACKAGE_MANIFEST_FILE);
   const currentVersion = JSON.parse(manifest.text).version;
@@ -841,7 +928,11 @@ async function bumpVersionStep(context) {
 
   let nextRelease = resolveRequestedVersion(currentVersion, context.options);
 
-  if (nextRelease) {
+  if (!nextRelease && context.options.acceptSuggested) {
+    const suggestion = suggestReleaseType(commits);
+    nextRelease = resolveRequestedVersion(currentVersion, { bump: suggestion.releaseType, setVersion: null });
+    print(`${ICON.info} Versión sugerida aceptada: ${paint(["bold", "cyan"], nextRelease?.version ?? "")} (${suggestion.releaseType}: ${suggestion.reason})`);
+  } else if (nextRelease) {
     print(`${ICON.info} Versión elegida por flag: ${paint(["bold", "cyan"], nextRelease.version)} (${nextRelease.releaseType})`);
   } else {
     const suggestion = suggestReleaseType(commits);
@@ -879,49 +970,13 @@ async function bumpVersionStep(context) {
 
   /** @type {ReleaseFileUpdate[]} */
   const releaseFiles = [
-    { filePath: PACKAGE_MANIFEST_FILE, originalBytes: manifest.originalBytes, content: manifest.text.replace(PACKAGE_VERSION_FIELD_PATTERN, `$1${nextRelease.version}$2`) },
+    { filePath: PACKAGE_MANIFEST_FILE, originalBytes: manifest.originalBytes, content: rewriteManifestVersion(context, PACKAGE_MANIFEST_FILE, manifest.text, nextRelease.version) },
     { filePath: CHANGELOG_FILE, originalBytes: changelog.originalBytes, content: releasedChangelog },
-    ...(await prepareVersionFileUpdates(context, nextRelease.version)),
+    ...(await prepareVersionFileUpdates(context, context.config.versionFiles, nextRelease.version)),
   ];
   print(renderBox({ title: `CHANGELOG · ${UNRELEASED_HEADING} → [${nextRelease.version}]`, lines: readWorkingUnreleased(context.repositoryRoot).body.split("\n"), tone: BOX_TONE.info }));
 
-  // The index before staging, so a rollback puts it back exactly (a CHANGELOG.md the user staged stays staged).
-  const indexTree = await context.reader.tryGit(["write-tree"]);
-  let preparedTree = "";
-
-  try {
-    for (const { filePath, content } of releaseFiles) {
-      try {
-        writeFileSync(path.join(context.repositoryRoot, filePath), content);
-      } catch (error) {
-        throw new ReleaseStepError(`No se pudo escribir ${filePath} para el release (${error instanceof Error ? error.message : String(error)}).`, "Revisá que se pueda escribir (permisos, solo lectura).", {
-          cause: error,
-        });
-      }
-    }
-    await runGitStep(context, ["add", "--", ...releaseFiles.map(({ filePath }) => toLiteralPathspec(filePath))], "No se pudo stagear package.json, CHANGELOG.md y versionFiles", "Revisá git status.");
-    // What the commit must hold: a hook that changes or stages anything else makes it differ.
-    preparedTree = await context.reader.git(["write-tree"]);
-    await runGitStep(context, ["commit", "--quiet", "-m", nextRelease.version], "El commit de versión falló", "Corregí el error (por ejemplo, un hook pre-commit que lo rechaza).");
-  } catch (error) {
-    const failure =
-      error instanceof ReleaseStepError
-        ? error
-        : new ReleaseStepError(`No se pudo preparar el commit de versión ${nextRelease.version} (${error instanceof Error ? error.message : String(error)}).`, "Revisá git status.", { cause: error });
-    throw await rollBackRelease(context, releaseFiles, indexTree, failure);
-  }
-
-  if ((await context.reader.git(["rev-parse", "HEAD^{tree}"])) !== preparedTree) {
-    const unpreparedPaths = await context.reader.git(["diff", "--name-only", preparedTree, "HEAD"]);
-    const failure = new ReleaseStepError(
-      `El commit de versión ${nextRelease.version} incluía cambios que beez-rp no preparó: ${unpreparedPaths.split("\n").slice(0, MAX_LISTED_ITEMS).join(", ")} (por ejemplo, de un hook). Se deshizo el commit y no se creó el tag.`,
-      "Revisá el hook y esos cambios."
-    );
-    if ((await context.reader.tryGit(["reset", "--soft", "--quiet", "HEAD^"])) === null) {
-      throw new ReleaseStepError(failure.message, `No se pudo deshacer el commit: corré git reset --soft HEAD^, revisá git status y volvé a correr ${context.commands.createVersion}.`);
-    }
-    throw await rollBackRelease(context, releaseFiles, indexTree, failure);
-  }
+  await commitReleaseFiles(context, releaseFiles, nextRelease.version);
 
   const tag = toReleaseTag(nextRelease.version);
   await runGitStep(context, ["tag", "-a", tag, "-m", nextRelease.version], `No se pudo crear el tag ${tag}`, `Si ya existe, revisalo con git show ${tag}.`);
@@ -1006,22 +1061,30 @@ async function pushReleaseTagStep(context) {
 }
 
 /**
- * Lists the tracked files that differ from `HEAD`. `prepare` may create untracked or ignored
- * output (`dist/`, `releases/`), but a modified tracked file (such as `package.json`) means
- * `npm pack --dry-run` would no longer read the release commit.
+ * Checks that no tracked file differs from `HEAD` before publishing. `prepare` may create untracked
+ * or ignored output (`dist/`, `releases/`), but a modified tracked file (such as `package.json`)
+ * means the publication would no longer be the release commit.
  *
- * @param {ReleaseContext} context - Release context.
- * @returns {Promise<string[]>} `git status --porcelain` lines of modified tracked files.
- * @throws {ReleaseStepError} When Git cannot report the working tree state.
+ * @param {{ reader: GitReader, commands: import("../package-manager.js").ProjectCommands }} context - Git reader of
+ *   the checkout being published and the project commands quoted by the hint.
+ * @returns {Promise<void>}
+ * @throws {ReleaseStepError} When Git cannot report the working tree state or a tracked file changed.
  */
-async function listTrackedChanges(context) {
+export async function assertNoTrackedChanges(context) {
   const output = await context.reader.tryGit(["status", "--porcelain", "--untracked-files=no"]);
 
   if (output === null) {
     throw new ReleaseStepError("No se pudo leer el estado del working tree antes de publicar.", `No se publicó nada. Revisá git status y volvé a correr ${context.commands.createVersion}.`);
   }
 
-  return output.split("\n").filter((line) => line.trim() !== "");
+  const trackedChanges = output.split("\n").filter((line) => line.trim() !== "");
+
+  if (trackedChanges.length > 0) {
+    throw new ReleaseStepError(
+      `El paso de preparación modificó archivos versionados: ${trackedChanges.slice(0, MAX_LISTED_ITEMS).join("; ")}.`,
+      `No se publicó nada. prepare puede generar archivos ignorados (dist/, releases/) pero no cambiar archivos versionados como package.json: revertí esos cambios y volvé a correr ${context.commands.createVersion}.`
+    );
+  }
 }
 
 /**
@@ -1043,14 +1106,7 @@ async function resolvePublishedArtifact(context, version, workingManifest) {
     return null;
   }
 
-  const trackedChanges = await listTrackedChanges(context);
-
-  if (trackedChanges.length > 0) {
-    throw new ReleaseStepError(
-      `El paso de preparación modificó archivos versionados: ${trackedChanges.slice(0, MAX_LISTED_ITEMS).join("; ")}.`,
-      `No se publicó nada. prepare puede generar archivos ignorados (dist/, releases/) pero no cambiar archivos versionados como package.json: revertí esos cambios y volvé a correr ${context.commands.createVersion}.`
-    );
-  }
+  await assertNoTrackedChanges(context);
 
   const pnpmRewrites = findPnpmPackRewrites(workingManifest);
 
@@ -1339,6 +1395,12 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
     return FAILURE_EXIT_CODE;
   }
 
+  if (config.packages) {
+    // Imported lazily: the monorepo mode imports this module for the steps it shares.
+    const { runMonorepoCreateVersion } = await import("../monorepo/run.js");
+    return runMonorepoCreateVersion({ repositoryRoot, config, options, startedAt });
+  }
+
   const reader = createGitReader(repositoryRoot);
   const remoteUrl = (await reader.tryGit(["remote", "get-url", RELEASE_REMOTE])) ?? "";
   const { migrations } = config;
@@ -1440,8 +1502,8 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
 
   // The version prompt has no default, so it cannot answer itself without a terminal: fail before
   // any step runs instead of after the checks.
-  if (plan.steps.some((planStep) => planStep.id === RELEASE_STEP.bumpVersion) && !options.bump && !options.setVersion && !process.stdin.isTTY) {
-    print(`${ICON.failure} ${paint("red", `Sin terminal interactiva no se puede elegir la versión: usá --${CREATE_VERSION_FLAG.bump} patch|minor|major o --${CREATE_VERSION_FLAG.setVersion} X.Y.Z.`)}`);
+  if (plan.steps.some((planStep) => planStep.id === RELEASE_STEP.bumpVersion) && !options.bump && !options.setVersion && !options.acceptSuggested && !process.stdin.isTTY) {
+    print(`${ICON.failure} ${paint("red", `Sin terminal interactiva no se puede elegir la versión: usá --${CREATE_VERSION_FLAG.bump} patch|minor|major, --${CREATE_VERSION_FLAG.setVersion} X.Y.Z o --${CREATE_VERSION_FLAG.acceptSuggested}.`)}`);
     return FAILURE_EXIT_CODE;
   }
 

@@ -77,7 +77,7 @@ describe("create-version arguments", () => {
   );
 
   it("should parse spaced and inline flags and reject invalid combinations", () => {
-    expect(parseReleaseArguments(["--bump", "minor", "--dry-run", "--"])).toEqual({ bump: "minor", setVersion: null, dryRun: true, skipUnpublished: false, ignoreLocalChanges: false, help: false });
+    expect(parseReleaseArguments(["--bump", "minor", "--dry-run", "--"])).toEqual({ bump: "minor", setVersion: null, dryRun: true, skipUnpublished: false, ignoreLocalChanges: false, acceptSuggested: false, help: false });
     expect(parseReleaseArguments(["--skip-unpublished"]).skipUnpublished).toBe(true);
     expect(parseReleaseArguments(["--ignore-local-changes"]).ignoreLocalChanges).toBe(true);
     expect(parseReleaseArguments(["-h"]).help).toBe(true);
@@ -214,6 +214,7 @@ describe("create-version plan", () => {
     { name: "a rename into a module", change: "R  notes.md -> lib/helper.cjs" },
     { name: "a rename out of a module", change: "R  lib/helper.mjs -> notes.md" },
     { name: "a quoted module name", change: String.raw` M "src/m\303\263dulo.js"` },
+    { name: "a modified project .npmrc", change: " M .npmrc" },
   ])("should block --ignore-local-changes, also in a resume, when the changes to set aside include $name", ({ change }) => {
     const npm = { status: NPM_LOOKUP_STATUS.ok, publishedVersions: ["0.1.0"], reason: null };
     const states = [createMainState({ workingTreeChanges: [change, " M CHANGELOG.md"] }), createMainState({ headVersion: "0.2.0", headSubject: "0.2.0", npm, workingTreeChanges: [change] })];
@@ -544,5 +545,13 @@ describe("buildReleasePlan with the project's package manager", () => {
   it("should keep the pnpm usage when no commands are given", () => {
     expect(buildReleaseUsage()).toBe(RELEASE_USAGE);
     expect(buildReleaseUsage(BUN_COMMANDS).split("\n")[0]).toBe("Uso: bun run create-version [opciones]");
+  });
+});
+
+describe("parseReleaseArguments --accept-suggested", () => {
+  it("should take the suggested version and refuse to combine it with an explicit version", () => {
+    expect(parseReleaseArguments(["--accept-suggested"]).acceptSuggested).toBe(true);
+    expect(() => parseReleaseArguments(["--accept-suggested", "--bump", "minor"])).toThrow(/no se combina con --bump ni con --set-version/);
+    expect(() => parseReleaseArguments(["--accept-suggested", "--set-version", "1.2.4"])).toThrow(/no se combina/);
   });
 });
