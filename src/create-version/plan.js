@@ -21,6 +21,7 @@ import { parseArgs } from "node:util";
 
 import { CHANGE_TYPES, CHANGELOG_FILE, UNRELEASED_HEADING } from "../constants/changelog.js";
 import {
+  CREATE_VERSION_CONFIG_FILES,
   CREATE_VERSION_FLAG,
   DEFAULT_CHECKS_SCRIPT,
   MAIN_BRANCH,
@@ -359,6 +360,52 @@ function requireCleanChangelog(plan, state, commands) {
         details: [
           ...changelogChanges,
           `Retomar un release usa el ${CHANGELOG_FILE} de su commit: descartá los cambios (git restore ${CHANGELOG_FILE}) o guardalos (git stash) y volvé a correr ${commands.createVersion}.`,
+        ],
+      },
+    ],
+    warnings: [],
+    pendingVersion: null,
+  };
+}
+
+/**
+ * Tells whether a `git status --porcelain` line is a change of `beez-rp.config.js` or `beez-rp.config.mjs`.
+ *
+ * @param {string} line - Porcelain line.
+ * @returns {boolean} `true` when the line reports a configuration file.
+ */
+function isConfigChange(line) {
+  return CREATE_VERSION_CONFIG_FILES.includes(line.slice(PORCELAIN_STATUS_WIDTH));
+}
+
+/**
+ * Blocks a resume plan while the configuration file has uncommitted changes. The run imports the
+ * configuration from the working tree before `--ignore-local-changes` sets it aside, so resuming
+ * would verify `versionFiles` (and run the hooks) with a configuration that is not the one of the
+ * release commit: a local edit that drops an entry would push a release commit with a stale version.
+ * The configuration of the pending release is the one committed in it.
+ *
+ * @param {ReleasePlan} plan - Resume plan (from `main` or from a detached release tag).
+ * @param {ReleaseState} state - Snapshot.
+ * @param {ProjectCommands} commands - Project commands quoted by the hints.
+ * @returns {ReleasePlan} The same plan, or a blocked plan when the configuration file is dirty.
+ */
+function requireCommittedConfig(plan, state, commands) {
+  const configChanges = state.workingTreeChanges.filter(isConfigChange);
+
+  if (plan.mode !== RELEASE_MODE.resume || configChanges.length === 0) {
+    return plan;
+  }
+
+  return {
+    mode: RELEASE_MODE.blocked,
+    steps: [],
+    blockers: [
+      {
+        title: `La configuración tiene cambios sin commitear y el release ${plan.pendingVersion} ya está commiteado`,
+        details: [
+          ...configChanges,
+          `Retomar un release usa la configuración de su commit (versionFiles incluido), y apartar los cambios no la recarga: descartalos (git restore) o guardalos (git stash) y volvé a correr ${commands.createVersion}.`,
         ],
       },
     ],
@@ -709,14 +756,14 @@ function planRelease(state, capabilities, { skipUnpublished = false, ignoreLocal
   const detachedVersion = findDetachedReleaseVersion(state);
 
   if (detachedVersion) {
-    const detachedPlan = planDetachedResume(detachedVersion, capabilities, state);
+    const detachedPlan = requireCommittedConfig(planDetachedResume(detachedVersion, capabilities, state), state, commands);
     return ignoreLocalChanges ? detachedPlan : requireCleanChangelog(detachedPlan, state, commands);
   }
 
   const resume = planResume(state, capabilities);
 
   if (resume) {
-    const resumePlan = checkUnpublishedBeforeResume(resume, state, skipUnpublished, commands);
+    const resumePlan = requireCommittedConfig(checkUnpublishedBeforeResume(resume, state, skipUnpublished, commands), state, commands);
     return ignoreLocalChanges ? resumePlan : requireCleanChangelog(resumePlan, state, commands);
   }
 

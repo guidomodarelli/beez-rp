@@ -692,6 +692,43 @@ describe("beez-rp create-version command", () => {
   );
 
   it(
+    "should not resume a release commit with --ignore-local-changes while a local edit of the configuration drops a stale versionFiles entry",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      const cliPath = path.join(repositoryRoot, "src", "cli.js");
+      const configPath = path.join(repositoryRoot, "beez-rp.config.js");
+      mkdirSync(path.dirname(cliPath));
+      writeFileSync(cliPath, 'program.version("0.1.0"); // beez-rp-version\n');
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", '  versionFiles: ["src/cli.js"],', "};"]);
+      writeFileSync(path.join(repositoryRoot, "package.json"), `${JSON.stringify({ name: "fixture-app", version: "0.2.0" }, null, 2)}\n`);
+      writeFileSync(path.join(repositoryRoot, "CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n## [0.2.0] - 2026-01-01\n\n### Added\n\n- Algo nuevo.\n");
+      runGit(["add", "-A"], repositoryRoot);
+      runGit(["commit", "--quiet", "-m", "0.2.0"], repositoryRoot);
+      const localConfig = ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", "};", ""].join("\n");
+      writeFileSync(configPath, localConfig);
+
+      for (const flags of [["--ignore-local-changes", "--dry-run"], ["--ignore-local-changes"]]) {
+        const blocked = runCli(repositoryRoot, flags);
+
+        expect(blocked.status, blocked.output).toBe(0);
+        expect(flattenOutput(blocked.output)).toContain("La configuración tiene cambios sin commitear y el release 0.2.0 ya está commiteado");
+      }
+
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+      expect(runGit(["log", "-1", "--format=%s", "main"], remoteRoot)).toBe("chore: configure releases");
+      expect(readFileSync(configPath, "utf8")).toBe(localConfig);
+
+      runGit(["restore", "beez-rp.config.js"], repositoryRoot);
+      const resumed = runCli(repositoryRoot, ["--ignore-local-changes"]);
+
+      expect(resumed.status, resumed.output).toBe(1);
+      expect(flattenOutput(resumed.output)).toContain("src/cli.js (versionFiles) tiene en el commit de release (HEAD) una versión marcada distinta de 0.2.0.");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
     "should require --bump or --set-version without an interactive terminal, since the version prompt has no default",
     () => {
       const { repositoryRoot, remoteRoot } = createReleasedRepository();
