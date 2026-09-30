@@ -52,6 +52,7 @@ const HEAD_FILE_DIFFERENCE_LABELS = Object.freeze({
   [HEAD_FILE_DIFFERENCE.typeChanged]: "no es el mismo tipo de archivo que en HEAD, por ejemplo un enlace simbólico",
   [HEAD_FILE_DIFFERENCE.contentChanged]: "su contenido es distinto del de HEAD",
   [HEAD_FILE_DIFFERENCE.outsideRepository]: "está fuera del repositorio, por ejemplo detrás de un enlace simbólico, y HEAD no lo respalda",
+  [HEAD_FILE_DIFFERENCE.filtered]: "tiene un atributo filter en .gitattributes, así que no se puede comprobar que lo que cargó Node sea lo commiteado",
 });
 
 /**
@@ -486,6 +487,11 @@ function requireCommittedConfig(plan, state, commands) {
           `${notCommittedModules.join(", ")} no está commiteado y la configuración lo carga: borralo o renombralo para usar la configuración commiteada, o commitealo (git add -f si está ignorado) en una rama y llevalo a ${MAIN_BRANCH}.`,
         ]
       : [];
+  const filteredModules = (state.uncommittedConfigModules ?? []).filter(({ difference }) => difference === HEAD_FILE_DIFFERENCE.filtered).map(({ file }) => file);
+  const filterHint =
+    filteredModules.length > 0
+      ? [`Quitale el atributo filter a ${filteredModules.join(", ")} en .gitattributes (git check-attr filter -- <archivo> muestra cuál aplica): el release no carga módulos de la configuración que Git filtra.`]
+      : [];
   const blocker =
     plan.mode === RELEASE_MODE.resume
       ? {
@@ -493,6 +499,7 @@ function requireCommittedConfig(plan, state, commands) {
           details: [
             ...configDifferences,
             ...shadowHint,
+            ...filterHint,
             `Retomar un release usa la configuración de su commit (versionFiles incluido, y los módulos que importa), y apartar los cambios no la recarga: descartalos (git restore) o guardalos (git stash) y volvé a correr ${commands.createVersion}.`,
           ],
         }
@@ -501,6 +508,7 @@ function requireCommittedConfig(plan, state, commands) {
           details: [
             ...configDifferences,
             ...shadowHint,
+            ...filterHint,
             `El release usa ${CONFIG_FILES_LABEL} y los módulos que importa tal como están en el working tree (versionFiles, checks, migrations, prepare y publish), y --${CREATE_VERSION_FLAG.ignoreLocalChanges} no los puede apartar porque ya están cargados: commitealos en una rama y llevalos a ${MAIN_BRANCH}, o descartá los cambios (git restore) o guardalos (git stash), y volvé a correr ${commands.createVersion}.`,
           ],
         };

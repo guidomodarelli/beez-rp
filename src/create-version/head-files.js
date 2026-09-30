@@ -16,7 +16,7 @@ import { GIT_LITERAL_PATHSPEC_PREFIX } from "../constants/version-files.js";
 
 /**
  * @typedef {import("./process.js").GitReader} GitReader
- * @typedef {"notCommitted" | "typeChanged" | "contentChanged" | "outsideRepository"} HeadFileDifferenceKind
+ * @typedef {"notCommitted" | "typeChanged" | "contentChanged" | "outsideRepository" | "filtered"} HeadFileDifferenceKind
  * @typedef {{ file: string, difference: HeadFileDifferenceKind }} HeadFileDifference
  *   `file` is relative to the repository root and separated with `/`, or absolute for
  *   `outsideRepository`.
@@ -109,4 +109,32 @@ export async function listFilesDifferentFromHead(reader, repositoryRoot, files) 
   }
 
   return files.filter((file) => differenceByFile.has(file)).map((file) => ({ file, difference: /** @type {HeadFileDifferenceKind} */ (differenceByFile.get(file)) }));
+}
+
+/**
+ * Finds the first symbolic link (or Windows junction) along a working-tree path: Git would only
+ * track the link, while reading or writing through it reaches its target (maybe outside the
+ * repository).
+ *
+ * @param {string} repositoryRoot - Repository root.
+ * @param {string} filePath - Path relative to the root.
+ * @returns {string | null} The linked part of the path, or `null` when no segment is a link.
+ */
+export function findSymbolicLinkSegment(repositoryRoot, filePath) {
+  const segments = path.normalize(filePath).split(path.sep).filter((segment) => segment !== "" && segment !== ".");
+  let currentPath = repositoryRoot;
+
+  for (const [index, segment] of segments.entries()) {
+    currentPath = path.join(currentPath, segment);
+    const stats = lstatSync(currentPath, { throwIfNoEntry: false });
+
+    if (!stats) {
+      return null;
+    }
+    if (stats.isSymbolicLink()) {
+      return segments.slice(0, index + 1).join("/");
+    }
+  }
+
+  return null;
 }

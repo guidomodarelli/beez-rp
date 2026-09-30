@@ -18,9 +18,10 @@ import os from "node:os";
 import path from "node:path";
 
 import { CHANGELOG_FILE } from "../constants/changelog.js";
-import { LOCAL_CHANGES_STASH_MESSAGE } from "../constants/create-version.js";
+import { CREATE_VERSION_FLAG, GIT_SYMBOLIC_LINK_MODE, LOCAL_CHANGES_STASH_MESSAGE, MAX_LISTED_ITEMS } from "../constants/create-version.js";
 import { DEFAULT_PROJECT_COMMANDS } from "../package-manager.js";
 import { ReleaseStepError } from "./errors.js";
+import { findSymbolicLinkSegment } from "./head-files.js";
 
 /**
  * @typedef {import("./process.js").GitReader} GitReader
@@ -48,15 +49,69 @@ function buildPathspec(keepChangelog) {
 }
 
 /**
+ * Lists the changes to set aside that involve a symbolic link (or Windows junction): a link
+ * created, deleted, turned into another kind of file or pointed elsewhere, staged or not, or a
+ * changed path that goes through a link in the working tree. The configuration and its modules are
+ * loaded before the changes are set aside, and setting a link aside can change which files a path
+ * reaches, so the release could run code that is neither the committed one nor the one traced.
+ *
+ * @param {GitReader} reader - Git reader of the repository root.
+ * @param {string} repositoryRoot - Repository root.
+ * @param {string[]} pathspec - Pathspec of the changes to set aside.
+ * @returns {Promise<string[]>} Repository-relative paths (or their linked segment), sorted.
+ */
+async function listSymbolicLinkChanges(reader, repositoryRoot, pathspec) {
+  const linkedPaths = new Set();
+  const changedPaths = new Set();
+
+  for (const diffArguments of [["diff", "--raw", "-z", "--no-renames", "HEAD"], ["diff", "--cached", "--raw", "-z", "--no-renames", "HEAD"]]) {
+    // Each change is `:<old mode> <new mode> <old object> <new object> <status>\0<path>\0`.
+    const fields = (await reader.git([...diffArguments, "--", ...pathspec])).split("\0");
+    for (let index = 0; index + 1 < fields.length; index += 2) {
+      const [oldMode, newMode] = fields[index].slice(1).split(" ");
+      const changedPath = fields[index + 1];
+      changedPaths.add(changedPath);
+      if (oldMode === GIT_SYMBOLIC_LINK_MODE || newMode === GIT_SYMBOLIC_LINK_MODE) {
+        linkedPaths.add(changedPath);
+      }
+    }
+  }
+
+  for (const untrackedPath of (await reader.git(["ls-files", "--others", "--exclude-standard", "-z", "--", ...pathspec])).split("\0").filter(Boolean)) {
+    changedPaths.add(untrackedPath);
+  }
+
+  for (const changedPath of changedPaths) {
+    const linkedSegment = findSymbolicLinkSegment(repositoryRoot, changedPath);
+    if (linkedSegment !== null) {
+      linkedPaths.add(linkedSegment);
+    }
+  }
+
+  return [...linkedPaths].toSorted();
+}
+
+/**
  * Sets the uncommitted changes aside in a new stash entry.
  *
  * @param {GitReader} reader - Git reader of the repository root.
+ * @param {string} repositoryRoot - Repository root.
  * @param {{ keepChangelog: boolean, createVersionCommand?: string }} options - Whether `CHANGELOG.md` stays in the
  *   working tree (a new release commits it), and how the project runs create-version (for the hints).
  * @returns {Promise<SetAsideChanges>} Stash entry holding the changes.
- * @throws {ReleaseStepError} When Git cannot create the stash entry; nothing was changed then.
+ * @throws {ReleaseStepError} When a change involves a symbolic link, or Git cannot create the stash
+ *   entry; nothing was changed then.
  */
-export async function setAsideLocalChanges(reader, { keepChangelog, createVersionCommand = DEFAULT_PROJECT_COMMANDS.createVersion }) {
+export async function setAsideLocalChanges(reader, repositoryRoot, { keepChangelog, createVersionCommand = DEFAULT_PROJECT_COMMANDS.createVersion }) {
+  const linkedPaths = await listSymbolicLinkChanges(reader, repositoryRoot, buildPathspec(keepChangelog));
+
+  if (linkedPaths.length > 0) {
+    throw new ReleaseStepError(
+      `--${CREATE_VERSION_FLAG.ignoreLocalChanges} no aparta cambios con enlaces simbólicos: ${linkedPaths.slice(0, MAX_LISTED_ITEMS).join(", ")}. La configuración ya se cargó con ellos, y apartarlos puede cambiar qué archivos alcanza cada ruta.`,
+      `No se tocó nada: commiteá esos cambios en una rama o descartalos (git restore, o borrá el enlace nuevo), y volvé a correr ${createVersionCommand}.`
+    );
+  }
+
   if ((await reader.tryGit(["stash", "push", "--include-untracked", "--message", LOCAL_CHANGES_STASH_MESSAGE, "--", ...buildPathspec(keepChangelog)])) === null) {
     throw new ReleaseStepError("No se pudieron apartar los cambios sin commitear (git stash push falló).", `No se tocó nada: revisá git status y volvé a correr ${createVersionCommand}.`);
   }

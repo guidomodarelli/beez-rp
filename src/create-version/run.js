@@ -17,7 +17,7 @@
  * @module create-version/run
  */
 
-import { existsSync, lstatSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { readUnreleased, releaseUnreleased } from "../changelog.js";
@@ -87,6 +87,8 @@ import {
 import { loadCreateVersionConfig } from "./config.js";
 import { ReleaseStepError } from "./errors.js";
 import { listUncheckedIndexPaths } from "./git-status.js";
+import { listFilteredFiles } from "./git-attributes.js";
+import { findSymbolicLinkSegment } from "./head-files.js";
 import {
   buildNpmAuthConfigLine,
   checkNpmPublishAccess,
@@ -586,34 +588,6 @@ async function runChecksStep(context) {
  */
 
 /**
- * Finds the first symbolic link (or Windows junction) along a configured path. Writing through it
- * would change a file Git does not stage (the target, maybe outside the repository), while the
- * release commit would only carry the link.
- *
- * @param {string} repositoryRoot - Repository root.
- * @param {string} filePath - Configured path, relative to the root.
- * @returns {string | null} The linked part of the path, or `null` when no segment is a link.
- */
-function findSymbolicLinkSegment(repositoryRoot, filePath) {
-  const segments = path.normalize(filePath).split(path.sep).filter((segment) => segment !== "" && segment !== ".");
-  let currentPath = repositoryRoot;
-
-  for (const [index, segment] of segments.entries()) {
-    currentPath = path.join(currentPath, segment);
-    const stats = lstatSync(currentPath, { throwIfNoEntry: false });
-
-    if (!stats) {
-      return null;
-    }
-    if (stats.isSymbolicLink()) {
-      return segments.slice(0, index + 1).join("/");
-    }
-  }
-
-  return null;
-}
-
-/**
  * Stops the release when a `versionFiles` entry goes through a symbolic link.
  *
  * @param {VersionFilesContext} context - Release context.
@@ -869,6 +843,28 @@ async function requireReleaseFilesWithoutIndexFlags(context) {
 }
 
 /**
+ * Stops the release, before anything is written, when `package.json`, `CHANGELOG.md` or a
+ * `versionFiles` entry has a `filter` attribute (`.gitattributes`): its clean filter decides what
+ * `git add` stores, so the release commit could hold other content than the one the release wrote
+ * (the marked version included or not). Without filters the committed blob only differs from the
+ * written file by line-ending normalization.
+ *
+ * @param {VersionFilesContext} context - Release context.
+ * @returns {Promise<void>}
+ * @throws {ReleaseStepError} When a file the release writes has a `filter` attribute.
+ */
+async function requireReleaseFilesWithoutFilters(context) {
+  const filteredFiles = await listFilteredFiles(context.reader, [...RELEASE_COMMIT_BUILT_IN_FILES, ...context.config.versionFiles]);
+
+  if (filteredFiles.length > 0) {
+    throw new ReleaseStepError(
+      `${filteredFiles.join(", ")} tiene un atributo filter en .gitattributes: su filtro clean decide qué guarda git add, así que el commit de release podría no tener el contenido que escribió el release.`,
+      `Quitale el atributo filter (git check-attr filter -- ${filteredFiles.join(" ")} muestra cuál aplica) o sacalo de versionFiles en beez-rp.config.(m)js, y volvé a correr ${context.commands.createVersion}; no se tocó la versión.`
+    );
+  }
+}
+
+/**
  * Stops the release, right before its files are read and rewritten, when `package.json` or a
  * `versionFiles` entry differs from `HEAD`: the run starts from a clean working tree, so the change
  * came from an earlier step (such as a check running `lint --fix`), and `git add` would put it in
@@ -918,6 +914,7 @@ async function prepareVersionFileUpdates(context, version) {
   await requireTrackedVersionFiles(context);
   requireReleaseFilesWithoutHardLinks(context);
   await requireReleaseFilesWithoutIndexFlags(context);
+  await requireReleaseFilesWithoutFilters(context);
   await requireReleaseFilesUnchangedFromHead(context, [PACKAGE_MANIFEST_FILE, ...context.config.versionFiles]);
 
   return context.config.versionFiles.map((filePath) => {
@@ -1763,7 +1760,7 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
 
   if (changesToSetAside.length > 0) {
     try {
-      setAside = await setAsideLocalChanges(reader, { keepChangelog: plan.mode === RELEASE_MODE.newRelease, createVersionCommand: config.commands.createVersion });
+      setAside = await setAsideLocalChanges(reader, repositoryRoot, { keepChangelog: plan.mode === RELEASE_MODE.newRelease, createVersionCommand: config.commands.createVersion });
     } catch (error) {
       const hint = error instanceof ReleaseStepError ? ` ${error.hint}` : "";
       print(`${ICON.failure} ${paint("red", `${error instanceof Error ? error.message : String(error)}${hint}`)}`);

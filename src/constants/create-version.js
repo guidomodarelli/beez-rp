@@ -285,6 +285,18 @@ export const LS_TREE_ENTRY_PATH_SEPARATOR = "\t";
 export const GIT_SYMBOLIC_LINK_MODE = "120000";
 
 /**
+ * Git attribute naming the clean/smudge filter driver of a path (`.gitattributes`): a clean filter
+ * can rewrite what Git stores, so the committed blob is no longer the working-tree bytes.
+ */
+export const GIT_FILTER_ATTRIBUTE = "filter";
+
+/** Values `git check-attr` reports for an attribute that does not apply to a path. */
+export const GIT_INACTIVE_ATTRIBUTE_VALUES = Object.freeze(["unspecified", "unset"]);
+
+/** Fields `git check-attr -z` writes per path and attribute: path, attribute and value. */
+export const CHECK_ATTR_FIELDS_PER_ENTRY = 3;
+
+/**
  * Ways a working-tree file that the release loads or uses can differ from `HEAD`, the commit the
  * release is built on:
  *
@@ -294,12 +306,15 @@ export const GIT_SYMBOLIC_LINK_MODE = "120000";
  * - `contentChanged`: same kind of file, different content.
  * - `outsideRepository`: the file is outside the repository (for example, reached through a
  *   directory of the repository replaced by a symbolic link), so `HEAD` cannot vouch for it.
+ * - `filtered`: Git applies a `filter` attribute to the file, so comparing it with `HEAD` goes
+ *   through the filter and cannot prove that the bytes Node loaded are the committed ones.
  */
 export const HEAD_FILE_DIFFERENCE = Object.freeze({
   notCommitted: "notCommitted",
   typeChanged: "typeChanged",
   contentChanged: "contentChanged",
   outsideRepository: "outsideRepository",
+  filtered: "filtered",
 });
 
 /** Directory of installed dependencies: the configuration module graph never lists files inside it. */

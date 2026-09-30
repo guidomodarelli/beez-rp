@@ -37,6 +37,7 @@ import {
 import { toReleaseTag } from "../versions.js";
 import { findCreateVersionConfigFile } from "./config.js";
 import { listConfigModules } from "./config-modules.js";
+import { listFilteredFiles } from "./git-attributes.js";
 import { listUncheckedIndexPaths } from "./git-status.js";
 import { listFilesDifferentFromHead } from "./head-files.js";
 import { checkNpmPublishAccess, lookupPublishedVersions, resolvePublishRegistry } from "./npm.js";
@@ -292,7 +293,8 @@ async function listHiddenLocalChanges(reader, repositoryRoot) {
 /**
  * Lists the repository files this process has loaded as modules since the configuration trace
  * started (the configuration, what it imports and what its hooks or `migrations.check` imported
- * so far), and compares each one with `HEAD`. It always runs when there is a configuration, even
+ * so far), and compares each one with `HEAD`; a module with a `filter` attribute is reported as
+ * such instead, since its comparison goes through the filter and not through the bytes Node loaded. It always runs when there is a configuration, even
  * with a clean `git status`: an ignored local override the configuration imports, or a module whose
  * local change Git hides with `skip-worktree`, never shows up there. The run calls it again right
  * before setting local changes aside, with everything loaded until then.
@@ -317,7 +319,14 @@ export async function inspectConfigModules(reader, repositoryRoot) {
 
   /** @type {HeadFileDifference[]} */
   const externalModules = configModules.externalFiles.map((file) => ({ file, difference: HEAD_FILE_DIFFERENCE.outsideRepository }));
-  const uncommittedConfigModules = [...(await listFilesDifferentFromHead(reader, repositoryRoot, configModules.files)), ...externalModules];
+  // A filtered module is compared with HEAD through its clean filter, which can hide what Node ran.
+  const filteredModules = await listFilteredFiles(reader, configModules.files);
+  const unfilteredModules = configModules.files.filter((file) => !filteredModules.includes(file));
+  const uncommittedConfigModules = [
+    ...(await listFilesDifferentFromHead(reader, repositoryRoot, unfilteredModules)),
+    ...filteredModules.map((file) => ({ file, difference: HEAD_FILE_DIFFERENCE.filtered })),
+    ...externalModules,
+  ];
   return { configModules, uncommittedConfigModules };
 }
 

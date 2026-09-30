@@ -14,8 +14,10 @@
  * modules), for the whole run: the configuration, whatever it imports depending on the process
  * (its arguments, whether it has a terminal), and what its hooks or `migrations.check` import
  * lazily when they run. It also records every symbolic link inside the repository followed to reach
- * one (the module itself or any directory on its way). Files the configuration reads with `fs`
- * instead of importing them are not modules and are not listed.
+ * one (the module itself or any directory on its way). Each module is recorded with the module that
+ * imported it, so the graph of a configuration is what is reachable from its file: another
+ * configuration loaded in the same process (another repository) does not leak into it. Files the
+ * configuration reads with `fs` instead of importing them are not modules and are not listed.
  *
  * @module create-version/config-modules
  */
@@ -33,9 +35,13 @@ import { MODULE_HOOKS_MINIMUM_NODE_VERSION, NODE_MODULES_DIRECTORY } from "../co
  *   only include files inside the repository, outside `node_modules` (loaded modules and the
  *   symbolic links followed to reach them). `externalFiles` are the absolute paths of the modules
  *   loaded from outside the repository, outside `node_modules` and beez-rp itself.
- * @typedef {{ moduleUrls: Set<string>, requestedUrls: Set<string> }} ModuleTrace
- *   `file:` URLs of the resolved modules (their real path, where Node loads them) and of the paths
- *   the specifiers named before Node followed symbolic links.
+ * @typedef {{ moduleUrlsByParent: Map<string, Set<string>>, requestedUrlsByParent: Map<string, Set<string>>, moduleUrlByRequestedUrl: Map<string, string> }} ModuleTrace
+ *   Import edges of this process, keyed by the URL of the importing module: the `file:` URLs of the
+ *   modules each one resolved (their real path, where Node loads them) and of the paths its
+ *   specifiers named before Node followed symbolic links; plus the module each requested path
+ *   resolved to. The edges are kept for the whole process (Node never resolves a cached module
+ *   again), and each configuration only walks the ones reachable from its own file, so loading the
+ *   configuration of another repository in the same process does not mix both graphs.
  */
 
 /**
@@ -87,22 +93,76 @@ export function startTracingConfigModules() {
   }
 
   /** @type {ModuleTrace} */
-  const trace = { moduleUrls: new Set(), requestedUrls: new Set() };
+  const trace = { moduleUrlsByParent: new Map(), requestedUrlsByParent: new Map(), moduleUrlByRequestedUrl: new Map() };
   module.registerHooks({
     resolve(specifier, context, nextResolve) {
+      const parentUrl = context.parentURL ?? "";
       const requestedUrl = toRequestedUrl(specifier, context.parentURL);
       if (requestedUrl) {
-        trace.requestedUrls.add(requestedUrl);
+        addToGroup(trace.requestedUrlsByParent, parentUrl, requestedUrl);
       }
 
       const resolution = nextResolve(specifier, context);
       if (resolution.url.startsWith("file:")) {
-        trace.moduleUrls.add(resolution.url);
+        addToGroup(trace.moduleUrlsByParent, parentUrl, resolution.url);
+        if (requestedUrl) {
+          trace.moduleUrlByRequestedUrl.set(requestedUrl, resolution.url);
+        }
       }
       return resolution;
     },
   });
   moduleTrace = trace;
+}
+
+/**
+ * Adds a value to the set of a key, creating the set on first use.
+ *
+ * @param {Map<string, Set<string>>} groups - Sets by key.
+ * @param {string} key - Key.
+ * @param {string} value - Value to add.
+ */
+function addToGroup(groups, key, value) {
+  const group = groups.get(key) ?? new Set();
+  group.add(value);
+  groups.set(key, group);
+}
+
+/**
+ * Walks the import edges from the configuration file: the modules it loaded, directly or through
+ * other modules (installed dependencies included, filtered later), and the paths their specifiers
+ * named before Node followed symbolic links.
+ *
+ * @param {ModuleTrace} trace - Trace of this process.
+ * @param {string} configRequestedUrl - `file:` URL `loadCreateVersionConfig` imported.
+ * @returns {{ moduleUrls: Set<string>, requestedUrls: Set<string> } | null} Graph of the
+ *   configuration, or `null` when this process never imported that file after the trace started.
+ */
+function collectReachableModules(trace, configRequestedUrl) {
+  const configModuleUrl = trace.moduleUrlByRequestedUrl.get(configRequestedUrl);
+
+  if (!configModuleUrl) {
+    return null;
+  }
+
+  const moduleUrls = new Set([configModuleUrl]);
+  const requestedUrls = new Set([configRequestedUrl]);
+  const pendingUrls = [configModuleUrl];
+
+  while (pendingUrls.length > 0) {
+    const parentUrl = /** @type {string} */ (pendingUrls.pop());
+    for (const requestedUrl of trace.requestedUrlsByParent.get(parentUrl) ?? []) {
+      requestedUrls.add(requestedUrl);
+    }
+    for (const moduleUrl of trace.moduleUrlsByParent.get(parentUrl) ?? []) {
+      if (!moduleUrls.has(moduleUrl)) {
+        moduleUrls.add(moduleUrl);
+        pendingUrls.push(moduleUrl);
+      }
+    }
+  }
+
+  return { moduleUrls, requestedUrls };
 }
 
 /**
@@ -223,16 +283,23 @@ export function listConfigModules(repositoryRoot, configFile) {
     }
   };
 
-  for (const moduleUrl of moduleTrace.moduleUrls) {
+  const trace = moduleTrace;
+  // The graph of this configuration only: other configurations loaded in this process (another
+  // repository) are not reachable from it.
+  const configGraph = repositoryRoots
+    .map((root) => collectReachableModules(trace, pathToFileURL(path.join(root, configFile)).href))
+    .find((graph) => graph !== null);
+
+  for (const moduleUrl of configGraph?.moduleUrls ?? []) {
     classify(fileURLToPath(moduleUrl), false);
   }
-  for (const requestedUrl of moduleTrace.requestedUrls) {
+  for (const requestedUrl of configGraph?.requestedUrls ?? []) {
     for (const symbolicLink of listSymbolicLinks(requestedUrl, repositoryRoots)) {
       classify(symbolicLink, true);
     }
   }
 
-  if (!files.has(configFile)) {
+  if (!configGraph || !files.has(configFile)) {
     return { loaded: false, reason: `${configFile} no se cargó con loadCreateVersionConfig en este proceso después de registrar los hooks de módulos` };
   }
 

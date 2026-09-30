@@ -3,7 +3,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { appendFileSync, chmodSync, cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { NPM_LOOKUP_STATUS, RELEASE_MODE, RELEASE_STEP } from "../../src/constants/create-version.js";
 import { buildReleasePlan } from "../../src/create-version/plan.js";
@@ -689,7 +689,7 @@ describe("beez-rp create-version command", () => {
   );
 
   it(
-    "should resume a release commit with --ignore-local-changes when a versionFiles entry was replaced locally by a symbolic link, checking the committed file",
+    "should not resume a release commit with --ignore-local-changes while a versionFiles directory was replaced locally by a symbolic link, touching nothing",
     () => {
       const { repositoryRoot, remoteRoot } = createReleasedRepository();
       const sourceRoot = path.join(repositoryRoot, "src");
@@ -708,11 +708,13 @@ describe("beez-rp create-version command", () => {
       rmSync(sourceRoot, { recursive: true });
       symlinkSync(externalRoot, sourceRoot, process.platform === "win32" ? "junction" : "dir");
 
-      const resumed = runCli(repositoryRoot, ["--ignore-local-changes"]);
+      const blocked = runCli(repositoryRoot, ["--ignore-local-changes"]);
 
-      expect(resumed.status, resumed.output).toBe(0);
-      expect(runGit(["tag", "--list"], remoteRoot)).toBe("v0.2.0");
-      expect(runGit(["show", "main:src/cli.js"], remoteRoot)).toBe('program.version("0.2.0"); // beez-rp-version');
+      expect(blocked.status, blocked.output).toBe(1);
+      expect(flattenOutput(blocked.output)).toContain("--ignore-local-changes no aparta cambios con enlaces simbólicos: src.");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+      expect(runGit(["stash", "list"], repositoryRoot)).toBe("");
+      expect(readFileSync(path.join(sourceRoot, "cli.js"), "utf8")).toBe('program.version("9.9.9"); // beez-rp-version\n');
     },
     GIT_FIXTURE_TEST_TIMEOUT_MS
   );
@@ -816,7 +818,7 @@ describe("beez-rp create-version command", () => {
   );
 
   it(
-    "should not tag nor push a release commit whose versionFiles entry lost the new version through a .gitattributes clean filter",
+    "should stop before writing the version when a versionFiles entry has a .gitattributes clean filter, leaving the release files untouched",
     () => {
       const { repositoryRoot, remoteRoot } = createReleasedRepository();
       const cliPath = path.join(repositoryRoot, "src", "cli.js");
@@ -832,12 +834,15 @@ describe("beez-rp create-version command", () => {
       runGit(["config", "filter.pin-version.clean", `"${process.execPath.replaceAll("\\", "/")}" "${filterScriptPath.replaceAll("\\", "/")}"`], repositoryRoot);
       writeFileSync(path.join(repositoryRoot, ".git", "info", "attributes"), "src/cli.js filter=pin-version\n");
 
+      const manifest = readFileSync(path.join(repositoryRoot, "package.json"), "utf8");
+
       const release = runCli(repositoryRoot, ["--bump", "minor"]);
 
       expect(release.status, release.output).toBe(1);
-      expect(flattenOutput(release.output)).toContain("src/cli.js (versionFiles) tiene en el commit de release (HEAD) una versión marcada distinta de 0.2.0.");
-      expect(flattenOutput(release.output)).toContain("no se creó el tag v0.2.0");
-      expect(runGit(["log", "-1", "--format=%s", "main"], repositoryRoot)).toBe("0.2.0");
+      expect(flattenOutput(release.output)).toContain("src/cli.js tiene un atributo filter en .gitattributes");
+      expect(readFileSync(cliPath, "utf8")).toBe('program.version("0.1.0"); // beez-rp-version\n');
+      expect(readFileSync(path.join(repositoryRoot, "package.json"), "utf8")).toBe(manifest);
+      expect(runGit(["log", "-1", "--format=%s", "main"], repositoryRoot)).toBe("chore: configure releases");
       expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
       expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
       expect(runGit(["log", "-1", "--format=%s", "main"], remoteRoot)).toBe("chore: configure releases");
@@ -2155,6 +2160,54 @@ describe("beez-rp create-version command", () => {
       expect(output).toContain("0.2.0 no es mayor que 0.3.0-beta.1, la versión del dist-tag latest en npm");
       expect(existsSync(hookLog)).toBe(false);
       expect(registry.publications).toEqual([]);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+  it(
+    "should not release while a module the configuration imports has a filter attribute, even when it matches HEAD",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      mkdirSync(path.join(repositoryRoot, "release"));
+      writeFileSync(path.join(repositoryRoot, "release", "checks.js"), "export const checks = false;\n");
+      writeFileSync(path.join(repositoryRoot, ".gitattributes"), "release/checks.js filter=release-rewrite\n");
+      pushConfiguration(repositoryRoot, ['import { checks } from "./release/checks.js";', "export default {", '  changelog: { audience: "equipo" },', "  checks,", "};"]);
+
+      const blocked = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(blocked.status, blocked.output).toBe(0);
+      expect(flattenOutput(blocked.output)).toContain("release/checks.js (tiene un atributo filter en .gitattributes, así que no se puede comprobar que lo que cargó Node sea lo commiteado)");
+      expect(runGit(["log", "-1", "--format=%s", "main"], repositoryRoot)).toBe("chore: configure releases");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should keep the configuration modules of each repository apart when one process loads the configuration of two repositories",
+    () => {
+      const repositories = [createReleasedRepository().repositoryRoot, createReleasedRepository().repositoryRoot];
+      for (const repositoryRoot of repositories) {
+        mkdirSync(path.join(repositoryRoot, "release"));
+        writeFileSync(path.join(repositoryRoot, "release", "checks.js"), "export const checks = false;\n");
+        pushConfiguration(repositoryRoot, ['import { checks } from "./release/checks.js";', "export default {", '  changelog: { audience: "equipo" },', "  checks,", "};"]);
+      }
+      // A real Node process, like a project script that releases several packages programmatically.
+      const script = [
+        `import { collectReleaseState, loadCreateVersionConfig } from ${JSON.stringify(pathToFileURL(path.join(BEEZ_RP_ROOT, "src", "create-version", "index.js")).href)};`,
+        `const repositories = ${JSON.stringify(repositories)};`,
+        "const graphs = [];",
+        "for (const repositoryRoot of repositories) {",
+        "  await loadCreateVersionConfig(repositoryRoot);",
+        "  graphs.push((await collectReleaseState({ repositoryRoot })).configModules);",
+        "}",
+        "console.log(JSON.stringify(graphs));",
+      ].join("\n");
+
+      const result = spawnSync(process.execPath, ["--input-type=module", "--eval", script], { cwd: repositories[1], encoding: "utf8", env: commandEnvironment() });
+
+      expect(result.status, result.stderr).toBe(0);
+      const expectedGraph = { loaded: true, files: ["beez-rp.config.js", "release/checks.js"], externalFiles: [] };
+      expect(JSON.parse(result.stdout)).toEqual([expectedGraph, expectedGraph]);
     },
     GIT_FIXTURE_TEST_TIMEOUT_MS
   );
