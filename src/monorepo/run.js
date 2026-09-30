@@ -216,6 +216,27 @@ async function assertTagCanBeCreated(context, tag) {
 }
 
 /**
+ * Checks that the `[Unreleased]` block of every chosen package uses only valid sections, so a package
+ * left out of the release never blocks the others. Empty blocks are filled by Codex later.
+ *
+ * @param {MonorepoContext} context - Context, with the chosen packages.
+ * @returns {void}
+ * @throws {ReleaseStepError} When a chosen changelog uses unknown sections.
+ */
+function assertChosenChangelogsAreValid(context) {
+  const invalid = context.chosen
+    .map(({ unit }) => ({ unit, unknownSections: readPackageUnreleased(path.join(context.repositoryRoot, unit.changelogPath)).unknownSections }))
+    .filter(({ unknownSections }) => unknownSections.length > 0);
+
+  if (invalid.length > 0) {
+    throw new ReleaseStepError(
+      `${invalid.map(({ unit, unknownSections }) => `${unit.changelogPath} ${UNRELEASED_HEADING} usa secciones no válidas: ${unknownSections.join(", ")}`).join("; ")}.`,
+      `No se escribió nada. Usá solo ${CHANGE_TYPES.map((type) => `### ${type}`).join(", ")} (o elegí "No publicar ahora" para ese paquete) y volvé a correr ${context.commands.createVersion}.`
+    );
+  }
+}
+
+/**
  * Asks (or takes from the flags) the version of every package with changes; a package can be left
  * out of this release.
  *
@@ -288,6 +309,8 @@ async function chooseVersionsStep(context) {
     print(renderBox({ title: "Release cancelado", lines: [`${ICON.info} No elegiste ningún paquete: no se tocó nada.`], tone: BOX_TONE.info }));
     throw new ReleaseCancelledError();
   }
+
+  assertChosenChangelogsAreValid(context);
 
   // Checked again before the commit; here it stops the release before migrations are applied.
   const versionFilesByPackage = await assertReleaseScope(context);

@@ -256,6 +256,37 @@ describe("create-version in monorepo mode", () => {
   );
 
   it(
+    "warns about an invalid changelog in the dry run and stops before writing when that package is chosen",
+    async () => {
+      const { repositoryRoot, remoteRoot } = createReleasedMonorepo();
+      pushCoreFeature(repositoryRoot);
+      writeFileSync(path.join(repositoryRoot, "packages/widget/CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n### Nope\n\n- Respuesta nueva.\n");
+      commitAll(repositoryRoot, "docs(widget): use an unknown changelog section");
+      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+      const featureSha = runGit(["rev-parse", "HEAD"], repositoryRoot);
+      const registry = await startRegistry();
+
+      const preview = await runCliAsync(repositoryRoot, ["--dry-run"], npmEnvironment(registry.registryUrl));
+
+      expect(preview.status, preview.output).toBe(0);
+      const previewOutput = flattenOutput(preview.output);
+      expect(previewOutput).toContain("Elegir la versión de cada paquete con cambios (1) @acme/widget");
+      expect(previewOutput).toContain("packages/widget/CHANGELOG.md ## [Unreleased] usa secciones no válidas (Nope): si elegís publicar @acme/widget, el release se corta antes de tocar nada.");
+
+      const release = await runCliAsync(repositoryRoot, ["--bump", "minor"], npmEnvironment(registry.registryUrl));
+
+      expect(release.status, release.output).toBe(1);
+      expect(flattenOutput(release.output)).toContain("packages/widget/CHANGELOG.md ## [Unreleased] usa secciones no válidas: Nope.");
+      expect(runGit(["rev-parse", "HEAD"], repositoryRoot)).toBe(featureSha);
+      expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe("");
+      expect(runGit(["tag", "--list", "widget-v1.1.0"], repositoryRoot)).toBe("");
+      expect(runGit(["rev-parse", "main"], remoteRoot)).toBe(featureSha);
+      expect(registry.publications).toEqual([]);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
     "does not write the release when two chosen packages would get the same tag",
     async () => {
       const { repositoryRoot, remoteRoot } = createReleasedMonorepo();

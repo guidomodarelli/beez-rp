@@ -14,7 +14,7 @@
  * @module monorepo/plan
  */
 
-import { CHANGE_TYPES, UNRELEASED_HEADING } from "../constants/changelog.js";
+import { UNRELEASED_HEADING } from "../constants/changelog.js";
 import {
   CREATE_VERSION_FLAG,
   MAIN_BRANCH,
@@ -313,14 +313,14 @@ function planNewRelease(state, capabilities, commands, warnings) {
     return createPlan({ mode: RELEASE_MODE.upToDate, warnings });
   }
 
-  const invalidChangelogs = candidates.filter((packageSnapshot) => packageSnapshot.changelog.unknownSections.length > 0);
-  if (invalidChangelogs.length > 0) {
-    return createPlan({
-      blockers: invalidChangelogs.map((packageSnapshot) => ({
-        title: `${packageSnapshot.unit.changelogPath} ${UNRELEASED_HEADING} usa secciones no válidas: ${packageSnapshot.changelog.unknownSections.join(", ")}`,
-        details: [`Usá solo ${CHANGE_TYPES.map((type) => `### ${type}`).join(", ")} y volvé a correr ${commands.createVersion}.`],
-      })),
-    });
+  // Only the packages chosen later need valid changelogs (checked when the versions are chosen):
+  // an invalid one must not block releasing the others, so the plan only warns about it.
+  for (const packageSnapshot of candidates) {
+    if (packageSnapshot.changelog.unknownSections.length > 0) {
+      warnings.push(
+        `${packageSnapshot.unit.changelogPath} ${UNRELEASED_HEADING} usa secciones no válidas (${packageSnapshot.changelog.unknownSections.join(", ")}): si elegís publicar ${packageSnapshot.unit.name}, el release se corta antes de tocar nada.`
+      );
+    }
   }
 
   const candidateNames = candidates.map((packageSnapshot) => packageSnapshot.unit.name);
