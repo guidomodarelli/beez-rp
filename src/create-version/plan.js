@@ -30,7 +30,6 @@ import {
   NPM_AUTH_STATUS,
   NPM_DIST_TAG,
   NPM_LOOKUP_STATUS,
-  PORCELAIN_STATUS_WIDTH,
   PULL_REQUEST_STATE,
   RELEASE_MODE,
   RELEASE_STEP,
@@ -39,7 +38,11 @@ import {
 import { RELEASE_TYPE } from "../constants/versions.js";
 import { compareReleaseVersions, findHighestStableVersion, isReleaseCommitSubject, isStableReleaseVersion, isStableVersionAbove, toReleaseTag } from "../versions.js";
 import { DEFAULT_PROJECT_COMMANDS } from "../package-manager.js";
+import { listPorcelainPaths } from "./git-status.js";
 import { describeNpmAuthProblem, describeNpmFirstPublicationWarning } from "./npm-auth.js";
+
+/** Names of the configuration files, as the hints quote them. */
+const CONFIG_FILES_LABEL = CREATE_VERSION_CONFIG_FILES.join(" o ");
 
 /**
  * @typedef {{ sha?: string, subject: string, body?: string }} ReleaseCommit
@@ -271,7 +274,9 @@ function findBlockers(state, ignoreLocalChanges, commands) {
       title: `Hay ${blockingChanges.length} archivo(s) sin commitear`,
       details: [
         ...blockingChanges.slice(0, MAX_LISTED_ITEMS),
-        `Commitealos en una rama (o git stash) y volvé a correr ${commands.createVersion}, o corré ${commands.createVersion} --${CREATE_VERSION_FLAG.ignoreLocalChanges} para apartarlos durante el release.`,
+        blockingChanges.some(isConfigChange)
+          ? `Commitealos en una rama (o git stash) y volvé a correr ${commands.createVersion}: ${CONFIG_FILES_LABEL} no se puede apartar con --${CREATE_VERSION_FLAG.ignoreLocalChanges}, porque el release lo usa tal como está en el working tree.`
+          : `Commitealos en una rama (o git stash) y volvé a correr ${commands.createVersion}, o corré ${commands.createVersion} --${CREATE_VERSION_FLAG.ignoreLocalChanges} para apartarlos durante el release.`,
       ],
     });
   }
@@ -289,13 +294,14 @@ function findBlockers(state, ignoreLocalChanges, commands) {
 }
 
 /**
- * Tells whether a `git status --porcelain` line is a change of `CHANGELOG.md`.
+ * Tells whether a `git status --porcelain` line only changes `CHANGELOG.md`: a rename from or to
+ * another path also changes that path, so it is not a changelog-only change.
  *
  * @param {string} line - Porcelain line.
- * @returns {boolean} `true` when the line reports `CHANGELOG.md`.
+ * @returns {boolean} `true` when every path of the line is `CHANGELOG.md`.
  */
 function isChangelogChange(line) {
-  return line.slice(PORCELAIN_STATUS_WIDTH) === CHANGELOG_FILE;
+  return listPorcelainPaths(line).every((changedPath) => changedPath === CHANGELOG_FILE);
 }
 
 /**
@@ -369,23 +375,26 @@ function requireCleanChangelog(plan, state, commands) {
 }
 
 /**
- * Tells whether a `git status --porcelain` line is a change of `beez-rp.config.js` or `beez-rp.config.mjs`.
+ * Tells whether a `git status --porcelain` line changes `beez-rp.config.js` or `beez-rp.config.mjs`,
+ * including a rename from or to one of them.
  *
  * @param {string} line - Porcelain line.
- * @returns {boolean} `true` when the line reports a configuration file.
+ * @returns {boolean} `true` when any path of the line is a configuration file.
  */
 function isConfigChange(line) {
-  return CREATE_VERSION_CONFIG_FILES.includes(line.slice(PORCELAIN_STATUS_WIDTH));
+  return listPorcelainPaths(line).some((changedPath) => CREATE_VERSION_CONFIG_FILES.includes(changedPath));
 }
 
 /**
- * Blocks a resume plan while the configuration file has uncommitted changes. The run imports the
- * configuration from the working tree before `--ignore-local-changes` sets it aside, so resuming
- * would verify `versionFiles` (and run the hooks) with a configuration that is not the one of the
- * release commit: a local edit that drops an entry would push a release commit with a stale version.
- * The configuration of the pending release is the one committed in it.
+ * Blocks a runnable plan (new release or resume) while the configuration file has uncommitted
+ * changes. The run imports the configuration from the working tree once, before
+ * `--ignore-local-changes` sets it aside, so the release would run with a configuration that is
+ * not the committed one: a local edit that drops a `versionFiles` entry would bump without it
+ * while the release commit keeps declaring it, and checks, preparation and publication would
+ * follow uncommitted instructions. When resuming, the configuration of the pending release is the
+ * one committed in it.
  *
- * @param {ReleasePlan} plan - Resume plan (from `main` or from a detached release tag).
+ * @param {ReleasePlan} plan - Plan.
  * @param {ReleaseState} state - Snapshot.
  * @param {ProjectCommands} commands - Project commands quoted by the hints.
  * @returns {ReleasePlan} The same plan, or a blocked plan when the configuration file is dirty.
@@ -393,25 +402,28 @@ function isConfigChange(line) {
 function requireCommittedConfig(plan, state, commands) {
   const configChanges = state.workingTreeChanges.filter(isConfigChange);
 
-  if (plan.mode !== RELEASE_MODE.resume || configChanges.length === 0) {
+  if (plan.steps.length === 0 || configChanges.length === 0) {
     return plan;
   }
 
-  return {
-    mode: RELEASE_MODE.blocked,
-    steps: [],
-    blockers: [
-      {
-        title: `La configuración tiene cambios sin commitear y el release ${plan.pendingVersion} ya está commiteado`,
-        details: [
-          ...configChanges,
-          `Retomar un release usa la configuración de su commit (versionFiles incluido), y apartar los cambios no la recarga: descartalos (git restore) o guardalos (git stash) y volvé a correr ${commands.createVersion}.`,
-        ],
-      },
-    ],
-    warnings: [],
-    pendingVersion: null,
-  };
+  const blocker =
+    plan.mode === RELEASE_MODE.resume
+      ? {
+          title: `La configuración tiene cambios sin commitear y el release ${plan.pendingVersion} ya está commiteado`,
+          details: [
+            ...configChanges,
+            `Retomar un release usa la configuración de su commit (versionFiles incluido), y apartar los cambios no la recarga: descartalos (git restore) o guardalos (git stash) y volvé a correr ${commands.createVersion}.`,
+          ],
+        }
+      : {
+          title: "La configuración tiene cambios sin commitear",
+          details: [
+            ...configChanges,
+            `El release usa ${CONFIG_FILES_LABEL} tal como está en el working tree (versionFiles, checks, prepare y publish), y --${CREATE_VERSION_FLAG.ignoreLocalChanges} no lo puede apartar porque ya está cargado: commitealo en una rama y llevalo a ${MAIN_BRANCH}, o descartá los cambios (git restore) o guardalos (git stash), y volvé a correr ${commands.createVersion}.`,
+          ],
+        };
+
+  return { mode: RELEASE_MODE.blocked, steps: [], blockers: [blocker], warnings: [], pendingVersion: null };
 }
 
 /**
@@ -733,8 +745,9 @@ function missingChecksBlocker(commands) {
  * @returns {ReleasePlan} Ordered plan.
  */
 export function buildReleasePlan(state, capabilities = DEFAULT_CAPABILITIES, planOptions = {}) {
-  const plan = planRelease(state, capabilities, planOptions);
-  return warnAboutSetAsideChanges(applyNpmAuth(plan, state.npmAuth, capabilities.commands ?? DEFAULT_PROJECT_COMMANDS), state, planOptions.ignoreLocalChanges ?? false);
+  const commands = capabilities.commands ?? DEFAULT_PROJECT_COMMANDS;
+  const plan = requireCommittedConfig(planRelease(state, capabilities, planOptions), state, commands);
+  return warnAboutSetAsideChanges(applyNpmAuth(plan, state.npmAuth, commands), state, planOptions.ignoreLocalChanges ?? false);
 }
 
 /**
@@ -756,14 +769,14 @@ function planRelease(state, capabilities, { skipUnpublished = false, ignoreLocal
   const detachedVersion = findDetachedReleaseVersion(state);
 
   if (detachedVersion) {
-    const detachedPlan = requireCommittedConfig(planDetachedResume(detachedVersion, capabilities, state), state, commands);
+    const detachedPlan = planDetachedResume(detachedVersion, capabilities, state);
     return ignoreLocalChanges ? detachedPlan : requireCleanChangelog(detachedPlan, state, commands);
   }
 
   const resume = planResume(state, capabilities);
 
   if (resume) {
-    const resumePlan = requireCommittedConfig(checkUnpublishedBeforeResume(resume, state, skipUnpublished, commands), state, commands);
+    const resumePlan = checkUnpublishedBeforeResume(resume, state, skipUnpublished, commands);
     return ignoreLocalChanges ? resumePlan : requireCleanChangelog(resumePlan, state, commands);
   }
 

@@ -262,6 +262,31 @@ export const RECORD_SEPARATOR = "\x1e";
 /** Width of the `git status --porcelain` state columns before each path. */
 export const PORCELAIN_STATUS_WIDTH = 3;
 
+/** `git status --porcelain` state codes of an entry that also reports its source path (`R` renamed, `C` copied). */
+export const PORCELAIN_SOURCE_PATH_STATUS_CODES = Object.freeze(["R", "C"]);
+
+/** Separates the source path from the new path of a renamed or copied `git status --porcelain` entry. */
+export const PORCELAIN_RENAME_SEPARATOR = " -> ";
+
+/** Delimiter of a path that Git quotes as a C string literal (special characters, or spaces in a rename). */
+export const GIT_QUOTED_PATH_DELIMITER = '"';
+
+/** Escape character inside a path quoted by Git. */
+export const GIT_QUOTED_PATH_ESCAPE = "\\";
+
+/**
+ * Characters Git writes after {@link GIT_QUOTED_PATH_ESCAPE}, with the character each one stands for.
+ *
+ * @type {Readonly<Record<string, string>>}
+ */
+export const GIT_QUOTED_PATH_ESCAPES = Object.freeze({ a: "\x07", b: "\b", t: "\t", n: "\n", v: "\v", f: "\f", r: "\r", '"': '"', "\\": "\\" });
+
+/** Octal byte escape (`\303`) Git writes inside a quoted path for every non-ASCII byte. */
+export const GIT_QUOTED_PATH_OCTAL_BYTE_PATTERN = /^[0-7]{3}/u;
+
+/** Radix of {@link GIT_QUOTED_PATH_OCTAL_BYTE_PATTERN}. */
+export const OCTAL_RADIX = 8;
+
 /** Maximum commits listed in a box. */
 export const MAX_LISTED_COMMITS = 12;
 

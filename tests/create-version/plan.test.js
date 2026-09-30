@@ -218,6 +218,37 @@ describe("create-version plan", () => {
     expect(listLocalChangesToSetAside(state, plan.mode)).toEqual([" M CHANGELOG.md"]);
   });
 
+  it("should block a new release with --ignore-local-changes while the configuration has uncommitted changes, since it is already loaded", () => {
+    const dirty = createMainState({ workingTreeChanges: [" M beez-rp.config.js", " M src/index.js"] });
+
+    expect(buildReleasePlan(dirty, DEPLOYED_APP).blockers[0].details.at(-1)).toContain("no se puede apartar con --ignore-local-changes");
+
+    const plan = buildReleasePlan(dirty, DEPLOYED_APP, { ignoreLocalChanges: true });
+    expect(plan.mode).toBe(RELEASE_MODE.blocked);
+    expect(plan.steps).toEqual([]);
+    expect(plan.blockers).toEqual([{ title: "La configuración tiene cambios sin commitear", details: [" M beez-rp.config.js", expect.stringContaining("git stash")] }]);
+  });
+
+  it.each([
+    ["renamed from .js to .mjs", "R  beez-rp.config.js -> beez-rp.config.mjs"],
+    ["renamed from a quoted path", 'R  "old config.js" -> beez-rp.config.js'],
+    ["renamed away to a quoted path", 'RM beez-rp.config.mjs -> "config/beez-rp config.mjs"'],
+  ])("should recognize a configuration %s as a configuration change", (_description, statusLine) => {
+    const npm = { status: NPM_LOOKUP_STATUS.ok, publishedVersions: ["0.1.0"], reason: null };
+    const resume = buildReleasePlan(createMainState({ headVersion: "0.2.0", headSubject: "0.2.0", npm, workingTreeChanges: [statusLine] }), NPM_PACKAGE, { ignoreLocalChanges: true });
+    const newRelease = buildReleasePlan(createMainState({ workingTreeChanges: [statusLine] }), DEPLOYED_APP, { ignoreLocalChanges: true });
+
+    expect(resume.blockers.map((blocker) => blocker.title)).toEqual(["La configuración tiene cambios sin commitear y el release 0.2.0 ya está commiteado"]);
+    expect(newRelease.blockers.map((blocker) => blocker.title)).toEqual(["La configuración tiene cambios sin commitear"]);
+  });
+
+  it("should not take a rename of CHANGELOG.md for a changelog-only change, because it also changes another path", () => {
+    const plan = buildReleasePlan(createMainState({ workingTreeChanges: ["R  CHANGELOG.md -> docs/CHANGELOG.md"] }), DEPLOYED_APP);
+
+    expect(plan.mode).toBe(RELEASE_MODE.blocked);
+    expect(plan.blockers[0].details).toContain("R  CHANGELOG.md -> docs/CHANGELOG.md");
+  });
+
   it("should not warn about local changes when --ignore-local-changes has nothing to set aside", () => {
     expect(buildReleasePlan(createMainState({ workingTreeChanges: [" M CHANGELOG.md"] }), DEPLOYED_APP, { ignoreLocalChanges: true }).warnings).toEqual([]);
   });
