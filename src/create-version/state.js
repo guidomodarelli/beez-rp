@@ -287,7 +287,7 @@ function confirmFirstPublication(npmAuth, npm) {
  * @param {string} repositoryRoot - Repository root.
  * @returns {Promise<HeadFileDifference[]>} Hidden local changes.
  */
-async function listHiddenLocalChanges(reader, repositoryRoot) {
+export async function listHiddenLocalChanges(reader, repositoryRoot) {
   const hiddenPaths = await listUncheckedIndexPaths(reader);
   const isInWorkingTree = (/** @type {string} */ filePath) => lstatSync(path.join(repositoryRoot, filePath), { throwIfNoEntry: false }) !== undefined;
   const uncheckedPaths = hiddenPaths.filter(isInWorkingTree);

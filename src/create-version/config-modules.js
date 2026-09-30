@@ -40,7 +40,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { FILE_URL_SCHEME, MODULE_HOOKS_MINIMUM_NODE_VERSION, NODE_MODULES_DIRECTORY } from "../constants/create-version.js";
-import { readModuleTrace } from "./module-trace-bootstrap.js";
+import { isAllowedExternalModule, readModuleTrace } from "./module-trace-bootstrap.js";
 
 export { ensureTracingConfigModules } from "./module-trace-bootstrap.js";
 
@@ -61,12 +61,6 @@ export { ensureTracingConfigModules } from "./module-trace-bootstrap.js";
  *   when repository code imported earlier may be missing from the graph.
  * @typedef {import("./module-trace-bootstrap.js").ModuleTrace} ModuleTrace
  */
-
-/**
- * Canonical root of the running beez-rp package: the run loads beez-rp's own modules, which are
- * not part of the released repository (unless it is beez-rp's own checkout).
- */
-const BEEZ_RP_PACKAGE_ROOT = realpathSync.native(fileURLToPath(new URL("../..", import.meta.url)));
 
 /**
  * Walks the import edges from the configuration file: the modules it loaded, directly or through
@@ -232,7 +226,7 @@ export function listConfigModules(repositoryRoot, configFile) {
     }
     if (isInsideRepository) {
       files.add(segments.join("/"));
-    } else if (!isSymbolicLink && !isInsideDirectory(BEEZ_RP_PACKAGE_ROOT, canonicalPath)) {
+    } else if (!isSymbolicLink && !isAllowedExternalModule(canonicalPath)) {
       externalFiles.add(canonicalPath);
     }
   };

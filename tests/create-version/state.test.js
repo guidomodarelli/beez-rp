@@ -2535,8 +2535,93 @@ describe("beez-rp create-version command", () => {
       const release = runCli(repositoryRoot, ["--bump", "minor"]);
 
       expect(release.status, release.output).toBe(1);
-      expect(flattenOutput(release.output)).toContain("beez-rp no carga release/local-helper.js durante el release: Git no lo trackea");
+      expect(flattenOutput(release.output)).toContain("beez-rp no carga release/local-helper.js durante el release: solo corren archivos trackeados idénticos a HEAD");
       expect(readFileSync(hookLog, "utf8")).toBe("tracked\n");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+      expect(runGit(["log", "-1", "--format=%s", "main"], remoteRoot)).toBe("chore: configure releases");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should stop a release hook that imports, only when it runs, a module outside the repository that is not an installed dependency, before evaluating it",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      const hookLog = path.join(path.dirname(repositoryRoot), "hooks.log");
+      const outsideHelper = path.join(path.dirname(repositoryRoot), "outside-helper.js");
+      writeFileSync(outsideHelper, `import { appendFileSync } from "node:fs";\nappendFileSync(${JSON.stringify(hookLog)}, "outside\\n");\n`);
+      pushConfiguration(repositoryRoot, [
+        "export default {",
+        '  changelog: { audience: "equipo" },',
+        "  checks: false,",
+        `  prepare: async () => { await import(${JSON.stringify(pathToFileURL(outsideHelper).href)}); },`,
+        "};",
+      ]);
+
+      const release = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(release.status, release.output).toBe(1);
+      expect(flattenOutput(release.output)).toContain("durante el release: está fuera del repositorio y no es una dependencia instalada (node_modules) ni parte de beez-rp");
+      expect(existsSync(hookLog)).toBe(false);
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+      expect(runGit(["log", "-1", "--format=%s", "main"], remoteRoot)).toBe("chore: configure releases");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should stop a release hook that imports, only when it runs, a tracked module whose clean filter hides a local edit, before evaluating it",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      const hookLog = path.join(path.dirname(repositoryRoot), "hooks.log");
+      const helperPath = path.join(repositoryRoot, "release", "filtered-helper.js");
+      const helperImport = 'import { appendFileSync } from "node:fs";\n';
+      const localEditLine = `appendFileSync(${JSON.stringify(hookLog)}, "local edit\\n"); // LOCAL\n`;
+      // Same size as the local edit: Git only compares the content through the filter when the size matches.
+      const placeholderLine = `${"// LOCAL".padEnd(localEditLine.length - 1)}\n`;
+      // The clean filter drops the lines marked LOCAL, so Git sees the edited file as the committed one.
+      runGit(["config", "filter.strip-local.clean", "sed -e /LOCAL/d"], repositoryRoot);
+      mkdirSync(path.join(repositoryRoot, "release"));
+      writeFileSync(path.join(repositoryRoot, ".gitattributes"), "release/filtered-helper.js filter=strip-local\n");
+      writeFileSync(helperPath, `${helperImport}${placeholderLine}`);
+      pushConfiguration(repositoryRoot, [
+        "export default {",
+        '  changelog: { audience: "equipo" },',
+        "  checks: false,",
+        '  prepare: async () => { await import("./release/filtered-helper.js"); },',
+        "};",
+      ]);
+      writeFileSync(helperPath, `${helperImport}${localEditLine}`);
+
+      expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe("");
+
+      const release = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(release.status, release.output).toBe(1);
+      expect(flattenOutput(release.output)).toContain("beez-rp no carga release/filtered-helper.js durante el release: solo corren archivos trackeados idénticos a HEAD, sin atributo filter");
+      expect(existsSync(hookLog)).toBe(false);
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+      expect(runGit(["log", "-1", "--format=%s", "main"], remoteRoot)).toBe("chore: configure releases");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should undo the release commit without tagging it when a commit hook rewrites a tracked file marked skip-worktree that matched HEAD",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      writeFileSync(path.join(repositoryRoot, "notes.txt"), "notes\n");
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", "};"]);
+      runGit(["update-index", "--skip-worktree", "notes.txt"], repositoryRoot);
+      // git diff skips the flagged entry, so only a direct comparison with HEAD sees the hook's edit.
+      writeFileSync(path.join(repositoryRoot, ".git", "hooks", "pre-commit"), '#!/bin/sh\necho "formatted" >> notes.txt\n', { mode: 0o755 });
+
+      const release = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(release.status, release.output).toBe(1);
+      expect(flattenOutput(release.output)).toContain("Después del commit de versión 0.2.0 quedaron cambios sin stagear en notes.txt");
+      expect(runGit(["log", "-1", "--format=%s", "main"], repositoryRoot)).toBe("chore: configure releases");
+      expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
       expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
       expect(runGit(["log", "-1", "--format=%s", "main"], remoteRoot)).toBe("chore: configure releases");
     },

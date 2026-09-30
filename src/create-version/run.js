@@ -88,8 +88,8 @@ import { loadCreateVersionConfig } from "./config.js";
 import { ReleaseStepError } from "./errors.js";
 import { listUncheckedIndexPaths } from "./git-status.js";
 import { listFilteredFiles } from "./git-attributes.js";
-import { findSymbolicLinkSegment } from "./head-files.js";
-import { allowUntrackedRepositoryModules, requireTrackedRepositoryModules } from "./module-trace-bootstrap.js";
+import { findSymbolicLinkSegment, listCleanTrackedPaths, listPathsDifferentFromHead } from "./head-files.js";
+import { guardLateModules, liftLateModuleGuard } from "./module-trace-bootstrap.js";
 import {
   buildNpmAuthConfigLine,
   checkNpmPublishAccess,
@@ -104,7 +104,7 @@ import { restoreLocalChanges, setAsideLocalChanges } from "./local-changes.js";
 import { describeProjectCommands, detectPackageManager } from "../package-manager.js";
 import { buildReleasePlan, buildReleaseUsage, listLocalChangesToSetAside, parseReleaseArguments } from "./plan.js";
 import { createGitReader, listCommits, runCommandLine, runInherited } from "./process.js";
-import { collectReleaseState, inspectConfigModules } from "./state.js";
+import { collectReleaseState, inspectConfigModules, listHiddenLocalChanges } from "./state.js";
 import { decodeStrictUtf8, InvalidUtf8Error } from "./utf8-text.js";
 
 /**
@@ -1060,21 +1060,13 @@ async function listUnpreparedReleaseCommitPaths(context, preparedTree) {
 }
 
 /**
- * Lists the tracked paths whose working-tree content differs from `HEAD` (`git diff HEAD`, staged
- * or not).
- *
- * @param {ReleaseContext} context - Release context.
- * @returns {Promise<string[]>} Repository-relative paths.
- */
-async function listPathsDifferentFromHead(context) {
-  return (await context.reader.git(["diff", "--name-only", "-z", "HEAD"])).split("\0").filter(Boolean);
-}
-
-/**
  * Lists the paths a commit hook left modified in the working tree without staging them: every
  * release file that no longer matches the release commit, and any other tracked file that matched
- * `HEAD` before the release and does not anymore. The commit holds the prepared content, but checks
- * of the tag, `prepare` and `npm publish` would use the working-tree bytes.
+ * `HEAD` before the release and does not anymore. Files marked `skip-worktree` or
+ * `assume-unchanged`, which `git diff` skips, are compared with `HEAD` directly, like the diagnosis
+ * does: the plan only runs when none of them differs, so any difference now comes from the hook.
+ * The commit holds the prepared content, but checks of the tag, `prepare` and `npm publish` would
+ * use the working-tree bytes.
  *
  * @param {ReleaseContext} context - Release context.
  * @param {ReleaseFileUpdate[]} fileUpdates - Files the release wrote.
@@ -1084,7 +1076,9 @@ async function listPathsDifferentFromHead(context) {
 async function listPathsModifiedDuringReleaseCommit(context, fileUpdates, pathsDifferentBeforeRelease) {
   const releaseFilePaths = new Set(fileUpdates.map(({ filePath }) => filePath));
   const earlierChanges = new Set(pathsDifferentBeforeRelease);
-  return (await listPathsDifferentFromHead(context)).filter((filePath) => releaseFilePaths.has(filePath) || !earlierChanges.has(filePath));
+  const visibleChanges = (await listPathsDifferentFromHead(context.reader)).filter((filePath) => releaseFilePaths.has(filePath) || !earlierChanges.has(filePath));
+  const hiddenChanges = (await listHiddenLocalChanges(context.reader, context.repositoryRoot)).map(({ file }) => file);
+  return [...new Set([...visibleChanges, ...hiddenChanges])];
 }
 
 /**
@@ -1264,7 +1258,7 @@ async function bumpVersionStep(context) {
   const indexTree = await context.reader.tryGit(["write-tree"]);
   // Tracked changes that exist before the release (such as a CHANGELOG.md kept in the working tree),
   // so only what the commit hooks leave modified stops the release.
-  const pathsDifferentBeforeRelease = await listPathsDifferentFromHead(context);
+  const pathsDifferentBeforeRelease = await listPathsDifferentFromHead(context.reader);
   writeReleaseFiles(context, releaseFileUpdates);
 
   const tag = toReleaseTag(nextRelease.version);
@@ -1843,8 +1837,7 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   // here, right before local changes are set aside and the steps run configuration code. A module
   // loaded for the first time after this point comes from the working tree without the set-aside
   // changes (tracked files hidden with skip-worktree or assume-unchanged already block the
-  // diagnosis); an ignored or untracked file first imported by a step is rejected by the module
-  // guard below instead.
+  // diagnosis); a module a step imports for the first time must pass the late module guard below.
   const recheckedPlan = buildReleasePlan({ ...state, ...(await inspectConfigModules(reader, repositoryRoot)) }, capabilities, { ...planOptions, ignoreLocalChanges: options.ignoreLocalChanges });
 
   if (recheckedPlan.blockers.length > 0) {
@@ -1852,7 +1845,6 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
     return 0;
   }
 
-  const trackedPaths = (await reader.git(["ls-files", "-z"])).split("\0").filter(Boolean);
   const changesToSetAside = options.ignoreLocalChanges ? listLocalChangesToSetAside(state, plan.mode) : [];
   let setAside = null;
 
@@ -1868,15 +1860,15 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
     print(`${ICON.info} ${changesToSetAside.length} cambio(s) sin commitear apartados con git stash; al terminar vuelven igual: lo staged staged y el resto sin stagear.`);
   }
 
-  // From here on, a repository module the steps load for the first time must be tracked by Git:
-  // an ignored or untracked helper that a hook imports only when it runs was never compared with
-  // HEAD (tracked ones were: git status is clean or set aside, and hidden changes block the plan).
-  requireTrackedRepositoryModules(repositoryRoot, trackedPaths);
-
   try {
+    // From here on, a module the steps load for the first time must pass the same rules as the
+    // inspection above: a repository file tracked, identical to HEAD (listed after setting local
+    // changes aside), without filter nor index flags and named by its full path, or an installed
+    // dependency or beez-rp itself outside the repository.
+    guardLateModules(repositoryRoot, await listCleanTrackedPaths(reader));
     return await runPlanSteps(context, plan, remoteUrl, startedAt);
   } finally {
-    allowUntrackedRepositoryModules();
+    liftLateModuleGuard();
     if (setAside) {
       const restore = await restoreLocalChanges(reader, repositoryRoot, setAside);
       print(

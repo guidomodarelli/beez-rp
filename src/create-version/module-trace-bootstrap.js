@@ -38,6 +38,13 @@ const NODE_MODULES_DIRECTORY = "node_modules";
 const PARENT_DIRECTORY_SEGMENT = "..";
 
 /**
+ * Canonical root of the running beez-rp package (two levels above this file): the run loads
+ * beez-rp's own modules, which are not part of the released repository (unless it is beez-rp's own
+ * checkout).
+ */
+const BEEZ_RP_PACKAGE_ROOT = realpathSync.native(fileURLToPath(new URL("../..", import.meta.url)));
+
+/**
  * @typedef {{ moduleUrlsByParent: Map<string, Set<string>>, requestedUrlsByParent: Map<string, Set<string>>, aliasedModuleUrlsByParent: Map<string, Set<string>>, moduleUrlByRequestedUrl: Map<string, string> }} ModuleTrace
  *   Import edges of this process, keyed by the URL of the importing module: the URLs of the modules
  *   each one resolved (any scheme, such as `file:` with their real path, where Node loads them, or
@@ -58,40 +65,93 @@ const PARENT_DIRECTORY_SEGMENT = "..";
 let moduleTraceState = null;
 
 /**
- * @typedef {{ canonicalRoot: string, trackedPaths: Set<string> }} TrackedModuleGuard
- *   Real path of the repository whose modules must be tracked by Git, and its tracked paths,
- *   relative to the root and separated with `/` like `git ls-files`.
+ * @typedef {{ repositoryRoots: string[], canonicalRoot: string, cleanTrackedPaths: Set<string> }} LateModuleGuard
+ *   Roots of the repository (as given and its real path), and the tracked paths (relative to the
+ *   root, separated with `/`) whose working-tree file is safe to load: identical to `HEAD`, without
+ *   a `filter` attribute nor an index flag that hides its changes.
  */
 
-/** Guard active while the release steps run; `null` while repository modules load freely. */
-/** @type {TrackedModuleGuard | null} */
-let trackedModuleGuard = null;
+/** Guard active while the release steps run; `null` while modules load freely. */
+/** @type {LateModuleGuard | null} */
+let lateModuleGuard = null;
 
 /**
- * Stops a module that loads for the first time while the guard is active when it is a repository
- * file (by its real path, outside `node_modules`) that Git does not track: an ignored or untracked
- * helper that a hook imports only when it runs never went through the comparison with `HEAD`.
- * Throwing from the resolution keeps Node from evaluating the module.
+ * Tells whether a directory contains a path (below it or the directory itself).
+ *
+ * @param {string} directory - Directory.
+ * @param {string} filePath - Path to check.
+ * @returns {boolean} `true` when `filePath` does not leave `directory`.
+ */
+function isInsideDirectory(directory, filePath) {
+  const relativePath = path.relative(directory, filePath);
+  return relativePath.split(path.sep)[0] !== PARENT_DIRECTORY_SEGMENT && !path.isAbsolute(relativePath);
+}
+
+/**
+ * Tells whether a module outside the released repository may run in the release: only installed
+ * dependencies (a path inside a `node_modules` directory, at any level) and beez-rp itself. Any
+ * other outside file cannot be compared with `HEAD`. The inspection before the release steps and
+ * the guard of the modules the steps load for the first time share this rule.
+ *
+ * @param {string} canonicalPath - Real path of the module, outside the repository.
+ * @returns {boolean} `true` for an installed dependency or a beez-rp module.
+ */
+export function isAllowedExternalModule(canonicalPath) {
+  return canonicalPath.split(path.sep).includes(NODE_MODULES_DIRECTORY) || isInsideDirectory(BEEZ_RP_PACKAGE_ROOT, canonicalPath);
+}
+
+/**
+ * Finds the repository-relative path (separated with `/`) a requested path names, under any of
+ * the repository roots.
+ *
+ * @param {string[]} repositoryRoots - Roots of the repository.
+ * @param {string} requestedPath - Path a specifier named, before Node followed symbolic links.
+ * @returns {string | null} Repository path, or `null` outside every root.
+ */
+function toRepositoryPath(repositoryRoots, requestedPath) {
+  const containingRoot = repositoryRoots.find((root) => isInsideDirectory(root, requestedPath));
+  return containingRoot === undefined ? null : path.relative(containingRoot, requestedPath).split(path.sep).join("/");
+}
+
+/**
+ * Stops a module that loads for the first time while the guard is active unless the inspection
+ * before the release steps would have let it run: a repository module (outside `node_modules`)
+ * must be one of the clean tracked files, named by its own full path (no symbolic link on the way,
+ * no added extension, folder index nor `#alias`), and a module outside the repository must pass
+ * {@link isAllowedExternalModule}. A hook that imports a helper only when it runs would otherwise
+ * run bytes nobody compared with `HEAD`. Throwing from the resolution keeps Node from evaluating it.
  *
  * @param {string} moduleUrl - URL Node resolved, with the real path of a file.
- * @throws {Error} When the active guard does not find the module among the tracked files.
+ * @param {string | null} requestedUrl - `file:` URL the specifier named, or `null` when it is not a file path.
+ * @throws {Error} When the active guard does not allow the module.
  */
-function requireTrackedModule(moduleUrl) {
-  if (!trackedModuleGuard || !moduleUrl.startsWith(FILE_URL_SCHEME)) {
+function requireAllowedLateModule(moduleUrl, requestedUrl) {
+  if (!lateModuleGuard || !moduleUrl.startsWith(FILE_URL_SCHEME)) {
     return;
   }
 
-  const relativePath = path.relative(trackedModuleGuard.canonicalRoot, fileURLToPath(moduleUrl));
-  const segments = relativePath.split(path.sep);
+  const modulePath = fileURLToPath(moduleUrl);
 
-  if (relativePath === "" || path.isAbsolute(relativePath) || segments[0] === PARENT_DIRECTORY_SEGMENT || segments.includes(NODE_MODULES_DIRECTORY)) {
-    return;
-  }
-
-  const repositoryPath = segments.join("/");
-  if (!trackedModuleGuard.trackedPaths.has(repositoryPath)) {
+  if (!isInsideDirectory(lateModuleGuard.canonicalRoot, modulePath)) {
+    if (isAllowedExternalModule(modulePath)) {
+      return;
+    }
     throw new Error(
-      `beez-rp no carga ${repositoryPath} durante el release: Git no lo trackea (lo ignora .gitignore o nunca se commiteó), así que no se pudo comparar con HEAD. Commitealo en una rama y llevalo a main, o dejá de importarlo desde los hooks de beez-rp.config.(m)js, y volvé a correr el release.`
+      `beez-rp no carga ${modulePath} durante el release: está fuera del repositorio y no es una dependencia instalada (node_modules) ni parte de beez-rp, así que no se puede comparar con HEAD. Movelo al repositorio y commitealo (o instalalo como dependencia), o dejá de importarlo desde los hooks de beez-rp.config.(m)js, y volvé a correr el release.`
+    );
+  }
+
+  const repositoryPath = path.relative(lateModuleGuard.canonicalRoot, modulePath).split(path.sep).join("/");
+
+  if (repositoryPath.split("/").includes(NODE_MODULES_DIRECTORY)) {
+    return;
+  }
+
+  const namedPath = requestedUrl ? toRepositoryPath(lateModuleGuard.repositoryRoots, fileURLToPath(requestedUrl)) : null;
+
+  if (namedPath !== repositoryPath || !lateModuleGuard.cleanTrackedPaths.has(repositoryPath)) {
+    throw new Error(
+      `beez-rp no carga ${repositoryPath} durante el release: solo corren archivos trackeados idénticos a HEAD, sin atributo filter ni marca skip-worktree o assume-unchanged, importados por su ruta relativa completa (sin enlaces simbólicos, extensión implícita ni alias #…). Commitealo tal cual en una rama y llevalo a main (o quitale el filter o la marca, o importalo por su ruta real), o dejá de importarlo desde los hooks de beez-rp.config.(m)js, y volvé a correr el release.`
     );
   }
 }
@@ -150,13 +210,13 @@ function startModuleTrace(startedExplicitly) {
   module.registerHooks({
     resolve(specifier, context, nextResolve) {
       const resolution = nextResolve(specifier, context);
-      requireTrackedModule(resolution.url);
+      const requestedUrl = toRequestedUrl(specifier, context.parentURL);
+      requireAllowedLateModule(resolution.url, requestedUrl);
       const parentUrl = context.parentURL ?? "";
       // Every edge is kept, whatever its scheme: a `data:` module can import a repository file by
       // its `file:` URL, and that file is only reachable through it.
       addToGroup(trace.moduleUrlsByParent, parentUrl, resolution.url);
 
-      const requestedUrl = toRequestedUrl(specifier, context.parentURL);
       if (requestedUrl) {
         addToGroup(trace.requestedUrlsByParent, parentUrl, requestedUrl);
         trace.moduleUrlByRequestedUrl.set(requestedUrl, resolution.url);
@@ -194,22 +254,25 @@ export function ensureTracingConfigModules() {
 }
 
 /**
- * Makes the module hook reject, until {@link allowUntrackedRepositoryModules}, every repository
- * module loaded for the first time that Git does not track (see {@link requireTrackedModule}). The
- * run calls it right after its last comparison of the loaded modules with `HEAD`, before the
- * release steps run configuration code (hooks, `migrations.apply`) that may import more modules.
- * Without `module.registerHooks` nothing is checked, but the plan already blocks such a run.
+ * Makes the module hook reject, until {@link liftLateModuleGuard}, every module loaded for the
+ * first time that the inspection before the release steps would not allow (see
+ * {@link requireAllowedLateModule}). The run calls it after its last comparison of the loaded
+ * modules with `HEAD` and after setting local changes aside, right before the release steps run
+ * configuration code (hooks, `migrations.apply`) that may import more modules. Without
+ * `module.registerHooks` nothing is checked, but the plan already blocks such a run.
  *
  * @param {string} repositoryRoot - Repository root.
- * @param {string[]} trackedPaths - Tracked paths (`git ls-files`), relative to the root and separated with `/`.
+ * @param {string[]} cleanTrackedPaths - Tracked paths safe to load (identical to `HEAD`, without a
+ *   `filter` attribute nor index flags), relative to the root and separated with `/`.
  */
-export function requireTrackedRepositoryModules(repositoryRoot, trackedPaths) {
-  trackedModuleGuard = { canonicalRoot: realpathSync.native(repositoryRoot), trackedPaths: new Set(trackedPaths) };
+export function guardLateModules(repositoryRoot, cleanTrackedPaths) {
+  const canonicalRoot = realpathSync.native(repositoryRoot);
+  lateModuleGuard = { repositoryRoots: [...new Set([path.resolve(repositoryRoot), canonicalRoot])], canonicalRoot, cleanTrackedPaths: new Set(cleanTrackedPaths) };
 }
 
-/** Lifts the guard of {@link requireTrackedRepositoryModules} once the release steps end. */
-export function allowUntrackedRepositoryModules() {
-  trackedModuleGuard = null;
+/** Lifts the guard of {@link guardLateModules} once the release steps end. */
+export function liftLateModuleGuard() {
+  lateModuleGuard = null;
 }
 
 /**

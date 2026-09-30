@@ -21,8 +21,10 @@ import {
   HEAD_FILE_DIFFERENCE,
   LS_TREE_ENTRY_PATH_SEPARATOR,
   OWNER_EXECUTE_PERMISSION_BIT,
+  UNFILTERED_FILE_PATHSPECS,
 } from "../constants/create-version.js";
 import { GIT_LITERAL_PATHSPEC_PREFIX } from "../constants/version-files.js";
+import { listUncheckedIndexPaths } from "./git-status.js";
 import { createGitReader, readGitBlob } from "./process.js";
 
 /**
@@ -108,7 +110,7 @@ async function hasCommittedSubmoduleCommit(absolutePath, object) {
   }
 
   // At the recorded commit, its own working tree must be clean too: checks and publication use it.
-  return (await submoduleReader.tryGit(["status", "--porcelain"]))?.trim() === "";
+  return (await submoduleReader.tryGit(["status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none"]))?.trim() === "";
 }
 
 /**
@@ -175,6 +177,34 @@ export async function listFilesDifferentFromHead(reader, repositoryRoot, files) 
   }
 
   return files.filter((file) => differenceByFile.has(file)).map((file) => ({ file, difference: /** @type {HeadFileDifferenceKind} */ (differenceByFile.get(file)) }));
+}
+
+/**
+ * Lists the tracked paths whose working-tree content differs from `HEAD` (`git diff HEAD`, staged
+ * or not). Git skips the entries marked `skip-worktree` or `assume-unchanged`, and compares the
+ * filtered ones through their clean filter.
+ *
+ * @param {GitReader} reader - Git reader of the repository root.
+ * @returns {Promise<string[]>} Repository-relative paths separated with `/`.
+ */
+export async function listPathsDifferentFromHead(reader) {
+  return (await reader.git(["diff", "--name-only", "-z", "HEAD"])).split("\0").filter(Boolean);
+}
+
+/**
+ * Lists the tracked files whose working-tree bytes are exactly the committed ones, as far as Git
+ * can prove it: identical to `HEAD` (`git diff HEAD`), without a `filter` attribute (whose clean
+ * filter can map a local edit back to the committed blob) and without the `skip-worktree` or
+ * `assume-unchanged` flag (whose changes `git diff` does not see). These are the only repository
+ * modules a release step may load for the first time.
+ *
+ * @param {GitReader} reader - Git reader of the repository root.
+ * @returns {Promise<string[]>} Repository-relative paths separated with `/`.
+ */
+export async function listCleanTrackedPaths(reader) {
+  const unfilteredPaths = (await reader.git(["ls-files", "-z", "--", ...UNFILTERED_FILE_PATHSPECS])).split("\0").filter(Boolean);
+  const uncleanPaths = new Set([...(await listPathsDifferentFromHead(reader)), ...(await listUncheckedIndexPaths(reader))]);
+  return unfilteredPaths.filter((filePath) => !uncleanPaths.has(filePath));
 }
 
 /**

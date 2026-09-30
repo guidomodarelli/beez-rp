@@ -305,6 +305,12 @@ export const GIT_FILTER_ATTRIBUTE = "filter";
 /** Values `git check-attr` reports for an attribute that does not apply to a path. */
 export const GIT_INACTIVE_ATTRIBUTE_VALUES = Object.freeze(["unspecified", "unset"]);
 
+/**
+ * Pathspecs (`attr:` magic) that select the files whose `filter` attribute is inactive: unspecified
+ * (`!filter`) or unset (`-filter`), the same states as {@link GIT_INACTIVE_ATTRIBUTE_VALUES}.
+ */
+export const UNFILTERED_FILE_PATHSPECS = Object.freeze([`:(attr:!${GIT_FILTER_ATTRIBUTE})`, `:(attr:-${GIT_FILTER_ATTRIBUTE})`]);
+
 /** Fields `git check-attr -z` writes per path and attribute: path, attribute and value. */
 export const CHECK_ATTR_FIELDS_PER_ENTRY = 3;
 

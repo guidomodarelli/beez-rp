@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -93,6 +93,30 @@ describe("create-version files compared with HEAD", () => {
       symlinkSync("settings.js", path.join(repositoryRoot, "settings-link.js"), "file");
 
       await expect(listFilesDifferentFromHead(reader, repositoryRoot, ["settings-link.js"])).resolves.toEqual([{ file: "settings-link.js", difference: "contentChanged" }]);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should report a submodule with an untracked file even when the submodule hides untracked files from git status",
+    async () => {
+      const repositoryRoot = createRepository();
+      const submoduleRoot = path.join(repositoryRoot, "vendor", "lib");
+      mkdirSync(submoduleRoot, { recursive: true });
+      runGit(["init", "--quiet", "--initial-branch=main"], submoduleRoot);
+      writeFileSync(path.join(submoduleRoot, "index.js"), "export const value = 1;\n");
+      runGit(["add", "index.js"], submoduleRoot);
+      runGit(["-c", "user.email=lib@example.test", "-c", "user.name=Lib Fixture", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "lib"], submoduleRoot);
+      runGit(["-c", "advice.addEmbeddedRepo=false", "add", "vendor/lib"], repositoryRoot);
+      runGit(["commit", "--quiet", "-m", "gitlink"], repositoryRoot);
+      const reader = createGitReader(repositoryRoot);
+
+      await expect(listFilesDifferentFromHead(reader, repositoryRoot, ["vendor/lib"])).resolves.toEqual([]);
+
+      runGit(["config", "status.showUntrackedFiles", "no"], submoduleRoot);
+      writeFileSync(path.join(submoduleRoot, "local.js"), "export const local = true;\n");
+
+      await expect(listFilesDifferentFromHead(reader, repositoryRoot, ["vendor/lib"])).resolves.toEqual([{ file: "vendor/lib", difference: "contentChanged" }]);
     },
     GIT_FIXTURE_TEST_TIMEOUT_MS
   );
