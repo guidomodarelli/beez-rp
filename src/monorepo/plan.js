@@ -277,6 +277,18 @@ function planPendingPublications(state, capabilities) {
 }
 
 /**
+ * Warns that `--skip-unpublished` leaves a tagged release out of npm on purpose.
+ *
+ * @param {string} name - Package name.
+ * @param {string} version - Skipped version.
+ * @param {string} tag - Its tag.
+ * @returns {string} Warning.
+ */
+function describeSkippedPublication(name, version, tag) {
+  return `Se saltea ${name}@${version} (tag ${tag}), que no está en npm: el release nuevo sale sin publicarla (--${CREATE_VERSION_FLAG.skipUnpublished}).`;
+}
+
+/**
  * Plans a new release of the packages that changed.
  *
  * @param {MonorepoSnapshot} state - Snapshot.
@@ -429,10 +441,11 @@ export function listPackagesToAuthenticate(plan) {
  *
  * @param {MonorepoSnapshot} state - Snapshot gathered by `collectMonorepoState`.
  * @param {ReleaseCapabilities} capabilities - Steps the project configured.
- * @param {{ tagFormat: string, ignoreLocalChanges?: boolean }} options - Tag format and command-line options.
+ * @param {{ tagFormat: string, ignoreLocalChanges?: boolean, skipUnpublished?: boolean }} options - Tag format and
+ *   command-line options; `skipUnpublished` plans a new release even when tagged releases are missing from npm.
  * @returns {MonorepoPlan} Ordered plan.
  */
-export function buildMonorepoPlan(state, capabilities, { tagFormat, ignoreLocalChanges = false }) {
+export function buildMonorepoPlan(state, capabilities, { tagFormat, ignoreLocalChanges = false, skipUnpublished = false }) {
   const commands = capabilities.commands ?? DEFAULT_PROJECT_COMMANDS;
   const blockers = findBlockers(state, ignoreLocalChanges, commands);
 
@@ -442,7 +455,8 @@ export function buildMonorepoPlan(state, capabilities, { tagFormat, ignoreLocalC
 
   const localResume = planLocalResume(state, capabilities, tagFormat);
   const pending = localResume ? { plan: null, warnings: [] } : planPendingPublications(state, capabilities);
-  const plan = localResume ?? pending.plan ?? planNewRelease(state, capabilities, commands, pending.warnings);
+  const skipped = skipUnpublished && pending.plan ? pending.plan.pendingReleases.map(({ name, version, tag }) => describeSkippedPublication(name, version, tag)) : [];
+  const plan = localResume ?? (skipUnpublished ? null : pending.plan) ?? planNewRelease(state, capabilities, commands, [...pending.warnings, ...skipped]);
   const withAuth = applyNpmAuth(plan, state, commands);
 
   if (withAuth.mode === RELEASE_MODE.resume && !ignoreLocalChanges && state.workingTreeChanges.length > 0) {

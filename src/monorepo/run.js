@@ -52,6 +52,7 @@ import {
   ReleaseCancelledError,
   applyMigrationsStep,
   askToIgnoreLocalChanges,
+  assertNoTrackedChanges,
   checkPinnedNodeVersion,
   createHookContext,
   describeReleaseCapabilities,
@@ -425,8 +426,14 @@ async function pushPackagesStep(context) {
   const releases = listRunReleases(context);
 
   for (const release of releases) {
-    if ((await context.reader.tryGit(["rev-parse", "--verify", "--quiet", `refs/tags/${release.tag}`])) === null) {
+    const taggedSha = await context.reader.tryGit(["rev-parse", "--verify", "--quiet", `refs/tags/${release.tag}^{commit}`]);
+    if (taggedSha === null) {
       await runGitStep(context, ["tag", "-a", release.tag, "-m", `${release.name}@${release.version}`, release.commitSha], `No se pudo crear el tag ${release.tag}`, `Revisá git tag --list ${release.tag}.`);
+    } else if (taggedSha !== release.commitSha) {
+      throw new ReleaseStepError(
+        `El tag local ${release.tag} apunta a ${taggedSha.slice(0, SHORT_SHA_LENGTH)} y el commit de release de ${release.name}@${release.version} es ${release.commitSha.slice(0, SHORT_SHA_LENGTH)}.`,
+        `No se subió nada. Revisalo con git show ${release.tag}; si sobra, borralo con git tag -d ${release.tag} y volvé a correr ${context.commands.createVersion}.`
+      );
     }
   }
 
@@ -460,11 +467,6 @@ async function resolvePackageArtifact(context, packageRoot, manifest, version) {
   const { artifact } = context.config;
   if (!artifact) {
     return null;
-  }
-
-  const rewrites = findPnpmPackRewrites(manifest);
-  if (rewrites.length > 0) {
-    throw new ReleaseStepError(`${String(manifest.name)} depende de reescrituras del package manager al empaquetar: ${rewrites.join("; ")}.`, "No se publicó nada. Reemplazá workspace:/catalog:/jsr: por rangos de versión.");
   }
 
   const release = { version, packageName: String(manifest.name) };
@@ -507,16 +509,25 @@ async function publishPackage(context, checkoutRoot, release) {
     return;
   }
 
+  // npm publishes the checkout of the release commit: no tracked file may differ from it, and npm
+  // would upload as they are the specifiers only pnpm rewrites when packing.
+  await assertNoTrackedChanges({ reader: createGitReader(checkoutRoot), commands: context.commands });
   const manifest = JSON.parse(readFileSync(path.join(packageRoot, PACKAGE_MANIFEST_FILE), "utf8"));
+  const rewrites = findPnpmPackRewrites(manifest);
+  if (rewrites.length > 0) {
+    throw new ReleaseStepError(`${release.name} depende de reescrituras del package manager al empaquetar: ${rewrites.join("; ")}.`, "No se publicó nada. Reemplazá workspace:/catalog:/jsr: por rangos de versión.");
+  }
+
   let registryUrl;
   try {
-    registryUrl = await resolvePublishRegistry(manifest, checkoutRoot);
+    // Resolved in the repository, as the diagnosis did: a temporary release checkout lacks an untracked project .npmrc.
+    registryUrl = await resolvePublishRegistry(manifest, context.repositoryRoot);
   } catch (error) {
     throw new ReleaseStepError(`No se puede publicar ${release.name}: ${error instanceof Error ? error.message : String(error)}.`, "Corregí el registry (publishConfig) y volvé a correr el comando.");
   }
 
   const artifactPath = await resolvePackageArtifact(context, packageRoot, manifest, release.version);
-  const result = await publishToNpm(context.repositoryRoot, { authConfigLine: buildNpmAuthConfigLine(registryUrl), artifactPath, packageRoot });
+  const result = await publishToNpm(context.repositoryRoot, { authConfigLine: buildNpmAuthConfigLine(registryUrl), artifactPath, packageRoot, registryUrl });
 
   if (result.missingToken) {
     throw new ReleaseStepError(`Falta ${NPM_TOKEN_VARIABLE} para publicar ${release.name}@${release.version}.`, `Definilo en ${NPM_TOKEN_LOCATIONS} y corré ${context.commands.createVersion}: retoma solo lo que falta publicar.`);
@@ -737,7 +748,7 @@ export async function runMonorepoCreateVersion({ repositoryRoot, config, options
       trackNpm: config.registry === RELEASE_REGISTRY.npm,
       checkMigrations: migrations ? () => migrations.check(createHookContext(repositoryRoot, reader, null)) : null,
       checkNpmAuthFor: (snapshot) =>
-        config.publish === NPM_PUBLISHER ? listPackagesToAuthenticate(buildMonorepoPlan(snapshot, capabilities, { tagFormat, ignoreLocalChanges: true })) : [],
+        config.publish === NPM_PUBLISHER ? listPackagesToAuthenticate(buildMonorepoPlan(snapshot, capabilities, { tagFormat, ignoreLocalChanges: true, skipUnpublished: options.skipUnpublished })) : [],
       onProgress: (label) => spinner.update(label),
     });
     spinner.succeed("Diagnóstico completo");
@@ -757,10 +768,10 @@ export async function runMonorepoCreateVersion({ repositoryRoot, config, options
   print(renderBanner({ projectName: config.projectName ?? rootName, publishedLabel: `${units.length} paquete(s)` }));
   print(renderMonorepoDiagnosis(state, repositoryRoot));
 
-  let plan = buildMonorepoPlan(state, capabilities, { tagFormat, ignoreLocalChanges: options.ignoreLocalChanges });
+  let plan = buildMonorepoPlan(state, capabilities, { tagFormat, ignoreLocalChanges: options.ignoreLocalChanges, skipUnpublished: options.skipUnpublished });
 
   if (plan.blockers.length > 0 && !options.ignoreLocalChanges && !options.dryRun && process.stdin.isTTY) {
-    const planIgnoringChanges = buildMonorepoPlan(state, capabilities, { tagFormat, ignoreLocalChanges: true });
+    const planIgnoringChanges = buildMonorepoPlan(state, capabilities, { tagFormat, ignoreLocalChanges: true, skipUnpublished: options.skipUnpublished });
     if (planIgnoringChanges.blockers.length === 0 && planIgnoringChanges.steps.length > 0) {
       if (!(await askToIgnoreLocalChanges(listMonorepoChangesToSetAside(state, planIgnoringChanges.mode)))) {
         print(`${ICON.info} Release cancelado: no se tocó nada. Commiteá o guardá los cambios y volvé a correr ${commands.createVersion}.`);

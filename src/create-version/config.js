@@ -305,7 +305,7 @@ export function resolveCreateVersionConfig(rawConfig, { packageScripts = {}, com
  * @param {string} filePath - Configured path.
  * @returns {boolean} Whether it is a relative path that cannot escape the root.
  */
-function isPathInsideRoot(filePath) {
+export function isPathInsideRoot(filePath) {
   // The win32 root covers `/x`, `\x`, `C:\x` and the drive-relative `C:x` alike, on every platform.
   return path.win32.parse(filePath).root === "" && !filePath.split(/[\\/]/u).includes("..");
 }

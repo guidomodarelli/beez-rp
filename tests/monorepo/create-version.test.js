@@ -169,4 +169,112 @@ describe("create-version in monorepo mode", () => {
     },
     GIT_FIXTURE_TEST_TIMEOUT_MS * 2
   );
+
+  it(
+    "does not publish when prepare modified a tracked file of the release commit",
+    async () => {
+      const { repositoryRoot } = createReleasedMonorepo();
+      writeFileSync(
+        path.join(repositoryRoot, "beez-rp.config.js"),
+        [
+          'import { appendFileSync } from "node:fs";',
+          'import path from "node:path";',
+          "export default {",
+          '  changelog: { audience: "quien usa {name}" },',
+          '  packages: "workspaces",',
+          "  checks: false,",
+          '  prepare: ({ repositoryRoot }) => appendFileSync(path.join(repositoryRoot, "packages/core/index.js"), "// prepared\\n"),',
+          '  publish: "npm",',
+          "};",
+          "",
+        ].join("\n")
+      );
+      commitAll(repositoryRoot, "chore: prepare the release");
+      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+      pushCoreFeature(repositoryRoot);
+      const registry = await startRegistry();
+
+      const release = await runCliAsync(repositoryRoot, ["--accept-suggested"], npmEnvironment(registry.registryUrl));
+
+      expect(release.status, release.output).toBe(1);
+      expect(flattenOutput(release.output)).toMatch(/El paso de preparación modificó archivos versionados: +M packages\/core\/index\.js/u);
+      expect(registry.publications).toEqual([]);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "does not publish, without artifact, a manifest whose published dependencies only pnpm rewrites",
+    async () => {
+      const { repositoryRoot } = createReleasedMonorepo();
+      writeJson(repositoryRoot, "packages/adapter/package.json", { name: "@acme/adapter", version: "0.3.0", dependencies: { "@acme/widget": "workspace:^" } });
+      writeFileSync(path.join(repositoryRoot, "packages/adapter/CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n### Changed\n\n- Usa el widget del workspace.\n");
+      commitAll(repositoryRoot, "fix(adapter): use the workspace widget");
+      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+      const registry = await startRegistry();
+
+      const release = await runCliAsync(repositoryRoot, ["--accept-suggested"], npmEnvironment(registry.registryUrl));
+
+      expect(release.status, release.output).toBe(1);
+      expect(flattenOutput(release.output)).toContain('@acme/adapter depende de reescrituras del package manager al empaquetar: dependencies.@acme/widget usa "workspace:^"');
+      expect(registry.publications).toEqual([]);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "does not push a resumed release whose existing local tag points at another commit",
+    async () => {
+      const { repositoryRoot, remoteRoot } = createReleasedMonorepo();
+      pushCoreFeature(repositoryRoot);
+      const featureSha = runGit(["rev-parse", "HEAD"], repositoryRoot);
+      writeJson(repositoryRoot, "packages/widget/package.json", { name: "@acme/widget", version: "1.1.0", devDependencies: { "@acme/core": "workspace:*" } });
+      commitAll(repositoryRoot, "release: @acme/widget@1.1.0");
+      runGit(["tag", "-a", "widget-v1.1.0", "-m", "@acme/widget@1.1.0", featureSha], repositoryRoot);
+      const registry = await startRegistry();
+
+      const resume = await runCliAsync(repositoryRoot, [], npmEnvironment(registry.registryUrl));
+
+      expect(resume.status, resume.output).toBe(1);
+      expect(flattenOutput(resume.output)).toContain(`El tag local widget-v1.1.0 apunta a ${featureSha.slice(0, 7)}`);
+      expect(runGit(["rev-parse", "main"], remoteRoot)).toBe(featureSha);
+      expect(runGit(["tag", "--list", "widget-v1.1.0"], remoteRoot)).toBe("");
+      expect(registry.publications).toEqual([]);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "publishes a pending release from its release commit to the registry the untracked project .npmrc selects",
+    async () => {
+      const { repositoryRoot } = createReleasedMonorepo();
+      writeFileSync(path.join(repositoryRoot, ".gitignore"), ".npmrc\n");
+      commitAll(repositoryRoot, "chore: ignore the project npm config");
+      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+      pushCoreFeature(repositoryRoot);
+      // Any registry npm reads outside the project .npmrc is unreachable.
+      const globalConfigPath = path.join(createTemporaryDirectory("beez-rp-npm-global-"), "npmrc");
+      writeFileSync(globalConfigPath, "registry=http://127.0.0.1:9/\n");
+      /** @param {string} registryUrl - Registry of the project .npmrc. @returns {NodeJS.ProcessEnv} Command environment. */
+      const projectNpmrcEnvironment = (registryUrl) => {
+        writeFileSync(path.join(repositoryRoot, ".npmrc"), `registry=${registryUrl}\n`);
+        return { NPM_TOKEN: OWNER_TOKEN, npm_config_globalconfig: globalConfigPath };
+      };
+
+      const failed = await runCliAsync(repositoryRoot, ["--accept-suggested"], projectNpmrcEnvironment((await startRegistry({ rejectPublications: true })).registryUrl));
+      expect(failed.status, failed.output).toBe(1);
+
+      // HEAD moves past the release commit, so the resume publishes from a temporary checkout.
+      writeFileSync(path.join(repositoryRoot, "packages/adapter/index.js"), "export {};\n");
+      commitAll(repositoryRoot, "chore(adapter): entry point");
+      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+
+      const registry = await startRegistry();
+      const resume = await runCliAsync(repositoryRoot, ["--accept-suggested"], projectNpmrcEnvironment(registry.registryUrl));
+
+      expect(resume.status, resume.output).toBe(0);
+      expect(registry.publications).toEqual([{ packageName: "@acme/widget", version: "1.1.0", user: OWNER_USER }]);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS * 2
+  );
 });

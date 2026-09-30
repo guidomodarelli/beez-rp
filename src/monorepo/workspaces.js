@@ -23,6 +23,7 @@ import {
   WORKSPACE_WILDCARD_SUFFIX,
   WORKSPACES_PACKAGES,
 } from "../constants/monorepo.js";
+import { isPathInsideRoot } from "../create-version/config.js";
 
 /**
  * @typedef {{
@@ -91,7 +92,7 @@ export function readDeclaredWorkspaces(rootManifest) {
  * @param {string} repositoryRoot - Repository root.
  * @param {readonly string[]} patterns - Workspace patterns.
  * @returns {string[]} Directories relative to the root that hold a `package.json`, sorted.
- * @throws {Error} When a pattern uses a glob beyond a trailing `/*`.
+ * @throws {Error} When a pattern escapes the repository or uses a glob beyond a trailing `/*`.
  */
 export function expandWorkspacePatterns(repositoryRoot, patterns) {
   const included = new Set();
@@ -99,6 +100,9 @@ export function expandWorkspacePatterns(repositoryRoot, patterns) {
 
   for (const rawPattern of patterns) {
     const isExclusion = rawPattern.startsWith(WORKSPACE_EXCLUSION_PREFIX);
+    if (!isPathInsideRoot(isExclusion ? rawPattern.slice(WORKSPACE_EXCLUSION_PREFIX.length) : rawPattern)) {
+      throw new Error(`beez-rp create-version: el patrón de workspace "${rawPattern}" sale del repositorio; usá rutas relativas a la raíz, sin ".." ni rutas absolutas`);
+    }
     const pattern = toPosixPath(isExclusion ? rawPattern.slice(WORKSPACE_EXCLUSION_PREFIX.length) : rawPattern).replace(/^\.\//u, "");
     const base = pattern.endsWith(WORKSPACE_WILDCARD_SUFFIX) ? pattern.slice(0, -WORKSPACE_WILDCARD_SUFFIX.length) : pattern;
 

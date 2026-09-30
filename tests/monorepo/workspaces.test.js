@@ -65,6 +65,9 @@ describe("discoverWorkspacePackages", () => {
     const root = createMonorepo({ "packages/a": { name: "a" }, "packages/b": { name: "a" } });
 
     expect(() => expandWorkspacePatterns(root, ["packages/**"])).toThrow(/not supported/);
+    for (const escapingPattern of ["../shared", "packages/../../shared", "!../shared", "/abs/packages/*", "C:\\repo\\packages"]) {
+      expect(() => expandWorkspacePatterns(root, [escapingPattern])).toThrow(/sale del repositorio/);
+    }
     expect(() => discoverWorkspacePackages(root, ["nothing/*"])).toThrow(/no workspace package found/);
     expect(() => discoverWorkspacePackages(root, "workspaces")).toThrow(/declared in both packages\/a and packages\/b/);
   });

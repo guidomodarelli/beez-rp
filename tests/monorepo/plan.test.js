@@ -126,6 +126,21 @@ describe("buildMonorepoPlan", () => {
     expect(plan.pendingReleases).toEqual([{ name: "@acme/widget", version: "1.1.0", tag: "widget-v1.1.0", commitSha: "release-commit", publish: true }]);
   });
 
+  it("skips the tagged releases npm lacks with --skip-unpublished and plans the new release, warning about them", () => {
+    const widget = packageSnapshot("widget", {
+      unreleasedCommits: [{ sha: "c2", subject: "fix(widget): later", body: "" }],
+      releasedVersion: "1.1.0",
+      lastRelease: { sha: "release-commit", version: "1.1.0", subject: "release: @acme/widget@1.1.0", tag: "widget-v1.1.0", tagged: true, tagOnOrigin: true },
+    });
+
+    const plan = buildMonorepoPlan(monorepoState({ packages: [widget, packageSnapshot("cli")] }), NPM_PACKAGE, { tagFormat: TAG_FORMAT, skipUnpublished: true });
+
+    expect(plan.mode).toBe(RELEASE_MODE.newRelease);
+    expect(plan.candidates).toEqual(["@acme/widget"]);
+    expect(plan.pendingReleases).toEqual([]);
+    expect(plan.warnings).toEqual(["Se saltea @acme/widget@1.1.0 (tag widget-v1.1.0), que no está en npm: el release nuevo sale sin publicarla (--skip-unpublished)."]);
+  });
+
   it("does not publish a missing version below the highest one on npm, and says why", () => {
     const widget = packageSnapshot("widget", {
       releasedVersion: "1.1.0",

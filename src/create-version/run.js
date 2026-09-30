@@ -1036,22 +1036,30 @@ async function pushReleaseTagStep(context) {
 }
 
 /**
- * Lists the tracked files that differ from `HEAD`. `prepare` may create untracked or ignored
- * output (`dist/`, `releases/`), but a modified tracked file (such as `package.json`) means
- * `npm pack --dry-run` would no longer read the release commit.
+ * Checks that no tracked file differs from `HEAD` before publishing. `prepare` may create untracked
+ * or ignored output (`dist/`, `releases/`), but a modified tracked file (such as `package.json`)
+ * means the publication would no longer be the release commit.
  *
- * @param {ReleaseContext} context - Release context.
- * @returns {Promise<string[]>} `git status --porcelain` lines of modified tracked files.
- * @throws {ReleaseStepError} When Git cannot report the working tree state.
+ * @param {{ reader: GitReader, commands: import("../package-manager.js").ProjectCommands }} context - Git reader of
+ *   the checkout being published and the project commands quoted by the hint.
+ * @returns {Promise<void>}
+ * @throws {ReleaseStepError} When Git cannot report the working tree state or a tracked file changed.
  */
-async function listTrackedChanges(context) {
+export async function assertNoTrackedChanges(context) {
   const output = await context.reader.tryGit(["status", "--porcelain", "--untracked-files=no"]);
 
   if (output === null) {
     throw new ReleaseStepError("No se pudo leer el estado del working tree antes de publicar.", `No se publicó nada. Revisá git status y volvé a correr ${context.commands.createVersion}.`);
   }
 
-  return output.split("\n").filter((line) => line.trim() !== "");
+  const trackedChanges = output.split("\n").filter((line) => line.trim() !== "");
+
+  if (trackedChanges.length > 0) {
+    throw new ReleaseStepError(
+      `El paso de preparación modificó archivos versionados: ${trackedChanges.slice(0, MAX_LISTED_ITEMS).join("; ")}.`,
+      `No se publicó nada. prepare puede generar archivos ignorados (dist/, releases/) pero no cambiar archivos versionados como package.json: revertí esos cambios y volvé a correr ${context.commands.createVersion}.`
+    );
+  }
 }
 
 /**
@@ -1073,14 +1081,7 @@ async function resolvePublishedArtifact(context, version, workingManifest) {
     return null;
   }
 
-  const trackedChanges = await listTrackedChanges(context);
-
-  if (trackedChanges.length > 0) {
-    throw new ReleaseStepError(
-      `El paso de preparación modificó archivos versionados: ${trackedChanges.slice(0, MAX_LISTED_ITEMS).join("; ")}.`,
-      `No se publicó nada. prepare puede generar archivos ignorados (dist/, releases/) pero no cambiar archivos versionados como package.json: revertí esos cambios y volvé a correr ${context.commands.createVersion}.`
-    );
-  }
+  await assertNoTrackedChanges(context);
 
   const pnpmRewrites = findPnpmPackRewrites(workingManifest);
 
