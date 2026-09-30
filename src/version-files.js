@@ -11,6 +11,7 @@
  */
 
 import {
+  LINE_TERMINATOR_BOUNDARY_PATTERN,
   MARKED_VERSION_PATTERN,
   VERSION_BLOCK_END_MARKERS,
   VERSION_BLOCK_PROBLEM,
@@ -60,7 +61,7 @@ function findMarkerIndex(line, markers) {
 
 /**
  * Rewrites the versions of the marked lines of a file, keeping everything else (line endings
- * included) byte for byte.
+ * included) byte for byte. `\n`, `\r\n` and a lone `\r` all end a line.
  *
  * @param {string} content - File content.
  * @param {string} version - Version to write.
@@ -77,7 +78,7 @@ export function updateVersionMarkers(content, version) {
   /** @type {string[]} */
   const lines = [];
 
-  for (const [index, line] of content.split(/(?<=\n)/u).entries()) {
+  for (const [index, line] of content.split(LINE_TERMINATOR_BOUNDARY_PATTERN).entries()) {
     const lineNumber = index + 1;
     const startMarkerIndex = findMarkerIndex(line, VERSION_BLOCK_START_MARKERS);
     const endMarkerIndex = findMarkerIndex(line, VERSION_BLOCK_END_MARKERS);

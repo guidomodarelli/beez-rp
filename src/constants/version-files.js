@@ -38,9 +38,17 @@ export const VERSION_BLOCK_PROBLEM = Object.freeze({
 
 /**
  * A semantic version inside a marked line (`1.2.3`, `1.2.3-beta.1`, `1.2.3+build`), not glued to
- * other version-like digits. Global: every version of a marked line is rewritten.
+ * other version-like digits (`10.0.0.1`, `1.2.3.4`). A period that ends a sentence (`is 1.2.3.`)
+ * is not part of the version and is kept. Global: every version of a marked line is rewritten.
  */
-export const MARKED_VERSION_PATTERN = /(?<![\d.])\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?(?![\d.])/gu;
+export const MARKED_VERSION_PATTERN =
+  /(?<![\d.])\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?!\.?\d)/gu;
+
+/**
+ * Splits a versioned file into lines right after each terminator (`\r\n`, `\n` or a lone `\r`),
+ * so every line keeps its own terminator and joining the lines gives back the original content.
+ */
+export const LINE_TERMINATOR_BOUNDARY_PATTERN = /(?<=\n)|(?<=\r)(?!\n)/u;
 
 /**
  * Files the release commit already writes on its own (the bumped `package.json` and the released
