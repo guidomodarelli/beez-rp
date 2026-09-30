@@ -79,6 +79,7 @@ import {
   withArtifactOutsidePackageRoot,
 } from "./artifact.js";
 import { loadCreateVersionConfig } from "./config.js";
+import { describeReleaseInstructions, listChangedReleaseInstructions, reloadReleaseInstructions } from "./config-reload.js";
 import { ReleaseStepError } from "./errors.js";
 import {
   buildNpmAuthConfigLine,
@@ -94,7 +95,6 @@ import { restoreLocalChanges, setAsideLocalChanges } from "./local-changes.js";
 import { describeProjectCommands, detectPackageManager } from "../package-manager.js";
 import { buildReleasePlan, buildReleaseUsage, listLocalChangesToSetAside, parseReleaseArguments } from "./plan.js";
 import { createGitReader, listCommits, runCommandLine, runInherited } from "./process.js";
-import { joinShellArguments } from "./shell-arguments.js";
 import { collectReleaseState } from "./state.js";
 
 /**
@@ -858,6 +858,33 @@ function restoreFileContent(absolutePath, originalContent) {
 }
 
 /**
+ * Undoes a release whose files were written but whose commit failed (a rejected `git add`, a
+ * `pre-commit` hook that fails): the index goes back to the tree it had before staging and every
+ * release file to its original content, so nothing is left for the user to discard by hand and no
+ * command has to quote the configured paths for a shell.
+ *
+ * @param {ReleaseContext} context - Release context.
+ * @param {{ filePath: string, originalContent: string }[]} fileUpdates - Files the release wrote.
+ * @param {string | null} indexTree - Tree of the index before staging (`git write-tree`), or `null` when Git could not write it.
+ * @param {ReleaseStepError} failure - Failure of `git add` or `git commit`.
+ * @returns {Promise<ReleaseStepError>} Failure to throw, whose hint says what was restored and what was not.
+ */
+async function rollBackUncommittedRelease(context, fileUpdates, indexTree, failure) {
+  const indexRestored = indexTree !== null && (await context.reader.tryGit(["read-tree", indexTree])) !== null;
+  const unrestoredPaths = fileUpdates.filter(({ filePath, originalContent }) => !restoreFileContent(path.join(context.repositoryRoot, filePath), originalContent)).map(({ filePath }) => filePath);
+  const pendingRestores = [
+    ...(indexRestored ? [] : ["no se pudo volver el staging a como estaba: revisá git status y sacá del staging package.json, CHANGELOG.md y versionFiles"]),
+    ...(unrestoredPaths.length === 0 ? [] : [`no se pudo restaurar el contenido de ${unrestoredPaths.join(", ")}: devolvelos a su contenido anterior (git diff muestra el cambio)`]),
+  ];
+  const restoreNote =
+    pendingRestores.length === 0
+      ? "se restauraron package.json, CHANGELOG.md y versionFiles (contenido y staging), así que no se tocó la versión"
+      : `${pendingRestores.join("; ")}, antes de reintentar`;
+
+  return new ReleaseStepError(failure.message, `${failure.hint} Después volvé a correr ${context.commands.createVersion}; ${restoreNote}.`, { cause: failure });
+}
+
+/**
  * Checks, before resuming a release commit that already exists (created by a previous run or by
  * hand), that every configured `versionFiles` entry in `HEAD` already carries the pending version
  * in its marked lines: the resume never rewrites them, so it would push or publish stale versions.
@@ -973,28 +1000,29 @@ async function bumpVersionStep(context) {
 
   const versionFileUpdates = await prepareVersionFileUpdates(context, nextRelease.version);
   print(renderBox({ title: `CHANGELOG · ${UNRELEASED_HEADING} → [${nextRelease.version}]`, lines: readWorkingUnreleased(context.repositoryRoot).body.split("\n"), tone: BOX_TONE.info }));
-  writeReleaseFiles(context, [
+  const releaseFileUpdates = [
     { filePath: PACKAGE_MANIFEST_FILE, originalContent: manifest, content: manifest.replace(PACKAGE_VERSION_FIELD_PATTERN, `$1${nextRelease.version}$2`) },
     { filePath: CHANGELOG_FILE, originalContent: changelog, content: releasedChangelog },
     ...versionFileUpdates,
-  ]);
+  ];
+  // The index before staging, so a failed commit puts it back exactly (a CHANGELOG.md the user staged stays staged).
+  const indexTree = await context.reader.tryGit(["write-tree"]);
+  writeReleaseFiles(context, releaseFileUpdates);
 
   const tag = toReleaseTag(nextRelease.version);
-  const versionFilePaths = versionFileUpdates.map(({ filePath }) => filePath);
   // Literal pathspecs after `--`: a configured name such as `-v.txt` or `:version` is a file, never an option nor pathspec magic.
-  const versionFilePathspecs = versionFilePaths.map(toLiteralPathspec);
-  await runGitStep(
-    context,
-    ["add", "--", PACKAGE_MANIFEST_FILE, CHANGELOG_FILE, ...versionFilePathspecs],
-    "No se pudo stagear package.json, CHANGELOG.md y versionFiles",
-    "Revisá git status."
-  );
-  await runGitStep(
-    context,
-    ["commit", "--quiet", "-m", nextRelease.version],
-    "El commit de versión falló",
-    `Corregí el error, descartá el cambio con git checkout -- ${joinShellArguments([PACKAGE_MANIFEST_FILE, CHANGELOG_FILE, ...versionFilePaths])} y volvé a correr ${context.commands.createVersion}.`
-  );
+  const releaseFilePathspecs = releaseFileUpdates.map(({ filePath }) => toLiteralPathspec(filePath));
+
+  try {
+    await runGitStep(context, ["add", "--", ...releaseFilePathspecs], "No se pudo stagear package.json, CHANGELOG.md y versionFiles", "Revisá git status.");
+    await runGitStep(context, ["commit", "--quiet", "-m", nextRelease.version], "El commit de versión falló", "Corregí el error (por ejemplo, un hook pre-commit que lo rechaza).");
+  } catch (error) {
+    if (!(error instanceof ReleaseStepError)) {
+      throw error;
+    }
+    throw await rollBackUncommittedRelease(context, releaseFileUpdates, indexTree, error);
+  }
+
   await verifyCommittedVersionFiles(context, nextRelease.version);
   await runGitStep(context, ["tag", "-a", tag, "-m", nextRelease.version], `No se pudo crear el tag ${tag}`, `Si ya existe, revisalo con git show ${tag}.`);
 
@@ -1378,6 +1406,40 @@ function hasFailedNpmLookup(snapshot) {
 }
 
 /**
+ * Checks, right after `--ignore-local-changes` set the uncommitted changes aside and before any
+ * step runs, that the configuration the run imported does not depend on them: Node keeps the
+ * configuration and every module it imports in its cache, so a set-aside helper that feeds
+ * `versionFiles`, checks or hooks would keep its uncommitted content for the whole release while
+ * the release commit keeps the committed one. The configuration is loaded again in a new process,
+ * from the working tree without the set-aside changes, and must describe the same release.
+ *
+ * @param {ReleaseContext} context - Release context.
+ * @returns {Promise<void>}
+ * @throws {ReleaseStepError} When the configuration cannot be loaded without the set-aside changes,
+ *   or loads with other release instructions.
+ */
+async function requireConfigWithoutSetAsideChanges(context) {
+  const retryHint = `Commiteá esos cambios en una rama y llevalos a ${MAIN_BRANCH}, o descartalos (git restore) o guardalos (git stash), y volvé a correr ${context.commands.createVersion}; no se tocó la versión y los cambios apartados vuelven al working tree.`;
+  const reload = await reloadReleaseInstructions(context.repositoryRoot);
+
+  if (!reload.loaded) {
+    throw new ReleaseStepError(
+      `No se pudo cargar beez-rp.config.(m)js sin los cambios sin commitear que apartó --${CREATE_VERSION_FLAG.ignoreLocalChanges} (${reload.reason}): la configuración depende de ellos.`,
+      retryHint
+    );
+  }
+
+  const changedFields = listChangedReleaseInstructions(describeReleaseInstructions(context.config), reload.instructions);
+
+  if (changedFields.length > 0) {
+    throw new ReleaseStepError(
+      `La configuración depende de cambios sin commitear que apartó --${CREATE_VERSION_FLAG.ignoreLocalChanges} (por ejemplo, un módulo que importa beez-rp.config.(m)js): sin ellos cambian ${changedFields.join(", ")}, y el release usaría lo que no está commiteado.`,
+      retryHint
+    );
+  }
+}
+
+/**
  * Runs `create-version` in a repository.
  *
  * @param {{ repositoryRoot: string, argv: string[] }} options - Repository root and arguments after the command name.
@@ -1548,6 +1610,16 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   }
 
   try {
+    if (setAside) {
+      try {
+        await requireConfigWithoutSetAsideChanges(context);
+      } catch (error) {
+        const hint = error instanceof ReleaseStepError ? ` ${error.hint}` : "";
+        print(`${ICON.failure} ${paint("red", `${error instanceof Error ? error.message : String(error)}${hint}`)}`);
+        return FAILURE_EXIT_CODE;
+      }
+    }
+
     return await runPlanSteps(context, plan, remoteUrl, startedAt);
   } finally {
     if (setAside) {

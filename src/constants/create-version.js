@@ -489,19 +489,9 @@ export const FAILURE_EXIT_CODE = 1;
 export const GIT_REGULAR_FILE_MODES = Object.freeze(["100644", "100755"]);
 
 /**
- * Argument a shell prints in a copyable command without quotes: letters, digits, `_`, `.`, `/` and
- * `-` mean nothing to POSIX shells, cmd.exe nor PowerShell.
+ * Fields of the resolved configuration that decide what the release commits, validates and
+ * publishes. A run that sets local changes aside compares them with the configuration loaded again,
+ * in a new process, without those changes: any difference means the loaded configuration depends
+ * on uncommitted files (such as a helper module that `beez-rp.config.(m)js` imports).
  */
-export const SHELL_SAFE_ARGUMENT_PATTERN = /^[\w./-]+$/u;
-
-/** Quote that makes a POSIX shell read everything up to the next one literally. */
-export const POSIX_SHELL_QUOTE = "'";
-
-/** Closes the quoted text, adds an escaped `'` and reopens it: a POSIX single-quoted string cannot contain `'`. */
-export const POSIX_ESCAPED_SHELL_QUOTE = "'\\''";
-
-/** Quote cmd.exe and PowerShell both read as the delimiter of one argument with spaces or metacharacters. */
-export const WINDOWS_SHELL_QUOTE = '"';
-
-/** Platform whose shells (cmd.exe, PowerShell) use {@link WINDOWS_SHELL_QUOTE}. */
-export const WINDOWS_PLATFORM = "win32";
+export const RELEASE_INSTRUCTION_FIELDS = Object.freeze(["versionFiles", "checks", "prepare", "publish", "registry", "artifact"]);

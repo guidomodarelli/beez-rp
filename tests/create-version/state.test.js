@@ -7,7 +7,6 @@ import { fileURLToPath } from "node:url";
 
 import { NPM_LOOKUP_STATUS, RELEASE_MODE, RELEASE_STEP } from "../../src/constants/create-version.js";
 import { buildReleasePlan } from "../../src/create-version/plan.js";
-import { quoteShellArgument } from "../../src/create-version/shell-arguments.js";
 import { collectReleaseState } from "../../src/create-version/state.js";
 import { startFixtureNpmRegistry } from "./support/fixture-npm-registry.js";
 
@@ -858,19 +857,73 @@ describe("beez-rp create-version command", () => {
   );
 
   it(
-    "should quote a versionFiles path with spaces in the command that discards a failed release commit",
+    "should restore the release files and the staging when the release commit fails, whatever the versionFiles names hold",
     () => {
       const { repositoryRoot } = createReleasedRepository();
-      const versionFile = "docs/my version.txt";
+      // Names a shell or Git would interpret: spaces, cmd.exe `%VAR%`, PowerShell `$var` and, where the file system allows it, pathspec magic.
+      const versionFiles = ["docs/my version %PATH% $HOME.txt", ...(process.platform === "win32" ? [] : [":version"])];
       mkdirSync(path.join(repositoryRoot, "docs"));
-      writeFileSync(path.join(repositoryRoot, versionFile), "0.1.0 <!-- beez-rp-version -->\n");
-      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", `  versionFiles: [${JSON.stringify(versionFile)}],`, "};"]);
+      for (const versionFile of versionFiles) writeFileSync(path.join(repositoryRoot, versionFile), "0.1.0 <!-- beez-rp-version -->\n");
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", `  versionFiles: ${JSON.stringify(versionFiles)},`, "};"]);
+      const manifest = readFileSync(path.join(repositoryRoot, "package.json"), "utf8");
+      const stagedChangelog = "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Algo nuevo.\n- Algo más.\n";
+      writeFileSync(path.join(repositoryRoot, "CHANGELOG.md"), stagedChangelog);
+      runGit(["add", "CHANGELOG.md"], repositoryRoot);
       writeFileSync(path.join(repositoryRoot, ".git", "hooks", "pre-commit"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
 
       const release = runCli(repositoryRoot, ["--bump", "minor"]);
 
       expect(release.status, release.output).toBe(1);
-      expect(flattenOutput(release.output)).toContain(`git checkout -- package.json CHANGELOG.md ${quoteShellArgument(versionFile)} y volvé a correr`);
+      expect(flattenOutput(release.output)).toContain("El commit de versión falló");
+      expect(flattenOutput(release.output)).toContain("se restauraron package.json, CHANGELOG.md y versionFiles (contenido y staging)");
+      expect(readFileSync(path.join(repositoryRoot, "package.json"), "utf8")).toBe(manifest);
+      expect(readFileSync(path.join(repositoryRoot, "CHANGELOG.md"), "utf8")).toBe(stagedChangelog);
+      for (const versionFile of versionFiles) expect(readFileSync(path.join(repositoryRoot, versionFile), "utf8")).toBe("0.1.0 <!-- beez-rp-version -->\n");
+      expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe("M  CHANGELOG.md");
+      expect(runGit(["log", "-1", "--format=%s", "main"], repositoryRoot)).toBe("chore: configure releases");
+      expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should not release with --ignore-local-changes while a set-aside edit of a module the configuration imports drops a versionFiles entry",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      const cliPath = path.join(repositoryRoot, "src", "cli.js");
+      const helperPath = path.join(repositoryRoot, "release", "version-files.js");
+      mkdirSync(path.dirname(cliPath));
+      mkdirSync(path.dirname(helperPath));
+      writeFileSync(cliPath, 'program.version("0.1.0"); // beez-rp-version\n');
+      writeFileSync(helperPath, 'export const versionFiles = ["src/cli.js"];\n');
+      pushConfiguration(repositoryRoot, [
+        'import { versionFiles } from "./release/version-files.js";',
+        "export default {",
+        '  changelog: { audience: "equipo" },',
+        "  checks: false,",
+        "  versionFiles,",
+        "};",
+      ]);
+      const localHelper = "export const versionFiles = [];\n";
+      writeFileSync(helperPath, localHelper);
+
+      const blocked = runCli(repositoryRoot, ["--bump", "minor", "--ignore-local-changes"]);
+
+      expect(blocked.status, blocked.output).toBe(1);
+      expect(flattenOutput(blocked.output)).toContain("La configuración depende de cambios sin commitear que apartó --ignore-local-changes");
+      expect(flattenOutput(blocked.output)).toContain("sin ellos cambian versionFiles");
+      expect(runGit(["log", "-1", "--format=%s", "main"], repositoryRoot)).toBe("chore: configure releases");
+      expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+      // The restore goes through Git, which may convert line endings (core.autocrlf): the content is what matters.
+      expect(readFileSync(helperPath, "utf8").replaceAll("\r\n", "\n")).toBe(localHelper);
+      expect(runGit(["stash", "list"], repositoryRoot)).toBe("");
+
+      runGit(["restore", "release/version-files.js"], repositoryRoot);
+      const release = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(release.status, release.output).toBe(0);
+      expect(runGit(["show", "main:src/cli.js"], remoteRoot)).toBe('program.version("0.2.0"); // beez-rp-version');
     },
     GIT_FIXTURE_TEST_TIMEOUT_MS
   );
