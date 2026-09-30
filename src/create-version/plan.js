@@ -328,7 +328,7 @@ export function listLocalChangesToSetAside(state, mode) {
  * @param {string} line - Porcelain line.
  * @returns {string[]} Paths the line reports.
  */
-function listPorcelainPaths(line) {
+export function listPorcelainPaths(line) {
   return line
     .slice(PORCELAIN_STATUS_WIDTH)
     .split(PORCELAIN_RENAME_SEPARATOR)

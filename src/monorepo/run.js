@@ -290,7 +290,11 @@ async function chooseVersionsStep(context) {
   }
 
   // Checked again before the commit; here it stops the release before migrations are applied.
-  await assertReleaseScope(context);
+  const versionFilesByPackage = await assertReleaseScope(context);
+  for (const { unit, version } of context.chosen) {
+    // Only validates: a missing, untracked or unmarked versionFiles entry stops the release before migrations.
+    await prepareVersionFileUpdates(context, versionFilesByPackage.get(unit.name) ?? [], version);
+  }
 }
 
 /**

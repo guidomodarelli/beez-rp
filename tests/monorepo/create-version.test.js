@@ -374,6 +374,47 @@ describe("create-version in monorepo mode", () => {
   );
 
   it(
+    "does not apply migrations when a versionFiles entry of a chosen package has no version marker",
+    async () => {
+      const { repositoryRoot, remoteRoot } = createReleasedMonorepo();
+      const appliedMarker = path.join(path.dirname(repositoryRoot), "migrations-applied");
+      writeFileSync(path.join(repositoryRoot, "packages/widget/version.js"), 'export const VERSION = "1.0.0";\n');
+      writeFileSync(
+        path.join(repositoryRoot, "beez-rp.config.js"),
+        [
+          'import { existsSync, writeFileSync } from "node:fs";',
+          `const appliedMarker = ${JSON.stringify(appliedMarker)};`,
+          "export default {",
+          '  changelog: { audience: "quien usa {name}" },',
+          '  packages: "workspaces",',
+          "  checks: false,",
+          '  publish: "npm",',
+          '  versionFiles: ["packages/widget/version.js"],',
+          "  migrations: {",
+          '    check: () => ({ status: existsSync(appliedMarker) ? "up-to-date" : "pending", pending: existsSync(appliedMarker) ? [] : ["001_init"], target: "db", reason: null }),',
+          '    apply: () => writeFileSync(appliedMarker, ""),',
+          "  },",
+          "};",
+          "",
+        ].join("\n")
+      );
+      commitAll(repositoryRoot, "chore: add migrations and version file");
+      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+      pushCoreFeature(repositoryRoot);
+      const releasedSha = runGit(["rev-parse", "HEAD"], repositoryRoot);
+      const registry = await startRegistry();
+
+      const release = await runCliAsync(repositoryRoot, ["--accept-suggested"], npmEnvironment(registry.registryUrl));
+
+      expect(release.status, release.output).toBe(1);
+      expect(flattenOutput(release.output)).toContain("packages/widget/version.js (versionFiles) no tiene ninguna versión marcada para actualizar.");
+      expect(existsSync(appliedMarker)).toBe(false);
+      expect(runGit(["rev-parse", "main"], remoteRoot)).toBe(releasedSha);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
     "writes a versionFiles entry of a nested workspace with the version of the closest package",
     async () => {
       const { repositoryRoot, remoteRoot } = createReleasedMonorepo();

@@ -22,14 +22,13 @@ import {
   MIGRATION_STATUS,
   NPM_AUTH_STATUS,
   NPM_LOOKUP_STATUS,
-  PORCELAIN_STATUS_WIDTH,
   RELEASE_MODE,
   RELEASE_REMOTE,
   RELEASE_STEP,
   REMOTE_MAIN_REF,
 } from "../constants/create-version.js";
 import { MONOREPO_RELEASE_STEP } from "../constants/monorepo.js";
-import { codeChangesToSetAsideBlocker, describeFeatureBranchGaps, foreignCommitsBlocker, isCodeChange, missingChecksBlocker } from "../create-version/plan.js";
+import { codeChangesToSetAsideBlocker, describeFeatureBranchGaps, foreignCommitsBlocker, isCodeChange, listPorcelainPaths, missingChecksBlocker } from "../create-version/plan.js";
 import { describeNpmAuthProblem, describeNpmFirstPublicationWarning } from "../create-version/npm-auth.js";
 import { DEFAULT_PROJECT_COMMANDS } from "../package-manager.js";
 import { findHighestStableVersion, isStableReleaseVersion, isStableVersionAbove } from "../versions.js";
@@ -72,7 +71,7 @@ function createPlan(plan) {
  * @returns {boolean} Whether the line reports one of them.
  */
 function changesOneOf(line, paths) {
-  return paths.has(line.slice(PORCELAIN_STATUS_WIDTH));
+  return listPorcelainPaths(line).some((changedPath) => paths.has(changedPath));
 }
 
 /**

@@ -171,6 +171,14 @@ describe("buildMonorepoPlan", () => {
     expect(listMonorepoChangesToSetAside(withDocs, RELEASE_MODE.newRelease)).toEqual([" M packages/widget/README.md"]);
   });
 
+  it("recognizes a package changelog whose path Git quotes because it has a space", () => {
+    const spaced = packageSnapshot("my widget", { unreleasedCommits: [{ sha: "c1", subject: "feat(widget): new option", body: "" }] });
+    const state = monorepoState({ packages: [spaced], workingTreeChanges: [' M "packages/my widget/CHANGELOG.md"'] });
+
+    expect(buildMonorepoPlan(state, NPM_PACKAGE, { tagFormat: TAG_FORMAT }).mode).toBe(RELEASE_MODE.newRelease);
+    expect(listMonorepoChangesToSetAside(state, RELEASE_MODE.newRelease)).toEqual([]);
+  });
+
   it("does not set aside code or data changes with --ignore-local-changes, such as a workspace manifest discovery already read", () => {
     const state = monorepoState({ workingTreeChanges: [" M packages/cli/package.json", " M packages/widget/src/index.ts", " M packages/widget/README.md"] });
 
