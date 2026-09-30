@@ -127,7 +127,8 @@ function invalidField(field, expectation) {
  * @returns {value is string[]} Whether it is a string list.
  */
 function isStringList(value) {
-  return Array.isArray(value) && value.every((item) => typeof item === "string" && item.trim().length > 0);
+  // Array.from turns holes into undefined, which every() would otherwise skip.
+  return Array.isArray(value) && Array.from(value).every((item) => typeof item === "string" && item.trim().length > 0);
 }
 
 /**

@@ -17,7 +17,7 @@
  * @module create-version/run
  */
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { readUnreleased, releaseUnreleased } from "../changelog.js";
@@ -691,12 +691,12 @@ function rewriteMarkedVersions(context, filePath, content, version, untouchedNot
 
 /**
  * Computes the new content of every configured `versionFiles` entry before anything is written, so
- * a missing, untracked, non-UTF-8 or unmarked file stops the release with the version untouched.
+ * a missing, non-regular (symlink or directory), untracked, non-UTF-8 or unmarked file stops the release with the version untouched.
  *
  * @param {VersionFilesContext} context - Release context.
  * @param {string} version - Version being released.
  * @returns {Promise<ReleaseFileUpdate[]>} Files to write, with their bytes before the release.
- * @throws {ReleaseStepError} When a file is missing, is not tracked by Git, is not valid UTF-8, has
+ * @throws {ReleaseStepError} When a file is missing, is not a regular file, is not tracked by Git, is not valid UTF-8, has
  *   block markers paired wrongly or none of its lines is marked.
  */
 async function prepareVersionFileUpdates(context, version) {
@@ -706,6 +706,13 @@ async function prepareVersionFileUpdates(context, version) {
   for (const filePath of versionFiles) {
     if (!existsSync(path.join(context.repositoryRoot, filePath))) {
       throw new ReleaseStepError(`${filePath} (versionFiles) no existe.`, `Corregí versionFiles en beez-rp.config.(m)js y volvé a correr ${context.commands.createVersion}; ${untouchedNote}.`);
+    }
+    // lstat does not follow links: writing through a symlink would change a file outside versionFiles.
+    if (!lstatSync(path.join(context.repositoryRoot, filePath)).isFile()) {
+      throw new ReleaseStepError(
+        `${filePath} (versionFiles) no es un archivo regular (es un symlink o un directorio).`,
+        `Apuntá versionFiles al archivo real en beez-rp.config.(m)js y volvé a correr ${context.commands.createVersion}; ${untouchedNote}.`
+      );
     }
   }
 

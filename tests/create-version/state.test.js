@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -663,6 +663,31 @@ describe("beez-rp create-version command", () => {
   );
 
   it(
+    "should stop before writing anything when a versionFiles entry is a symlink, instead of rewriting the file it points to",
+    (testContext) => {
+      const { repositoryRoot } = createReleasedRepository();
+      const targetPath = path.join(repositoryRoot, "target.js");
+      const targetContent = 'program.version("0.1.0"); // beez-rp-version\n';
+      writeFileSync(targetPath, targetContent);
+      try {
+        symlinkSync("target.js", path.join(repositoryRoot, "linked.js"), "file");
+      } catch {
+        // Windows only creates file symlinks with Developer Mode or elevated privileges.
+        testContext.skip();
+      }
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", '  versionFiles: ["linked.js"],', "};"]);
+
+      const blocked = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(blocked.status, blocked.output).toBe(1);
+      expect(flattenOutput(blocked.output)).toContain("linked.js (versionFiles) no es un archivo regular");
+      expect(readFileSync(targetPath, "utf8")).toBe(targetContent);
+      expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
     "should stop before bumping when a check modifies a versionFiles entry, instead of shipping that change in the release commit",
     () => {
       const { repositoryRoot } = createReleasedRepository();
@@ -744,7 +769,8 @@ describe("beez-rp create-version command", () => {
     GIT_FIXTURE_TEST_TIMEOUT_MS
   );
 
-  it(
+  // Root ignores the read-only mode, so the fixture could not make the write fail.
+  it.skipIf(process.getuid?.() === 0)(
     "should restore package.json, CHANGELOG.md and earlier versionFiles when a later versionFiles entry cannot be written",
     () => {
       const { repositoryRoot } = createReleasedRepository();

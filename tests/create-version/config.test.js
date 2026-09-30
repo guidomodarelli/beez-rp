@@ -27,6 +27,12 @@ describe("create-version config", () => {
     }
   });
 
+  it("should reject versionFiles with holes, whose missing entries every() would skip", () => {
+    const base = { changelog: { audience: "equipo" } };
+    // oxlint-disable-next-line no-sparse-arrays -- the hole is the case under test.
+    expect(() => resolveCreateVersionConfig({ ...base, versionFiles: [, "src/cli.js"] })).toThrow(/versionFiles must be a list of file paths relative to the project root/);
+  });
+
   it("should resolve versionFiles written with backslashes or ./ segments to the same slash-separated path on every platform", () => {
     const base = { changelog: { audience: "equipo" } };
 
