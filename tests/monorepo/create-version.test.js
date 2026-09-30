@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import {
@@ -273,6 +273,77 @@ describe("create-version in monorepo mode", () => {
       expect(flattenOutput(unstaged.output)).toContain("Hay cambios sin commitear en el CHANGELOG de paquetes que no salen en este release: packages/adapter/CHANGELOG.md.");
       expect(runGit(["rev-parse", "main"], remoteRoot)).toBe(releasedSha);
       expect(registry.publications).toEqual([]);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "does not apply migrations while a package left out of the release has an uncommitted changelog",
+    async () => {
+      const { repositoryRoot, remoteRoot } = createReleasedMonorepo();
+      const appliedMarker = path.join(path.dirname(repositoryRoot), "migrations-applied");
+      writeFileSync(
+        path.join(repositoryRoot, "beez-rp.config.js"),
+        [
+          'import { existsSync, writeFileSync } from "node:fs";',
+          `const appliedMarker = ${JSON.stringify(appliedMarker)};`,
+          "export default {",
+          '  changelog: { audience: "quien usa {name}" },',
+          '  packages: "workspaces",',
+          "  checks: false,",
+          '  publish: "npm",',
+          "  migrations: {",
+          '    check: () => ({ status: existsSync(appliedMarker) ? "up-to-date" : "pending", pending: existsSync(appliedMarker) ? [] : ["001_init"], target: "db", reason: null }),',
+          '    apply: () => writeFileSync(appliedMarker, ""),',
+          "  },",
+          "};",
+          "",
+        ].join("\n")
+      );
+      commitAll(repositoryRoot, "chore: add migrations");
+      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+      pushCoreFeature(repositoryRoot);
+      const releasedSha = runGit(["rev-parse", "HEAD"], repositoryRoot);
+      writeFileSync(path.join(repositoryRoot, "packages/adapter/CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n- Todavía no sale.\n");
+      const registry = await startRegistry();
+
+      const release = await runCliAsync(repositoryRoot, ["--accept-suggested"], npmEnvironment(registry.registryUrl));
+
+      expect(release.status, release.output).toBe(1);
+      expect(flattenOutput(release.output)).toContain("Hay cambios sin commitear en el CHANGELOG de paquetes que no salen en este release: packages/adapter/CHANGELOG.md.");
+      expect(existsSync(appliedMarker)).toBe(false);
+      expect(runGit(["rev-parse", "main"], remoteRoot)).toBe(releasedSha);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "writes a versionFiles entry of a nested workspace with the version of the closest package",
+    async () => {
+      const { repositoryRoot, remoteRoot } = createReleasedMonorepo();
+      writeJson(repositoryRoot, "package.json", { name: "acme-monorepo", private: true, type: "module", workspaces: ["packages/*", "packages/widget/plugin"] });
+      writeJson(repositoryRoot, "packages/widget/plugin/package.json", { name: "@acme/plugin", version: "0.1.0" });
+      writeFileSync(path.join(repositoryRoot, "packages/widget/plugin/version.js"), 'export const VERSION = "0.1.0"; // beez-rp-version\n');
+      writeFileSync(path.join(repositoryRoot, "packages/widget/plugin/CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n");
+      writeFileSync(
+        path.join(repositoryRoot, "beez-rp.config.js"),
+        ['export default {', '  changelog: { audience: "quien usa {name}" },', '  packages: "workspaces",', "  checks: false,", '  publish: "npm",', '  versionFiles: ["packages/widget/plugin/version.js"],', "};", ""].join("\n")
+      );
+      commitAll(repositoryRoot, "chore: add the plugin");
+      runGit(["tag", "-a", "plugin-v0.1.0", "-m", "@acme/plugin@0.1.0"], repositoryRoot);
+      runGit(["push", "--quiet", "origin", "main", "--tags"], repositoryRoot);
+      writeFileSync(path.join(repositoryRoot, "packages/widget/plugin/index.js"), "export {};\n");
+      writeFileSync(path.join(repositoryRoot, "packages/widget/plugin/CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Punto de entrada.\n");
+      // The widget contains the plugin directory, so it is released too.
+      writeFileSync(path.join(repositoryRoot, "packages/widget/CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Plugin incluido.\n");
+      commitAll(repositoryRoot, "feat(plugin): entry point");
+      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+      const registry = await startRegistry({ packages: { "@acme/plugin": { maintainers: [OWNER_USER], versions: ["0.1.0"] } } });
+
+      const release = await runCliAsync(repositoryRoot, ["--accept-suggested"], npmEnvironment(registry.registryUrl));
+
+      expect(release.status, release.output).toBe(0);
+      expect(runGit(["show", "main:packages/widget/plugin/version.js"], remoteRoot)).toBe('export const VERSION = "0.2.0"; // beez-rp-version');
     },
     GIT_FIXTURE_TEST_TIMEOUT_MS
   );

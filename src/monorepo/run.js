@@ -257,6 +257,9 @@ async function chooseVersionsStep(context) {
     print(renderBox({ title: "Release cancelado", lines: [`${ICON.info} No elegiste ningún paquete: no se tocó nada.`], tone: BOX_TONE.info }));
     throw new ReleaseCancelledError();
   }
+
+  // Checked again before the commit; here it stops the release before migrations are applied.
+  await assertReleaseScope(context);
 }
 
 /**
@@ -319,7 +322,10 @@ function groupVersionFilesByPackage(context) {
   const grouped = new Map();
 
   for (const filePath of context.config.versionFiles) {
-    const owner = context.units.find((unit) => filePath.startsWith(`${unit.directory}/`));
+    // With nested workspaces the file belongs to the deepest package that contains it.
+    const owner = context.units
+      .filter((unit) => filePath.startsWith(`${unit.directory}/`))
+      .reduce((/** @type {typeof context.units[number] | undefined} */ closest, unit) => (closest && closest.directory.length >= unit.directory.length ? closest : unit), undefined);
     if (!owner) {
       throw new ReleaseStepError(
         `${filePath} (versionFiles) no está dentro de ningún paquete publicado.`,
@@ -374,6 +380,22 @@ async function assertOnlyReleaseChanges(context, releasePaths) {
 }
 
 /**
+ * Checks that only the files of the chosen packages would enter the release commit.
+ *
+ * @param {MonorepoContext} context - Context.
+ * @returns {Promise<Map<string, string[]>>} `versionFiles` per package name.
+ * @throws {ReleaseStepError} When a `versionFiles` entry has no package, or other changes would enter the commit.
+ */
+async function assertReleaseScope(context) {
+  const versionFilesByPackage = groupVersionFilesByPackage(context);
+  await assertOnlyReleaseChanges(
+    context,
+    new Set(context.chosen.flatMap(({ unit }) => [unit.manifestPath, unit.changelogPath, ...(versionFilesByPackage.get(unit.name) ?? [])]))
+  );
+  return versionFilesByPackage;
+}
+
+/**
  * Writes the new versions, releases every chosen changelog and creates the release commit with an
  * annotated tag per package. Every file is computed before anything is written, and the commit
  * reuses the single-package one: literal staging, rollback on failure and the prepared-tree check.
@@ -383,11 +405,7 @@ async function assertOnlyReleaseChanges(context, releasePaths) {
  */
 async function bumpPackagesStep(context) {
   const today = new Date().toISOString().split("T")[0];
-  const versionFilesByPackage = groupVersionFilesByPackage(context);
-  await assertOnlyReleaseChanges(
-    context,
-    new Set(context.chosen.flatMap(({ unit }) => [unit.manifestPath, unit.changelogPath, ...(versionFilesByPackage.get(unit.name) ?? [])]))
-  );
+  const versionFilesByPackage = await assertReleaseScope(context);
   await assertReleaseFilesMatchHead(context, [...context.chosen.map(({ unit }) => unit.manifestPath), ...context.config.versionFiles]);
   /** @type {import("../create-version/run.js").ReleaseFileUpdate[]} */
   const releaseFiles = [];
