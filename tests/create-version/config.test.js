@@ -22,9 +22,49 @@ describe("create-version config", () => {
 
     expect(resolveCreateVersionConfig({ ...base, versionFiles: ["src/cli.ts", "docs/install.md"] }).versionFiles).toEqual(["src/cli.ts", "docs/install.md"]);
     expect(resolveCreateVersionConfig(base).versionFiles).toEqual([]);
-    for (const versionFiles of [["../outside.ts"], ["src/../../outside.ts"], [path.resolve("absolute.ts")], [""], "src/cli.ts"]) {
+    for (const versionFiles of [["../outside.ts"], ["src/../../outside.ts"], ["src\\..\\..\\outside.ts"], [path.resolve("absolute.ts")], ["/absolute.ts"], ["\\absolute.ts"], ["C:\\absolute.ts"], [""], "src/cli.ts"]) {
       expect(() => resolveCreateVersionConfig({ ...base, versionFiles })).toThrow(/versionFiles must be a list of file paths relative to the project root/);
     }
+  });
+
+  it("should reject versionFiles with holes, whose missing entries every() would skip", () => {
+    const base = { changelog: { audience: "equipo" } };
+    // oxlint-disable-next-line no-sparse-arrays -- the hole is the case under test.
+    expect(() => resolveCreateVersionConfig({ ...base, versionFiles: [, "src/cli.js"] })).toThrow(/versionFiles must be a list of file paths relative to the project root/);
+  });
+
+  it("should resolve versionFiles written with backslashes or ./ segments to the same slash-separated path on every platform", () => {
+    const base = { changelog: { audience: "equipo" } };
+
+    expect(resolveCreateVersionConfig({ ...base, versionFiles: ["src\\cli.js", ".\\docs/install.md", "./lib//version.js"] }).versionFiles).toEqual([
+      "src/cli.js",
+      "docs/install.md",
+      "lib/version.js",
+    ]);
+  });
+
+  it("should reject versionFiles naming package.json or CHANGELOG.md under any separator spelling, since the release commit already writes them", () => {
+    const base = { changelog: { audience: "equipo" } };
+
+    for (const builtInFile of ["CHANGELOG.md", "./CHANGELOG.md", "package.json", ".\\package.json", "./package.json/"]) {
+      expect(() => resolveCreateVersionConfig({ ...base, versionFiles: ["src/cli.ts", builtInFile] })).toThrow(
+        /versionFiles must be a list without package\.json nor CHANGELOG\.md, which the release commit already updates/
+      );
+    }
+    expect(resolveCreateVersionConfig({ ...base, versionFiles: ["docs/CHANGELOG.md", "packages/app/package.json"] }).versionFiles).toEqual([
+      "docs/CHANGELOG.md",
+      "packages/app/package.json",
+    ]);
+  });
+
+  it("should accept versionFiles differing from package.json or CHANGELOG.md only in letter case, which are other files on a case-sensitive file system", () => {
+    const base = { changelog: { audience: "equipo" } };
+
+    expect(resolveCreateVersionConfig({ ...base, versionFiles: ["Package.json", "CHANGELOG.MD", "./changelog.md"] }).versionFiles).toEqual([
+      "Package.json",
+      "CHANGELOG.MD",
+      "changelog.md",
+    ]);
   });
 
   it("should run the default ci checks with the project's package manager", () => {

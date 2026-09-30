@@ -55,7 +55,10 @@ import {
   checkPinnedNodeVersion,
   createHookContext,
   describeReleaseCapabilities,
+  assertReleaseFilesMatchHead,
+  commitReleaseFiles,
   prepareVersionFileUpdates,
+  readReleaseFile,
   renderCommitList,
   renderNpmAuthRow,
   renderPlan,
@@ -314,7 +317,8 @@ function groupVersionFilesByPackage(context) {
 
 /**
  * Writes the new versions, releases every chosen changelog and creates the release commit with an
- * annotated tag per package. Every file is computed before anything is written.
+ * annotated tag per package. Every file is computed before anything is written, and the commit
+ * reuses the single-package one: literal staging, rollback on failure and the prepared-tree check.
  *
  * @param {MonorepoContext} context - Context.
  * @returns {Promise<void>}
@@ -322,15 +326,16 @@ function groupVersionFilesByPackage(context) {
 async function bumpPackagesStep(context) {
   const today = new Date().toISOString().split("T")[0];
   const versionFilesByPackage = groupVersionFilesByPackage(context);
-  /** @type {{ filePath: string, content: string }[]} */
-  const writes = [];
+  await assertReleaseFilesMatchHead(context, [...context.chosen.map(({ unit }) => unit.manifestPath), ...context.config.versionFiles]);
+  /** @type {import("../create-version/run.js").ReleaseFileUpdate[]} */
+  const releaseFiles = [];
 
   for (const { unit, version } of context.chosen) {
-    const changelogAbsolutePath = path.join(context.repositoryRoot, unit.changelogPath);
+    const changelog = readReleaseFile(context, unit.changelogPath, unit.changelogPath);
     let releasedChangelog;
 
     try {
-      releasedChangelog = releaseUnreleased(readFileSync(changelogAbsolutePath, "utf8"), version, today);
+      releasedChangelog = releaseUnreleased(changelog.text, version, today);
     } catch (error) {
       throw new ReleaseStepError(
         `${unit.changelogPath} no está listo: ${error instanceof Error ? error.message : String(error)}`,
@@ -339,29 +344,17 @@ async function bumpPackagesStep(context) {
       );
     }
 
-    const manifest = readFileSync(path.join(context.repositoryRoot, unit.manifestPath), "utf8");
-    writes.push(
-      { filePath: unit.manifestPath, content: manifest.replace(PACKAGE_VERSION_FIELD_PATTERN, `$1${version}$2`) },
-      { filePath: unit.changelogPath, content: releasedChangelog },
-      ...prepareVersionFileUpdates(context, versionFilesByPackage.get(unit.name) ?? [], version)
+    const manifest = readReleaseFile(context, unit.manifestPath, unit.manifestPath);
+    releaseFiles.push(
+      { filePath: unit.manifestPath, originalBytes: manifest.originalBytes, content: manifest.text.replace(PACKAGE_VERSION_FIELD_PATTERN, `$1${version}$2`) },
+      { filePath: unit.changelogPath, originalBytes: changelog.originalBytes, content: releasedChangelog },
+      ...(await prepareVersionFileUpdates(context, versionFilesByPackage.get(unit.name) ?? [], version))
     );
-  }
-
-  for (const { filePath, content } of writes) {
-    writeFileSync(path.join(context.repositoryRoot, filePath), content);
   }
 
   const ordered = sortByPublicationOrder(context.chosen.map((release) => ({ ...release, name: release.unit.name, publishedDependencies: release.unit.publishedDependencies })));
   const subject = buildMonorepoReleaseSubject(ordered.map(({ name, version }) => ({ name, version })));
-  const filePaths = writes.map(({ filePath }) => filePath);
-
-  await runGitStep(context, ["add", "--", ...filePaths], "No se pudieron stagear los archivos del release", "Revisá git status.");
-  await runGitStep(
-    context,
-    ["commit", "--quiet", "-m", subject],
-    "El commit de release falló",
-    `Corregí el error, descartá los cambios con git checkout -- ${filePaths.join(" ")} y volvé a correr ${context.commands.createVersion}.`
-  );
+  await commitReleaseFiles(context, releaseFiles, subject);
 
   const commitSha = await context.reader.git(["rev-parse", "HEAD"]);
   for (const release of context.chosen) {
