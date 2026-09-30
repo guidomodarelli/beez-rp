@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -113,6 +113,8 @@ function createReleasedRepository(releaseSubject = "0.1.0", manifestFields = {})
   const repositoryRoot = path.join(fixtureRoot, "work");
   runGit(["init", "--quiet", "--bare", "--initial-branch=main", remoteRoot], fixtureRoot);
   runGit(["clone", "--quiet", remoteRoot, repositoryRoot], fixtureRoot);
+  // Keep the bytes the tests write: a global core.autocrlf would convert line endings on checkout.
+  runGit(["config", "core.autocrlf", "false"], repositoryRoot);
   runGit(["config", "user.email", "release@example.test"], repositoryRoot);
   runGit(["config", "user.name", "Release Fixture"], repositoryRoot);
   runGit(["config", "commit.gpgsign", "false"], repositoryRoot);
@@ -449,6 +451,42 @@ describe("beez-rp create-version command", () => {
   );
 
   it(
+    "should write the new version into the marked versionFiles within the release commit, and stop before bumping when a file has no marker",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      mkdirSync(path.join(repositoryRoot, "src"));
+      writeFileSync(path.join(repositoryRoot, "src", "cli.js"), 'program.version("0.1.0"); // x-release-please-version\nconst untouched = "0.1.0";\n');
+      writeFileSync(path.join(repositoryRoot, "src", "plain.js"), 'export const VERSION = "0.1.0";\n');
+      writeFileSync(
+        path.join(repositoryRoot, "beez-rp.config.js"),
+        ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", '  versionFiles: ["src/cli.js", "src/plain.js"],', "};", ""].join("\n")
+      );
+      runGit(["add", "-A"], repositoryRoot);
+      runGit(["commit", "--quiet", "-m", "chore: configure releases"], repositoryRoot);
+      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+
+      const blocked = runCli(repositoryRoot, ["--bump", "minor"]);
+      expect(blocked.status, blocked.output).toBe(1);
+      expect(flattenOutput(blocked.output)).toContain("src/plain.js (versionFiles) no tiene ninguna versión marcada para actualizar.");
+      expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+      expect(JSON.parse(readFileSync(path.join(repositoryRoot, "package.json"), "utf8")).version).toBe("0.1.0");
+
+      writeFileSync(path.join(repositoryRoot, "src", "plain.js"), 'export const VERSION = "0.1.0"; // beez-rp-version\n');
+      runGit(["add", "-A"], repositoryRoot);
+      runGit(["commit", "--quiet", "-m", "chore: mark the version"], repositoryRoot);
+      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+
+      const release = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(release.status, release.output).toBe(0);
+      expect(runGit(["show", "--name-only", "--format=", "main"], remoteRoot).split("\n").toSorted()).toEqual(["CHANGELOG.md", "package.json", "src/cli.js", "src/plain.js"]);
+      expect(runGit(["show", "main:src/cli.js"], remoteRoot)).toBe('program.version("0.2.0"); // x-release-please-version\nconst untouched = "0.1.0";');
+      expect(runGit(["show", "main:src/plain.js"], remoteRoot)).toBe('export const VERSION = "0.2.0"; // beez-rp-version');
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
     "should require --bump or --set-version without an interactive terminal, since the version prompt has no default",
     () => {
       const { repositoryRoot, remoteRoot } = createReleasedRepository();
@@ -580,6 +618,348 @@ describe("beez-rp create-version command", () => {
     runGit(["commit", "--quiet", "-m", "chore: configure releases"], repositoryRoot);
     runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
   }
+
+  it(
+    "should stop before bumping when a versionFiles block is never closed, naming the file, the line and the marker",
+    () => {
+      const { repositoryRoot } = createReleasedRepository();
+      const installPath = path.join(repositoryRoot, "INSTALL.md");
+      const installContent = "<!-- beez-rp-start-version -->\nnpm i fixture-app@0.1.0\n<!-- beez-rp-finish -->\nRequires other-tool@0.1.0.\n";
+      writeFileSync(installPath, installContent);
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", '  versionFiles: ["INSTALL.md"],', "};"]);
+
+      const blocked = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(blocked.status, blocked.output).toBe(1);
+      expect(flattenOutput(blocked.output)).toContain("INSTALL.md (versionFiles) abre un bloque de versión con beez-rp-start-version en la línea 1 y nunca lo cierra.");
+      expect(flattenOutput(blocked.output)).toContain("Cerralo con beez-rp-end");
+      expect(readFileSync(installPath, "utf8")).toBe(installContent);
+      expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+      expect(JSON.parse(readFileSync(path.join(repositoryRoot, "package.json"), "utf8")).version).toBe("0.1.0");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should stop before writing anything when a versionFiles entry is ignored by Git",
+    () => {
+      const { repositoryRoot } = createReleasedRepository();
+      const generatedPath = path.join(repositoryRoot, "dist", "cli.js");
+      const generatedContent = 'program.version("0.1.0"); // beez-rp-version\n';
+      writeFileSync(path.join(repositoryRoot, ".gitignore"), "dist/\n");
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", '  versionFiles: ["dist/cli.js"],', "};"]);
+      mkdirSync(path.dirname(generatedPath));
+      writeFileSync(generatedPath, generatedContent);
+
+      const blocked = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(blocked.status, blocked.output).toBe(1);
+      expect(flattenOutput(blocked.output)).toContain("dist/cli.js (versionFiles) no está trackeado en Git");
+      expect(readFileSync(generatedPath, "utf8")).toBe(generatedContent);
+      expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe("");
+      expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should stop before writing anything when a versionFiles entry is a symlink, instead of rewriting the file it points to",
+    (testContext) => {
+      const { repositoryRoot } = createReleasedRepository();
+      const targetPath = path.join(repositoryRoot, "target.js");
+      const targetContent = 'program.version("0.1.0"); // beez-rp-version\n';
+      writeFileSync(targetPath, targetContent);
+      try {
+        symlinkSync("target.js", path.join(repositoryRoot, "linked.js"), "file");
+      } catch {
+        // Windows only creates file symlinks with Developer Mode or elevated privileges.
+        testContext.skip();
+      }
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", '  versionFiles: ["linked.js"],', "};"]);
+
+      const blocked = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(blocked.status, blocked.output).toBe(1);
+      expect(flattenOutput(blocked.output)).toContain("linked.js (versionFiles) no es un archivo regular");
+      expect(readFileSync(targetPath, "utf8")).toBe(targetContent);
+      expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should stop before bumping when a check modifies a versionFiles entry, instead of shipping that change in the release commit",
+    () => {
+      const { repositoryRoot } = createReleasedRepository();
+      const cliPath = path.join(repositoryRoot, "src", "cli.js");
+      const cliContent = 'program.version("0.1.0"); // beez-rp-version\n';
+      mkdirSync(path.dirname(cliPath));
+      writeFileSync(cliPath, cliContent);
+      // Stands in for a formatter run with --fix: the check succeeds but rewrites a versionFiles entry.
+      writeFileSync(path.join(repositoryRoot, "format.mjs"), 'import { appendFileSync } from "node:fs";\nappendFileSync("src/cli.js", "// formatted\\n");\n');
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', '  checks: ["node format.mjs"],', '  versionFiles: ["src/cli.js"],', "};"]);
+
+      const blocked = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(blocked.status, blocked.output).toBe(1);
+      expect(flattenOutput(blocked.output)).toContain("Un paso anterior (por ejemplo, un check) modificó src/cli.js");
+      expect(readFileSync(cliPath, "utf8")).toBe(`${cliContent}// formatted\n`);
+      expect(JSON.parse(readFileSync(path.join(repositoryRoot, "package.json"), "utf8")).version).toBe("0.1.0");
+      expect(runGit(["log", "-1", "--format=%s"], repositoryRoot)).toBe("chore: configure releases");
+      expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should read a versionFiles entry written with backslashes and ./ as the same file on every platform, and name it with slashes",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      const cliPath = path.join(repositoryRoot, "src", "cli.js");
+      mkdirSync(path.dirname(cliPath));
+      writeFileSync(cliPath, 'program.version("0.1.0");\n');
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", `  versionFiles: [${JSON.stringify(".\\src\\cli.js")}],`, "};"]);
+
+      const blocked = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(blocked.status, blocked.output).toBe(1);
+      expect(flattenOutput(blocked.output)).toContain("src/cli.js (versionFiles) no tiene ninguna versión marcada para actualizar.");
+
+      writeFileSync(cliPath, 'program.version("0.1.0"); // beez-rp-version\n');
+      runGit(["commit", "--quiet", "-am", "chore: mark the version"], repositoryRoot);
+      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+
+      const release = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(release.status, release.output).toBe(0);
+      expect(runGit(["show", "main:src/cli.js"], remoteRoot)).toBe('program.version("0.2.0"); // beez-rp-version');
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should stop before bumping when a versionFiles entry is not valid UTF-8, and keep every other byte of a UTF-8 file with a byte order mark and CRLF",
+    () => {
+      const { repositoryRoot } = createReleasedRepository();
+      const legacyPath = path.join(repositoryRoot, "docs", "legacy.txt");
+      const latin1Content = Buffer.from("Versión 0.1.0 <!-- beez-rp-version -->\r\nÚltima línea\r\n", "latin1");
+      mkdirSync(path.dirname(legacyPath));
+      writeFileSync(legacyPath, latin1Content);
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", '  versionFiles: ["docs/legacy.txt"],', "};"]);
+      const manifest = readFileSync(path.join(repositoryRoot, "package.json"));
+
+      const blocked = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(blocked.status, blocked.output).toBe(1);
+      expect(flattenOutput(blocked.output)).toContain("docs/legacy.txt (versionFiles) no es texto UTF-8 válido");
+      expect(readFileSync(legacyPath).equals(latin1Content)).toBe(true);
+      expect(readFileSync(path.join(repositoryRoot, "package.json")).equals(manifest)).toBe(true);
+      expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+
+      const byteOrderMark = Buffer.from([0xef, 0xbb, 0xbf]);
+      writeFileSync(legacyPath, Buffer.concat([byteOrderMark, Buffer.from("Versión 0.1.0 <!-- beez-rp-version -->\r\nÚltima línea\r\n", "utf8")]));
+      runGit(["commit", "--quiet", "-am", "chore: convert to UTF-8"], repositoryRoot);
+      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+
+      const release = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(release.status, release.output).toBe(0);
+      expect(readFileSync(legacyPath).equals(Buffer.concat([byteOrderMark, Buffer.from("Versión 0.2.0 <!-- beez-rp-version -->\r\nÚltima línea\r\n", "utf8")]))).toBe(true);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  // Root ignores the read-only mode, so the fixture could not make the write fail.
+  it.skipIf(process.getuid?.() === 0)(
+    "should restore package.json, CHANGELOG.md and earlier versionFiles when a later versionFiles entry cannot be written",
+    () => {
+      const { repositoryRoot } = createReleasedRepository();
+      const cliPath = path.join(repositoryRoot, "src", "cli.js");
+      const lockedPath = path.join(repositoryRoot, "src", "locked.js");
+      const markedContent = 'program.version("0.1.0"); // beez-rp-version\n';
+      mkdirSync(path.dirname(cliPath));
+      writeFileSync(cliPath, markedContent);
+      writeFileSync(lockedPath, markedContent);
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", '  versionFiles: ["src/cli.js", "src/locked.js"],', "};"]);
+      const manifest = readFileSync(path.join(repositoryRoot, "package.json"), "utf8");
+      const changelog = readFileSync(path.join(repositoryRoot, "CHANGELOG.md"), "utf8");
+      // Read-only: a mode on POSIX and the read-only attribute on Windows, both reject the write.
+      chmodSync(lockedPath, 0o444);
+
+      try {
+        const release = runCli(repositoryRoot, ["--bump", "minor"]);
+
+        expect(release.status, release.output).toBe(1);
+        expect(flattenOutput(release.output)).toContain("No se pudo escribir src/locked.js para el release");
+        expect(flattenOutput(release.output)).toContain("se restauraron package.json, CHANGELOG.md y versionFiles");
+      } finally {
+        chmodSync(lockedPath, 0o644);
+      }
+
+      expect(readFileSync(path.join(repositoryRoot, "package.json"), "utf8")).toBe(manifest);
+      expect(readFileSync(path.join(repositoryRoot, "CHANGELOG.md"), "utf8")).toBe(changelog);
+      expect(readFileSync(cliPath, "utf8")).toBe(markedContent);
+      expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe("");
+      expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should stage versionFiles names literally and restore the release files and their staging when the release commit fails",
+    () => {
+      const { repositoryRoot } = createReleasedRepository();
+      // Names a shell or Git would interpret: spaces, `%VAR%`, `$var`, a glob and, where the file system allows it, pathspec magic.
+      const versionFiles = ["docs/my version %PATH% $HOME.txt", "docs/v[1].txt", ...(process.platform === "win32" ? [] : [":version"])];
+      mkdirSync(path.join(repositoryRoot, "docs"));
+      for (const versionFile of versionFiles) writeFileSync(path.join(repositoryRoot, versionFile), "0.1.0 <!-- beez-rp-version -->\n");
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", `  versionFiles: ${JSON.stringify(versionFiles)},`, "};"]);
+      const manifest = readFileSync(path.join(repositoryRoot, "package.json"), "utf8");
+      const stagedChangelog = "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Algo nuevo.\n- Algo más.\n";
+      writeFileSync(path.join(repositoryRoot, "CHANGELOG.md"), stagedChangelog);
+      runGit(["add", "CHANGELOG.md"], repositoryRoot);
+      const hookPath = path.join(repositoryRoot, ".git", "hooks", "pre-commit");
+      // The hook records what was staged, then rejects the commit.
+      writeFileSync(hookPath, "#!/bin/sh\ngit diff --cached --name-only > ../staged.log\nexit 1\n", { mode: 0o755 });
+
+      const failed = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(failed.status, failed.output).toBe(1);
+      expect(flattenOutput(failed.output)).toContain("El commit de versión falló");
+      expect(flattenOutput(failed.output)).toContain("se restauraron package.json, CHANGELOG.md y versionFiles (contenido y staging)");
+      expect(readFileSync(path.join(path.dirname(repositoryRoot), "staged.log"), "utf8").trim().split("\n").toSorted()).toEqual(["CHANGELOG.md", ...versionFiles, "package.json"].toSorted());
+      expect(readFileSync(path.join(repositoryRoot, "package.json"), "utf8")).toBe(manifest);
+      expect(readFileSync(path.join(repositoryRoot, "CHANGELOG.md"), "utf8")).toBe(stagedChangelog);
+      for (const versionFile of versionFiles) expect(readFileSync(path.join(repositoryRoot, versionFile), "utf8")).toBe("0.1.0 <!-- beez-rp-version -->\n");
+      expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe("M  CHANGELOG.md");
+      expect(runGit(["log", "-1", "--format=%s", "main"], repositoryRoot)).toBe("chore: configure releases");
+      expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should undo the release commit without tagging nor pushing it when a commit hook stages another change",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      writeFileSync(path.join(repositoryRoot, "VERSION.txt"), "0.1.0 <!-- beez-rp-version -->\n");
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", '  versionFiles: ["VERSION.txt"],', "};"]);
+      const manifest = readFileSync(path.join(repositoryRoot, "package.json"), "utf8");
+      const changelog = readFileSync(path.join(repositoryRoot, "CHANGELOG.md"), "utf8");
+      writeFileSync(path.join(repositoryRoot, ".git", "hooks", "pre-commit"), '#!/bin/sh\necho "// added by a hook" >> beez-rp.config.js\ngit add beez-rp.config.js\n', { mode: 0o755 });
+
+      const release = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(release.status, release.output).toBe(1);
+      expect(flattenOutput(release.output)).toContain("El commit de versión 0.2.0 incluía cambios que beez-rp no preparó: beez-rp.config.js");
+      expect(runGit(["log", "-1", "--format=%s", "main"], repositoryRoot)).toBe("chore: configure releases");
+      expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+      expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe("M  beez-rp.config.js");
+      expect(readFileSync(path.join(repositoryRoot, "package.json"), "utf8")).toBe(manifest);
+      expect(readFileSync(path.join(repositoryRoot, "CHANGELOG.md"), "utf8")).toBe(changelog);
+      expect(readFileSync(path.join(repositoryRoot, "VERSION.txt"), "utf8")).toBe("0.1.0 <!-- beez-rp-version -->\n");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  /**
+   * Commits `0.2.0` by hand (package.json and CHANGELOG.md), leaving `src/cli.js` with `cliVersion`.
+   *
+   * @param {string} repositoryRoot - Checkout configured with `versionFiles: ["src/cli.js"]`.
+   */
+  function commitReleaseByHand(repositoryRoot) {
+    writeFileSync(path.join(repositoryRoot, "package.json"), `${JSON.stringify({ name: "fixture-app", version: "0.2.0" }, null, 2)}\n`);
+    writeFileSync(path.join(repositoryRoot, "CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n## [0.2.0] - 2026-01-01\n\n### Added\n\n- Algo nuevo.\n");
+    runGit(["add", "-A"], repositoryRoot);
+    runGit(["commit", "--quiet", "-m", "0.2.0"], repositoryRoot);
+  }
+
+  it(
+    "should not push a resumed release commit while a versionFiles entry in HEAD carries another version, also in --dry-run",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      const cliPath = path.join(repositoryRoot, "src", "cli.js");
+      mkdirSync(path.dirname(cliPath));
+      writeFileSync(cliPath, 'program.version("0.1.0"); // beez-rp-version\n');
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", '  versionFiles: ["src/cli.js"],', "};"]);
+      commitReleaseByHand(repositoryRoot);
+
+      for (const flags of [["--dry-run"], []]) {
+        const blocked = runCli(repositoryRoot, flags);
+
+        expect(blocked.status, blocked.output).toBe(1);
+        expect(flattenOutput(blocked.output)).toContain("src/cli.js (versionFiles) tiene en el commit de release (HEAD) una versión marcada distinta de 0.2.0.");
+      }
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+      expect(runGit(["log", "-1", "--format=%s", "main"], remoteRoot)).toBe("chore: configure releases");
+
+      writeFileSync(cliPath, 'program.version("0.2.0"); // beez-rp-version\n');
+      runGit(["commit", "--quiet", "--amend", "--no-edit", "-a"], repositoryRoot);
+
+      const resumed = runCli(repositoryRoot, []);
+
+      expect(resumed.status, resumed.output).toBe(0);
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("v0.2.0");
+      expect(runGit(["show", "main:src/cli.js"], remoteRoot)).toBe('program.version("0.2.0"); // beez-rp-version');
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should not resume a release commit with --ignore-local-changes while the configuration has uncommitted changes",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      const configPath = path.join(repositoryRoot, "beez-rp.config.js");
+      mkdirSync(path.join(repositoryRoot, "src"));
+      writeFileSync(path.join(repositoryRoot, "src", "cli.js"), 'program.version("0.1.0"); // beez-rp-version\n');
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", '  versionFiles: ["src/cli.js"],', "};"]);
+      commitReleaseByHand(repositoryRoot);
+      // A local edit that drops the stale entry would otherwise skip its check.
+      const localConfig = ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", "};", ""].join("\n");
+      writeFileSync(configPath, localConfig);
+
+      for (const flags of [["--ignore-local-changes", "--dry-run"], ["--ignore-local-changes"]]) {
+        const blocked = runCli(repositoryRoot, flags);
+
+        expect(blocked.status, blocked.output).toBe(0);
+        expect(flattenOutput(blocked.output)).toContain("La configuración tiene cambios sin commitear y el release 0.2.0 ya está commiteado");
+      }
+
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+      expect(runGit(["log", "-1", "--format=%s", "main"], remoteRoot)).toBe("chore: configure releases");
+      expect(readFileSync(configPath, "utf8")).toBe(localConfig);
+      expect(runGit(["stash", "list"], repositoryRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should not set aside a module change with --ignore-local-changes, also in --dry-run, since the configuration may already depend on it",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      const helperPath = path.join(repositoryRoot, "release-helper.mjs");
+      writeFileSync(helperPath, "export const audience = \"equipo\";\n");
+      pushConfiguration(repositoryRoot, ['import { audience } from "./release-helper.mjs";', "export default {", "  changelog: { audience },", "  checks: false,", "};"]);
+      writeFileSync(helperPath, "export const audience = \"otro\";\n");
+      mkdirSync(path.join(repositoryRoot, "lib"));
+      writeFileSync(path.join(repositoryRoot, "lib", "draft.json"), "{}\n");
+
+      for (const flags of [["--bump", "minor", "--ignore-local-changes", "--dry-run"], ["--bump", "minor", "--ignore-local-changes"]]) {
+        const blocked = runCli(repositoryRoot, flags);
+
+        expect(blocked.status, blocked.output).toBe(0);
+        expect(flattenOutput(blocked.output)).toContain("--ignore-local-changes no aparta cambios de código ni de datos");
+        expect(flattenOutput(blocked.output)).toContain("M release-helper.mjs");
+        expect(flattenOutput(blocked.output)).toContain("?? lib/draft.json");
+      }
+
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+      expect(runGit(["log", "-1", "--format=%s", "main"], repositoryRoot)).toBe("chore: configure releases");
+      expect(runGit(["stash", "list"], repositoryRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
 
   it(
     "should stop right after syncing main without a new version, and release with the new configuration when run again",

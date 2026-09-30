@@ -24,6 +24,7 @@ import {
   PACKAGE_MANIFEST_FILE,
   RELEASE_REGISTRY,
 } from "../constants/create-version.js";
+import { RELEASE_COMMIT_BUILT_IN_FILES } from "../constants/version-files.js";
 import { RELEASE_TYPE_ORDER } from "../constants/versions.js";
 import { DEFAULT_PROJECT_COMMANDS, describeProjectCommands, detectPackageManager } from "../package-manager.js";
 
@@ -58,10 +59,15 @@ import { DEFAULT_PROJECT_COMMANDS, describeProjectCommands, detectPackageManager
  *   publish?: "npm" | ReleaseHook | null,
  *   artifact?: string | null,
  *   summary?: string[],
+ *   versionFiles?: string[],
  * }} CreateVersionConfig
  *   `summary` lines replace `{version}` with the released version. Without `checks`, the release
  *   runs `<package manager> run ci` (pnpm, bun, npm or yarn, detected from `packageManager` or the
  *   lockfile) when `package.json` declares a `ci` script; `false` skips the checks on purpose.
+ *   `versionFiles` lists files (relative to the root) whose marked lines get the new version in the
+ *   release commit: `beez-rp-version` / `x-release-please-version` lines and
+ *   `beez-rp-start-version`…`beez-rp-end` blocks. Entries may use `/` or `\` and are resolved to the
+ *   `/`-separated form (`.\src\cli.js` → `src/cli.js`); each must be a file tracked by Git.
  * @typedef {{
  *   projectName: string | null,
  *   changelog: { audience: string, language: "es" | "en" },
@@ -74,6 +80,7 @@ import { DEFAULT_PROJECT_COMMANDS, describeProjectCommands, detectPackageManager
  *   publish: "npm" | ReleaseHook | null,
  *   artifact: string | null,
  *   summary: string[],
+ *   versionFiles: string[],
  *   commands: ProjectCommands,
  * }} ResolvedCreateVersionConfig
  *   `checks` is empty when they are skipped on purpose and `null` when none are configured nor
@@ -120,7 +127,8 @@ function invalidField(field, expectation) {
  * @returns {value is string[]} Whether it is a string list.
  */
 function isStringList(value) {
-  return Array.isArray(value) && value.every((item) => typeof item === "string" && item.trim().length > 0);
+  // Array.from turns holes into undefined, which every() would otherwise skip.
+  return Array.isArray(value) && Array.from(value).every((item) => typeof item === "string" && item.trim().length > 0);
 }
 
 /**
@@ -232,6 +240,19 @@ export function resolveCreateVersionConfig(rawConfig, { packageScripts = {}, com
     throw invalidField("publishedLabel", "a string");
   }
 
+  const configuredVersionFiles = config.versionFiles ?? [];
+  if (!isStringList(configuredVersionFiles) || configuredVersionFiles.some((filePath) => !isPathInsideRoot(filePath))) {
+    throw invalidField("versionFiles", "a list of file paths relative to the project root, inside it");
+  }
+  const versionFiles = configuredVersionFiles.map(toSlashSeparatedPath);
+  const builtInVersionFile = versionFiles.find((filePath) => RELEASE_COMMIT_BUILT_IN_FILES.includes(filePath));
+  if (builtInVersionFile !== undefined) {
+    throw invalidField(
+      "versionFiles",
+      `a list without ${RELEASE_COMMIT_BUILT_IN_FILES.join(" nor ")}, which the release commit already updates (found ${JSON.stringify(builtInVersionFile)})`
+    );
+  }
+
   return {
     projectName: /** @type {string | undefined} */ (config.projectName) ?? null,
     changelog: { audience: changelog.audience, language: /** @type {"es" | "en"} */ (language) },
@@ -244,8 +265,32 @@ export function resolveCreateVersionConfig(rawConfig, { packageScripts = {}, com
     publish: /** @type {"npm" | ReleaseHook | null} */ (publish),
     artifact: /** @type {string | null} */ (artifact),
     summary,
+    versionFiles,
     commands,
   };
+}
+
+/**
+ * Tells whether a configured path stays inside the project root: relative, without `..` segments.
+ *
+ * @param {string} filePath - Configured path.
+ * @returns {boolean} Whether it is a relative path that cannot escape the root.
+ */
+function isPathInsideRoot(filePath) {
+  // The win32 root covers `/x`, `\x`, `C:\x` and the drive-relative `C:x` alike, on every platform.
+  return path.win32.parse(filePath).root === "" && !filePath.split(/[\\/]/u).includes("..");
+}
+
+/**
+ * Converts a configured path, written with `/` or `\` separators on any platform, to the
+ * `/`-separated form without `./` segments nor a trailing `/`: the form the file system, Git and
+ * the messages use.
+ *
+ * @param {string} filePath - Configured path, already known to stay inside the root.
+ * @returns {string} Path relative to the root with `/` separators, such as `src/cli.js`.
+ */
+function toSlashSeparatedPath(filePath) {
+  return path.posix.normalize(filePath.replaceAll("\\", "/")).replace(/\/+$/u, "");
 }
 
 /**

@@ -6,6 +6,7 @@
  * - `beez-rp/changelog` and `beez-rp/changelog-ai`: Keep a Changelog release and Codex fill-in.
  * - `beez-rp/guard-publish`: `prepublishOnly` guard that blocks pnpm, yarn and bun publications.
  * - `beez-rp/package-manager`: detection of pnpm, bun, npm or yarn and the commands each one runs.
+ * - `beez-rp/version-files`: rewrites the marked version lines of `versionFiles`.
  * - `beez-rp/terminal-ui`: boxes, spinners and prompts for release commands.
  * - `beez-rp/testing`: shared version bump fixtures for consumer test suites.
  * - `beez-rp/constants`: every constant above, grouped by domain.
@@ -18,6 +19,7 @@ export * from "./changelog.js";
 export * from "./changelog-ai.js";
 export * from "./guard-publish.js";
 export * from "./package-manager.js";
+export * from "./version-files.js";
 export * from "./versions.js";
 export {
   ICON,
