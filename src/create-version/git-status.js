@@ -5,6 +5,8 @@
  * entry; Git quotes a path as a C string literal when it has special
  * characters (non-ASCII bytes, quotes) and, in a rename, also when it has
  * spaces, so the separator is never ambiguous once quoted paths are read whole.
+ * With `core.quotePath=false`, non-ASCII characters inside a quoted path come
+ * literally instead of as octal escapes, so they are read by code point.
  *
  * @module create-version/git-status
  */
@@ -33,8 +35,11 @@ function readQuotedPath(text) {
 
   while (index < text.length && text[index] !== GIT_QUOTED_PATH_DELIMITER) {
     if (text[index] !== GIT_QUOTED_PATH_ESCAPE) {
-      bytes.push(...Buffer.from(text[index], "utf8"));
-      index += 1;
+      // A whole code point: with `core.quotePath=false` Git writes non-ASCII characters literally,
+      // and a character outside the BMP (an emoji) spans two UTF-16 code units.
+      const character = String.fromCodePoint(text.codePointAt(index) ?? 0);
+      bytes.push(...Buffer.from(character, "utf8"));
+      index += character.length;
       continue;
     }
 

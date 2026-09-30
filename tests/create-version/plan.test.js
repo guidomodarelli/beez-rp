@@ -247,6 +247,17 @@ describe("create-version plan", () => {
     ]);
   });
 
+  it("should recognize a loaded module whose quoted path has a literal emoji, as git status writes it with core.quotePath=false", () => {
+    const state = createMainState({
+      workingTreeChanges: [' M "release/😀 hooks.js"'],
+      configModules: { loaded: true, files: ["beez-rp.config.js", "release/😀 hooks.js"] },
+    });
+
+    const plan = buildReleasePlan(state, DEPLOYED_APP, { ignoreLocalChanges: true });
+
+    expect(plan.blockers[0].details[0]).toBe(' M "release/😀 hooks.js" (módulo que carga beez-rp.config.mjs o beez-rp.config.js)');
+  });
+
   it("should block while an untracked directory that git status collapses holds a module the configuration loads", () => {
     const state = createMainState({ workingTreeChanges: ["?? release/"], configModules: { loaded: true, files: ["beez-rp.config.js", "release/hooks.js"] } });
 

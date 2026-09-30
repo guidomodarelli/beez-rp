@@ -991,37 +991,39 @@ async function rollBackUncommittedRelease(context, fileUpdates, indexTree, failu
 }
 
 /**
- * Lists the paths the release commit changed that are not release files: a `pre-commit` or
- * `commit-msg` hook may stage other changes (even to the configuration or a module it loads), and
- * `git commit` takes the whole index, so the release would push changes nobody reviewed and that
- * the loaded configuration never saw.
+ * Lists the paths where the release commit differs from the index prepared right after staging the
+ * release files: a `pre-commit` or `commit-msg` hook may change and re-stage a release file (a
+ * formatter rewriting `package.json` or a `versionFiles` entry) or stage other changes (even to the
+ * configuration or a module it loads), and `git commit` takes the whole index, so the release would
+ * push content nobody reviewed and that the loaded configuration never saw.
  *
  * @param {ReleaseContext} context - Release context.
- * @param {string[]} releasePaths - Paths of the release files as Git spells them in the index.
- * @returns {Promise<string[]>} Paths changed by `HEAD` outside `releasePaths`.
+ * @param {string} preparedTree - Tree of the index right after `git add` of the release files (`git write-tree`).
+ * @returns {Promise<string[]>} Paths whose content in `HEAD` differs from `preparedTree`.
  */
-async function listForeignReleaseCommitPaths(context, releasePaths) {
-  const listing = await context.reader.git(["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "HEAD"]);
-  return listing.split("\0").filter((changedPath) => changedPath !== "" && !releasePaths.includes(changedPath));
+async function listUnpreparedReleaseCommitPaths(context, preparedTree) {
+  const listing = await context.reader.git(["diff-tree", "--name-only", "-r", "-z", preparedTree, "HEAD"]);
+  return listing.split("\0").filter(Boolean);
 }
 
 /**
- * Undoes a release commit that holds changes other than the release files (staged by a hook), before
- * it is tagged: the commit is dropped with `git reset --soft`, so those changes stay staged for the
- * user to review, and the release files go back to their content and staging before the release.
+ * Undoes a release commit that differs from the prepared index (a hook changed a release file or
+ * staged another change), before it is tagged: the commit is dropped with `git reset --soft`, so
+ * changes outside the release files stay staged for the user to review, and the release files go
+ * back to their content and staging before the release.
  *
  * @param {ReleaseContext} context - Release context.
  * @param {ReleaseFileUpdate[]} fileUpdates - Files the release wrote.
  * @param {string | null} indexTree - Tree of the index before staging.
  * @param {string} version - Version of the undone commit.
- * @param {string[]} foreignPaths - Paths the commit changed outside the release files.
+ * @param {string[]} unpreparedPaths - Paths where the commit differs from the prepared index.
  * @returns {Promise<ReleaseStepError>} Failure to throw.
  */
-async function undoReleaseCommitWithForeignChanges(context, fileUpdates, indexTree, version, foreignPaths) {
-  const listedPaths = foreignPaths.slice(0, MAX_LISTED_ITEMS).join(", ");
+async function undoReleaseCommitWithUnpreparedChanges(context, fileUpdates, indexTree, version, unpreparedPaths) {
+  const listedPaths = unpreparedPaths.slice(0, MAX_LISTED_ITEMS).join(", ");
   const failure = new ReleaseStepError(
-    `El commit de versión ${version} incluía cambios que no son del release: ${listedPaths} (por ejemplo, los stageó un hook pre-commit o commit-msg); no se creó el tag ${toReleaseTag(version)}.`,
-    "Esos cambios quedaron en staging: revisalos con git diff --cached, commitealos en una rama o descartalos, y evitá que los hooks stageen archivos durante el commit de release."
+    `El commit de versión ${version} incluía cambios que beez-rp no preparó: ${listedPaths} (por ejemplo, los modificó o stageó un hook pre-commit o commit-msg); no se creó el tag ${toReleaseTag(version)}.`,
+    "Los cambios fuera de package.json, CHANGELOG.md y versionFiles quedaron en staging (revisalos con git diff --cached, commitealos en una rama o descartalos); los de esos archivos se descartaron. Evitá que los hooks modifiquen o stageen archivos durante el commit de release."
   );
 
   if ((await context.reader.tryGit(["reset", "--soft", "--quiet", "HEAD^"])) === null) {
@@ -1162,13 +1164,12 @@ async function bumpVersionStep(context) {
   const tag = toReleaseTag(nextRelease.version);
   // Literal pathspecs after `--`: a configured name such as `-v.txt` or `:version` is a file, never an option nor pathspec magic.
   const releaseFilePathspecs = releaseFileUpdates.map(({ filePath }) => toLiteralPathspec(filePath));
-  /** @type {string[]} */
-  let releasePaths = [];
+  let preparedTree = "";
 
   try {
     await runGitStep(context, ["add", "--", ...releaseFilePathspecs], "No se pudo stagear package.json, CHANGELOG.md y versionFiles", "Revisá git status.");
-    // The staged release paths as Git spells them, to compare with the paths of the commit.
-    releasePaths = (await context.reader.git(["diff", "--cached", "--name-only", "-z", "HEAD", "--", ...releaseFilePathspecs])).split("\0").filter(Boolean);
+    // The prepared index, to check that the commit holds exactly it and nothing a hook changed or staged.
+    preparedTree = await context.reader.git(["write-tree"]);
     await runGitStep(context, ["commit", "--quiet", "-m", nextRelease.version], "El commit de versión falló", "Corregí el error (por ejemplo, un hook pre-commit que lo rechaza).");
   } catch (error) {
     if (!(error instanceof ReleaseStepError)) {
@@ -1177,10 +1178,10 @@ async function bumpVersionStep(context) {
     throw await rollBackUncommittedRelease(context, releaseFileUpdates, indexTree, error);
   }
 
-  const foreignPaths = await listForeignReleaseCommitPaths(context, releasePaths);
+  const unpreparedPaths = await listUnpreparedReleaseCommitPaths(context, preparedTree);
 
-  if (foreignPaths.length > 0) {
-    throw await undoReleaseCommitWithForeignChanges(context, releaseFileUpdates, indexTree, nextRelease.version, foreignPaths);
+  if (unpreparedPaths.length > 0) {
+    throw await undoReleaseCommitWithUnpreparedChanges(context, releaseFileUpdates, indexTree, nextRelease.version, unpreparedPaths);
   }
 
   await verifyCommittedVersionFiles(context, nextRelease.version);

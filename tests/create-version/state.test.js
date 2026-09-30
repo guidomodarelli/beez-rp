@@ -904,11 +904,37 @@ describe("beez-rp create-version command", () => {
       const release = runCli(repositoryRoot, ["--bump", "minor"]);
 
       expect(release.status, release.output).toBe(1);
-      expect(flattenOutput(release.output)).toContain("El commit de versión 0.2.0 incluía cambios que no son del release: beez-rp.config.js");
+      expect(flattenOutput(release.output)).toContain("El commit de versión 0.2.0 incluía cambios que beez-rp no preparó: beez-rp.config.js");
       expect(runGit(["log", "-1", "--format=%s", "main"], repositoryRoot)).toBe("chore: configure releases");
       expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
       expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
       expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe("M  beez-rp.config.js");
+      expect(readFileSync(path.join(repositoryRoot, "package.json"), "utf8")).toBe(manifest);
+      expect(readFileSync(path.join(repositoryRoot, "CHANGELOG.md"), "utf8")).toBe(changelog);
+      expect(readFileSync(path.join(repositoryRoot, "VERSION.txt"), "utf8")).toBe("0.1.0 <!-- beez-rp-version -->\n");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should undo the release commit without tagging it when a commit hook rewrites and re-stages a versionFiles entry",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      writeFileSync(path.join(repositoryRoot, "VERSION.txt"), "0.1.0 <!-- beez-rp-version -->\n");
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", '  versionFiles: ["VERSION.txt"],', "};"]);
+      const manifest = readFileSync(path.join(repositoryRoot, "package.json"), "utf8");
+      const changelog = readFileSync(path.join(repositoryRoot, "CHANGELOG.md"), "utf8");
+      // A formatter-like hook: it keeps the marked version but adds a line outside it and re-stages the file.
+      writeFileSync(path.join(repositoryRoot, ".git", "hooks", "pre-commit"), '#!/bin/sh\necho "formatted" >> VERSION.txt\ngit add VERSION.txt\n', { mode: 0o755 });
+
+      const release = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(release.status, release.output).toBe(1);
+      expect(flattenOutput(release.output)).toContain("El commit de versión 0.2.0 incluía cambios que beez-rp no preparó: VERSION.txt");
+      expect(runGit(["log", "-1", "--format=%s", "main"], repositoryRoot)).toBe("chore: configure releases");
+      expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+      expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe("");
       expect(readFileSync(path.join(repositoryRoot, "package.json"), "utf8")).toBe(manifest);
       expect(readFileSync(path.join(repositoryRoot, "CHANGELOG.md"), "utf8")).toBe(changelog);
       expect(readFileSync(path.join(repositoryRoot, "VERSION.txt"), "utf8")).toBe("0.1.0 <!-- beez-rp-version -->\n");
