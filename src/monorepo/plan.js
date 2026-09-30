@@ -24,7 +24,9 @@ import {
   NPM_LOOKUP_STATUS,
   PORCELAIN_STATUS_WIDTH,
   RELEASE_MODE,
+  RELEASE_REMOTE,
   RELEASE_STEP,
+  REMOTE_MAIN_REF,
 } from "../constants/create-version.js";
 import { MONOREPO_RELEASE_STEP } from "../constants/monorepo.js";
 import { codeChangesToSetAsideBlocker, describeFeatureBranchGaps, foreignCommitsBlocker, isCodeChange, missingChecksBlocker } from "../create-version/plan.js";
@@ -116,6 +118,14 @@ function findBlockers(state, ignoreLocalChanges, commands) {
       details: state.branch
         ? describeFeatureBranchGaps(state.branch, state.pullRequest ?? null, state.githubError ?? null, commands)
         : [`Hacé git switch ${MAIN_BRANCH} y volvé a correr ${commands.createVersion}.`],
+    });
+  }
+
+  // Without origin/main no package has commits to compare, so the plan would say everything is up to date.
+  if (!state.remoteMainExists) {
+    blockers.push({
+      title: `No existe ${REMOTE_MAIN_REF}: no se puede saber qué cambió en cada paquete`,
+      details: [`Subí ${MAIN_BRANCH} con git push -u ${RELEASE_REMOTE} ${MAIN_BRANCH} (o revisá el remoto ${RELEASE_REMOTE}) y volvé a correr ${commands.createVersion}.`],
     });
   }
 

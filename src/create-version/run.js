@@ -618,6 +618,31 @@ export function readReleaseFile(context, filePath, fileLabel) {
 }
 
 /**
+ * Writes a new version into the top-level `version` of a manifest, keeping the rest of its bytes.
+ * The text replacement changes the first `"version"` field of the file, so the result is parsed to
+ * confirm it was the top-level one and not nested metadata.
+ *
+ * @param {VersionFilesContext} context - Release context.
+ * @param {string} filePath - Manifest path relative to the root, as the messages name it.
+ * @param {string} text - Manifest content.
+ * @param {string} version - Version to write.
+ * @returns {string} Manifest content with the new top-level `version`.
+ * @throws {ReleaseStepError} When the first `"version"` of the file is not the top-level one.
+ */
+export function rewriteManifestVersion(context, filePath, text, version) {
+  const content = text.replace(PACKAGE_VERSION_FIELD_PATTERN, `$1${version}$2`);
+
+  if (JSON.parse(content).version !== version) {
+    throw new ReleaseStepError(
+      `${filePath} tiene un campo "version" anidado antes del "version" de primer nivel: el release reescribiría ese otro campo.`,
+      `Mové el "version" de primer nivel antes de cualquier objeto con su propio "version" y volvé a correr ${context.commands.createVersion}; no se tocó la versión.`
+    );
+  }
+
+  return content;
+}
+
+/**
  * Builds the pathspec that matches a release file literally, so a name such as `:version` or
  * `v*.txt` is never read as pathspec magic nor a glob.
  *
@@ -945,7 +970,7 @@ async function bumpVersionStep(context) {
 
   /** @type {ReleaseFileUpdate[]} */
   const releaseFiles = [
-    { filePath: PACKAGE_MANIFEST_FILE, originalBytes: manifest.originalBytes, content: manifest.text.replace(PACKAGE_VERSION_FIELD_PATTERN, `$1${nextRelease.version}$2`) },
+    { filePath: PACKAGE_MANIFEST_FILE, originalBytes: manifest.originalBytes, content: rewriteManifestVersion(context, PACKAGE_MANIFEST_FILE, manifest.text, nextRelease.version) },
     { filePath: CHANGELOG_FILE, originalBytes: changelog.originalBytes, content: releasedChangelog },
     ...(await prepareVersionFileUpdates(context, context.config.versionFiles, nextRelease.version)),
   ];

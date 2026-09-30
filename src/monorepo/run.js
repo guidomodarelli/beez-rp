@@ -32,7 +32,6 @@ import {
   NPM_TOKEN_LOCATIONS,
   NPM_TOKEN_VARIABLE,
   PACKAGE_MANIFEST_FILE,
-  PACKAGE_VERSION_FIELD_PATTERN,
   RELEASE_MODE,
   RELEASE_REGISTRY,
   RELEASE_REMOTE,
@@ -64,6 +63,7 @@ import {
   readReleaseFile,
   renderCommitList,
   renderNpmAuthRow,
+  rewriteManifestVersion,
   renderPlan,
   runChecksStep,
   runConfiguredCommands,
@@ -346,7 +346,8 @@ async function generateChangelogsStep(context) {
  *
  * @param {MonorepoContext} context - Context.
  * @returns {Map<string, string[]>} Files per package name.
- * @throws {ReleaseStepError} When an entry is outside every released package.
+ * @throws {ReleaseStepError} When an entry is outside every released package, or is the manifest or
+ *   changelog of its package (the release commit already writes them).
  */
 function groupVersionFilesByPackage(context) {
   /** @type {Map<string, string[]>} */
@@ -361,6 +362,12 @@ function groupVersionFilesByPackage(context) {
       throw new ReleaseStepError(
         `${filePath} (versionFiles) no está dentro de ningún paquete publicado.`,
         `En un monorepo cada archivo toma la versión del paquete que lo contiene: movelo o sacalo de versionFiles y volvé a correr ${context.commands.createVersion}.`
+      );
+    }
+    if (filePath === owner.manifestPath || filePath === owner.changelogPath) {
+      throw new ReleaseStepError(
+        `${filePath} (versionFiles) es el package.json o el CHANGELOG.md de ${owner.name}: el commit de release ya lo escribe.`,
+        `Sacalo de versionFiles en beez-rp.config.(m)js y volvé a correr ${context.commands.createVersion}; no se tocó la versión.`
       );
     }
     grouped.set(owner.name, [...(grouped.get(owner.name) ?? []), filePath]);
@@ -457,7 +464,7 @@ async function bumpPackagesStep(context) {
 
     const manifest = readReleaseFile(context, unit.manifestPath, unit.manifestPath);
     releaseFiles.push(
-      { filePath: unit.manifestPath, originalBytes: manifest.originalBytes, content: manifest.text.replace(PACKAGE_VERSION_FIELD_PATTERN, `$1${version}$2`) },
+      { filePath: unit.manifestPath, originalBytes: manifest.originalBytes, content: rewriteManifestVersion(context, unit.manifestPath, manifest.text, version) },
       { filePath: unit.changelogPath, originalBytes: changelog.originalBytes, content: releasedChangelog },
       ...(await prepareVersionFileUpdates(context, versionFilesByPackage.get(unit.name) ?? [], version))
     );

@@ -511,4 +511,79 @@ describe("create-version in monorepo mode", () => {
     },
     GIT_FIXTURE_TEST_TIMEOUT_MS * 2
   );
+
+  it(
+    "does not write the release when versionFiles lists the manifest or changelog of a package",
+    async () => {
+      const { repositoryRoot, remoteRoot } = createReleasedMonorepo();
+      writeFileSync(
+        path.join(repositoryRoot, "beez-rp.config.js"),
+        ['export default {', '  changelog: { audience: "quien usa {name}" },', '  packages: "workspaces",', "  checks: false,", '  publish: "npm",', '  versionFiles: ["packages/widget/CHANGELOG.md"],', "};", ""].join("\n")
+      );
+      commitAll(repositoryRoot, "chore: version the widget changelog");
+      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+      pushCoreFeature(repositoryRoot);
+      const featureSha = runGit(["rev-parse", "HEAD"], repositoryRoot);
+      const registry = await startRegistry();
+
+      const release = await runCliAsync(repositoryRoot, ["--accept-suggested"], npmEnvironment(registry.registryUrl));
+
+      expect(release.status, release.output).toBe(1);
+      expect(flattenOutput(release.output)).toContain("packages/widget/CHANGELOG.md (versionFiles) es el package.json o el CHANGELOG.md de @acme/widget: el commit de release ya lo escribe.");
+      expect(runGit(["rev-parse", "HEAD"], repositoryRoot)).toBe(featureSha);
+      expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe("");
+      expect(runGit(["tag", "--list", "widget-v1.1.0"], repositoryRoot)).toBe("");
+      expect(runGit(["rev-parse", "main"], remoteRoot)).toBe(featureSha);
+      expect(registry.publications).toEqual([]);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "does not write the release when a nested \"version\" comes before the top-level one of a manifest",
+    async () => {
+      const { repositoryRoot, remoteRoot } = createReleasedMonorepo();
+      // The nested field stays on one line, so it is not taken for a change of the package version.
+      writeFileSync(
+        path.join(repositoryRoot, "packages/widget/package.json"),
+        '{\n  "name": "@acme/widget",\n  "metadata": { "version": "legacy" },\n  "version": "1.0.0",\n  "devDependencies": {\n    "@acme/core": "workspace:*"\n  }\n}\n'
+      );
+      commitAll(repositoryRoot, "chore(widget): add metadata");
+      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+      pushCoreFeature(repositoryRoot);
+      const featureSha = runGit(["rev-parse", "HEAD"], repositoryRoot);
+      const registry = await startRegistry();
+
+      const release = await runCliAsync(repositoryRoot, ["--accept-suggested"], npmEnvironment(registry.registryUrl));
+
+      expect(release.status, release.output).toBe(1);
+      expect(flattenOutput(release.output)).toContain('packages/widget/package.json tiene un campo "version" anidado antes del "version" de primer nivel');
+      expect(runGit(["rev-parse", "HEAD"], repositoryRoot)).toBe(featureSha);
+      expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe("");
+      expect(runGit(["tag", "--list", "widget-v1.1.0"], repositoryRoot)).toBe("");
+      expect(runGit(["rev-parse", "main"], remoteRoot)).toBe(featureSha);
+      expect(registry.publications).toEqual([]);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "stops the diagnosis when the tags of origin cannot be listed",
+    async () => {
+      const { repositoryRoot } = createReleasedMonorepo();
+      pushCoreFeature(repositoryRoot);
+      // origin answers the fetch of the diagnosis and then refuses every later connection, the tag listing included.
+      const servedMarker = path.join(path.dirname(repositoryRoot), "upload-pack-served").replaceAll("\\", "/");
+      const uploadPackScript = path.join(path.dirname(repositoryRoot), "upload-pack-once.sh").replaceAll("\\", "/");
+      writeFileSync(uploadPackScript, `#!/bin/sh\nif [ -e '${servedMarker}' ]; then exit 1; fi\n: > '${servedMarker}'\nexec git upload-pack "$@"\n`, { mode: 0o755 });
+      runGit(["config", "remote.origin.uploadpack", `sh '${uploadPackScript}'`], repositoryRoot);
+      const registry = await startRegistry();
+
+      const preview = await runCliAsync(repositoryRoot, ["--dry-run"], npmEnvironment(registry.registryUrl));
+
+      expect(preview.status, preview.output).toBe(1);
+      expect(flattenOutput(preview.output)).toContain("No se pudieron listar los tags de origin (git ls-remote --tags origin falló)");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
 });

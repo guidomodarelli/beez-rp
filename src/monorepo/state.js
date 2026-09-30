@@ -67,12 +67,18 @@ import { formatPackageTag } from "./workspaces.js";
  * Lists the tags `origin` has, so pending publications only resume releases whose tag reached it.
  *
  * @param {GitReader} reader - Git reader.
- * @returns {Promise<Set<string>>} Tag names; empty when `origin` cannot be read.
+ * @returns {Promise<Set<string>>} Tag names.
+ * @throws {Error} When `origin` cannot be read: an empty set would hide tags that already reached it.
  */
 async function readRemoteTags(reader) {
   const output = await reader.tryGit(["ls-remote", "--tags", "--refs", RELEASE_REMOTE]);
+  if (output === null) {
+    throw new Error(
+      `No se pudieron listar los tags de ${RELEASE_REMOTE} (git ls-remote --tags ${RELEASE_REMOTE} falló): sin ellos no se sabe qué releases llegaron a ${RELEASE_REMOTE}. Revisá la conexión y el acceso a ${RELEASE_REMOTE} y volvé a correr el comando.`
+    );
+  }
   return new Set(
-    (output ?? "")
+    output
       .split("\n")
       .map((line) => line.trim().split(/\s+/u)[1] ?? "")
       .filter((ref) => ref.startsWith("refs/tags/"))

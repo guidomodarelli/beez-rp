@@ -105,6 +105,13 @@ describe("buildMonorepoPlan", () => {
     ]);
   });
 
+  it("blocks instead of saying up to date when origin/main does not exist", () => {
+    const plan = buildMonorepoPlan(monorepoState({ remoteMainExists: false, packages: [packageSnapshot("widget"), packageSnapshot("cli")] }), NPM_PACKAGE, { tagFormat: TAG_FORMAT });
+
+    expect(plan.mode).toBe(RELEASE_MODE.blocked);
+    expect(plan.blockers.map((blocker) => blocker.title)).toContain("No existe origin/main: no se puede saber qué cambió en cada paquete");
+  });
+
   it("blocks local commits that are not release commits", () => {
     const plan = buildMonorepoPlan(monorepoState({ main: { aheadCommits: [{ sha: "x", subject: "fix: local work", body: "" }], behindCount: 0 } }), NPM_PACKAGE, { tagFormat: TAG_FORMAT });
 
