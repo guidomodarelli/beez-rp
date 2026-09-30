@@ -295,15 +295,17 @@ function toSlashSeparatedPath(filePath) {
 }
 
 /**
- * Tells whether a configured path names, under any spelling (`./CHANGELOG.md`, `.\package.json`,
- * other letter case for case-insensitive file systems), a file the release commit already writes.
+ * Tells whether a configured path names, under any separator spelling (`./CHANGELOG.md`,
+ * `.\package.json`), a file the release commit already writes. Letter case is compared exactly:
+ * on a case-sensitive file system `Package.json` is another file, and the release checks on disk
+ * whether an entry is the same file as `package.json` or `CHANGELOG.md` under another spelling.
  *
  * @param {string} filePath - Configured path, already known to stay inside the root.
  * @returns {boolean} Whether it is `package.json` or `CHANGELOG.md` at the root.
  */
 function isReleaseCommitBuiltInFile(filePath) {
-  const normalizedPath = toSlashSeparatedPath(filePath).replace(/\/+$/u, "").toLowerCase();
-  return RELEASE_COMMIT_BUILT_IN_FILES.some((builtInFile) => builtInFile.toLowerCase() === normalizedPath);
+  const normalizedPath = toSlashSeparatedPath(filePath).replace(/\/+$/u, "");
+  return RELEASE_COMMIT_BUILT_IN_FILES.includes(normalizedPath);
 }
 
 /**

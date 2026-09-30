@@ -794,6 +794,34 @@ function readReleaseFileText(context, filePath, fileLabel, conversionHint) {
 }
 
 /**
+ * Stops the release, before anything is written, when a `versionFiles` entry is the same file as
+ * `package.json` or `CHANGELOG.md` under another spelling, such as `Package.json` on a
+ * case-insensitive file system (Windows, macOS) or a hard link to it: the configuration compares
+ * names exactly, since on a case-sensitive file system that name is another file. Both paths resolve
+ * to the same device and inode (a letter case alias still has a single link, so the hard link check
+ * cannot see it), and rewriting the entry from its snapshot would undo the bumped version.
+ *
+ * @param {VersionFilesContext} context - Release context.
+ * @param {string} filePath - Configured path, already known to exist.
+ * @returns {void}
+ * @throws {ReleaseStepError} When the entry is `package.json` or `CHANGELOG.md` on disk.
+ */
+function requireVersionFileOtherThanBuiltInFiles(context, filePath) {
+  const versionFileStats = statSync(path.join(context.repositoryRoot, filePath), { bigint: true });
+  const aliasedBuiltInFile = RELEASE_COMMIT_BUILT_IN_FILES.find((builtInFile) => {
+    const builtInStats = statSync(path.join(context.repositoryRoot, builtInFile), { bigint: true, throwIfNoEntry: false });
+    return builtInStats !== undefined && builtInStats.dev === versionFileStats.dev && builtInStats.ino === versionFileStats.ino;
+  });
+
+  if (aliasedBuiltInFile !== undefined) {
+    throw new ReleaseStepError(
+      `${filePath} (versionFiles) es el mismo archivo que ${aliasedBuiltInFile} (otro nombre en un sistema de archivos que no distingue mayúsculas, o un enlace duro): el commit de release ya lo actualiza, y reescribirlo desharía la versión nueva.`,
+      `Sacalo de versionFiles en beez-rp.config.(m)js y volvé a correr ${context.commands.createVersion}; no se tocó la versión.`
+    );
+  }
+}
+
+/**
  * Stops the release, before anything is written, when `package.json`, `CHANGELOG.md` or a
  * `versionFiles` entry has another hard link (its link count is above one), which neither the path
  * checks nor the symbolic link check can see: writing the version would also rewrite the other
@@ -909,6 +937,8 @@ async function prepareVersionFileUpdates(context, version) {
     if (!existsSync(path.join(context.repositoryRoot, filePath))) {
       throw new ReleaseStepError(`${filePath} (versionFiles) no existe.`, `Corregí versionFiles en beez-rp.config.(m)js y volvé a correr ${context.commands.createVersion}; no se tocó la versión.`);
     }
+
+    requireVersionFileOtherThanBuiltInFiles(context, filePath);
   }
 
   await requireTrackedVersionFiles(context);
@@ -993,7 +1023,7 @@ function restoreFileBytes(absolutePath, originalBytes) {
  * @param {ReleaseContext} context - Release context.
  * @param {ReleaseFileUpdate[]} fileUpdates - Files the release wrote.
  * @param {string | null} indexTree - Tree of the index before staging (`git write-tree`), or `null` when Git could not write it.
- * @param {ReleaseStepError} failure - Failure of `git add` or `git commit`.
+ * @param {ReleaseStepError} failure - Failure between writing the release files and committing them (`git add`, `git write-tree`, `git commit`).
  * @returns {Promise<ReleaseStepError>} Failure to throw, whose hint says what was restored and what was not.
  */
 async function rollBackUncommittedRelease(context, fileUpdates, indexTree, failure) {
@@ -1194,10 +1224,16 @@ async function bumpVersionStep(context) {
     preparedTree = await context.reader.git(["write-tree"]);
     await runGitStep(context, ["commit", "--quiet", "-m", nextRelease.version], "El commit de versión falló", "Corregí el error (por ejemplo, un hook pre-commit que lo rechaza).");
   } catch (error) {
-    if (!(error instanceof ReleaseStepError)) {
-      throw error;
-    }
-    throw await rollBackUncommittedRelease(context, releaseFileUpdates, indexTree, error);
+    // Any failure once the files are written (such as `git write-tree` after staging) undoes the release, not only a failed Git step.
+    const failure =
+      error instanceof ReleaseStepError
+        ? error
+        : new ReleaseStepError(
+            `No se pudo preparar el commit de versión ${nextRelease.version} (${error instanceof Error ? error.message : String(error)}).`,
+            "Revisá git status (por ejemplo, un índice con conflictos sin resolver o bloqueado por otro proceso de Git).",
+            { cause: error }
+          );
+    throw await rollBackUncommittedRelease(context, releaseFileUpdates, indexTree, failure);
   }
 
   const unpreparedPaths = await listUnpreparedReleaseCommitPaths(context, preparedTree);

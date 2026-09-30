@@ -63,6 +63,26 @@ function canCreateFileSymbolicLinks() {
 /** Whether the tests that replace a module by a file symbolic link can run on this system. */
 const FILE_SYMBOLIC_LINKS_SUPPORTED = canCreateFileSymbolicLinks();
 
+/**
+ * Tells whether the temporary directory, where the fixture repositories live, ignores letter case
+ * in file names (as usual on Windows and macOS), so `Package.json` opens `package.json`.
+ *
+ * @returns {boolean} `true` when names differing only in letter case open the same file.
+ */
+function fileSystemIgnoresLetterCase() {
+  const probeRoot = mkdtempSync(path.join(os.tmpdir(), "beez-rp-case-probe-"));
+
+  try {
+    writeFileSync(path.join(probeRoot, "probe.txt"), "");
+    return existsSync(path.join(probeRoot, "PROBE.txt"));
+  } finally {
+    rmSync(probeRoot, { recursive: true, force: true });
+  }
+}
+
+/** Whether `Package.json` names the same file as `package.json` where the fixtures live. */
+const FILE_SYSTEM_IGNORES_LETTER_CASE = fileSystemIgnoresLetterCase();
+
 /** @type {{ close: () => Promise<void> }[]} */
 const openRegistries = [];
 
@@ -921,6 +941,43 @@ describe("beez-rp create-version command", () => {
   );
 
   it(
+    "should restore the release files and their staging when Git cannot write the staged index as a tree",
+    () => {
+      const { repositoryRoot } = createReleasedRepository();
+      writeFileSync(path.join(repositoryRoot, "VERSION.txt"), "0.1.0 <!-- beez-rp-version -->\n");
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", '  versionFiles: ["VERSION.txt"],', "};"]);
+      const manifest = readFileSync(path.join(repositoryRoot, "package.json"), "utf8");
+      const changelog = readFileSync(path.join(repositoryRoot, "CHANGELOG.md"), "utf8");
+      // Once the release files are staged, this one-shot hook leaves an unmerged entry in the index, so `git write-tree` fails right after `git add`.
+      writeFileSync(
+        path.join(repositoryRoot, ".git", "hooks", "post-index-change"),
+        [
+          "#!/bin/sh",
+          "git diff --cached --quiet -- package.json && exit 0",
+          'rm -f "$0"',
+          "blob=$(git rev-parse HEAD:package.json)",
+          'printf "100644 %s 1\\tconflict.txt\\n100644 %s 2\\tconflict.txt\\n" "$blob" "$blob" | git update-index --index-info',
+          "",
+        ].join("\n"),
+        { mode: 0o755 }
+      );
+
+      const release = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(release.status, release.output).toBe(1);
+      expect(flattenOutput(release.output)).toContain("No se pudo preparar el commit de versión 0.2.0");
+      expect(flattenOutput(release.output)).toContain("se restauraron package.json, CHANGELOG.md y versionFiles (contenido y staging)");
+      expect(readFileSync(path.join(repositoryRoot, "package.json"), "utf8")).toBe(manifest);
+      expect(readFileSync(path.join(repositoryRoot, "CHANGELOG.md"), "utf8")).toBe(changelog);
+      expect(readFileSync(path.join(repositoryRoot, "VERSION.txt"), "utf8")).toBe("0.1.0 <!-- beez-rp-version -->\n");
+      expect(runGit(["diff", "--cached", "--name-only", "--", "package.json", "CHANGELOG.md", "VERSION.txt"], repositoryRoot)).toBe("");
+      expect(runGit(["log", "-1", "--format=%s", "main"], repositoryRoot)).toBe("chore: configure releases");
+      expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
     "should undo the release commit without tagging it when a commit hook stages another change, and leave that change staged",
     () => {
       const { repositoryRoot, remoteRoot } = createReleasedRepository();
@@ -1280,9 +1337,42 @@ describe("beez-rp create-version command", () => {
       const release = runCli(repositoryRoot, ["--bump", "minor"]);
 
       expect(release.status, release.output).toBe(1);
-      expect(flattenOutput(release.output)).toContain("package.json tiene otro enlace duro (2 enlaces al mismo archivo)");
+      expect(flattenOutput(release.output)).toContain("manifest-copy.json (versionFiles) es el mismo archivo que package.json");
       expect(readFileSync(path.join(repositoryRoot, "package.json")).equals(manifest)).toBe(true);
       expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it.skipIf(!FILE_SYSTEM_IGNORES_LETTER_CASE)(
+    "should stop before bumping when a versionFiles entry is package.json under other letter case on a case-insensitive file system",
+    () => {
+      const { repositoryRoot } = createReleasedRepository();
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", '  versionFiles: ["Package.json"],', "};"]);
+      const manifest = readFileSync(path.join(repositoryRoot, "package.json"));
+
+      const release = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(release.status, release.output).toBe(1);
+      expect(flattenOutput(release.output)).toContain("Package.json (versionFiles) es el mismo archivo que package.json");
+      expect(readFileSync(path.join(repositoryRoot, "package.json")).equals(manifest)).toBe(true);
+      expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it.skipIf(FILE_SYSTEM_IGNORES_LETTER_CASE)(
+    "should release a versionFiles entry differing from package.json only in letter case as its own file on a case-sensitive file system",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      writeFileSync(path.join(repositoryRoot, "Package.json"), "Versión 0.1.0 <!-- beez-rp-version -->\n");
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", '  versionFiles: ["Package.json"],', "};"]);
+
+      const release = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(release.status, release.output).toBe(0);
+      expect(runGit(["show", "main:Package.json"], remoteRoot)).toBe("Versión 0.2.0 <!-- beez-rp-version -->");
+      expect(JSON.parse(runGit(["show", "main:package.json"], remoteRoot)).version).toBe("0.2.0");
     },
     GIT_FIXTURE_TEST_TIMEOUT_MS
   );
