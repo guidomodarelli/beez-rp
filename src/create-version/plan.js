@@ -21,6 +21,7 @@ import { parseArgs } from "node:util";
 
 import { CHANGE_TYPES, CHANGELOG_FILE, UNRELEASED_HEADING } from "../constants/changelog.js";
 import {
+  CREATE_VERSION_CONFIG_FILES,
   CREATE_VERSION_FLAG,
   DEFAULT_CHECKS_SCRIPT,
   MAIN_BRANCH,
@@ -29,10 +30,13 @@ import {
   NPM_AUTH_STATUS,
   NPM_DIST_TAG,
   NPM_LOOKUP_STATUS,
+  PORCELAIN_RENAME_SEPARATOR,
   PORCELAIN_STATUS_WIDTH,
+  PROJECT_NPM_CONFIG_FILE,
   PULL_REQUEST_STATE,
   RELEASE_MODE,
   RELEASE_STEP,
+  UNSETTABLE_ASIDE_EXTENSIONS,
   VERSION_PREFIX_PATTERN,
 } from "../constants/create-version.js";
 import { RELEASE_TYPE } from "../constants/versions.js";
@@ -318,6 +322,73 @@ export function listLocalChangesToSetAside(state, mode) {
 }
 
 /**
+ * Lists the paths of a `git status --porcelain` line: the path, or both the original and the new
+ * path of a rename or copy (`R  old.js -> new.js`), without the quotes Git adds to unusual names.
+ *
+ * @param {string} line - Porcelain line.
+ * @returns {string[]} Paths the line reports.
+ */
+export function listPorcelainPaths(line) {
+  return line
+    .slice(PORCELAIN_STATUS_WIDTH)
+    .split(PORCELAIN_RENAME_SEPARATOR)
+    .map((changedPath) => changedPath.replace(/^"|"$/gu, ""));
+}
+
+/**
+ * Tells whether a `git status --porcelain` line touches code or data the loaded configuration may
+ * import (see {@link UNSETTABLE_ASIDE_EXTENSIONS}), or a `.npmrc` the diagnosis already read to
+ * resolve the registry and credentials.
+ *
+ * @param {string} line - Porcelain line.
+ * @returns {boolean} `true` when any of its paths has one of those extensions or is a `.npmrc`.
+ */
+export function isCodeChange(line) {
+  return listPorcelainPaths(line).some(
+    (changedPath) => changedPath.split("/").at(-1) === PROJECT_NPM_CONFIG_FILE || UNSETTABLE_ASIDE_EXTENSIONS.some((extension) => changedPath.endsWith(extension))
+  );
+}
+
+/**
+ * Blocks a runnable `--ignore-local-changes` plan whose changes to set aside include code or data
+ * (`.js`, `.mjs`, `.cjs`, `.ts`, `.json`, `.npmrc`): the configuration was loaded from the working tree before
+ * setting them aside and may depend on them, so the release would not run the committed code.
+ *
+ * @param {ReleasePlan} plan - Plan.
+ * @param {ReleaseState} state - Snapshot.
+ * @param {boolean} ignoreLocalChanges - Whether `--ignore-local-changes` was chosen.
+ * @param {ProjectCommands} commands - Project commands quoted by the hints.
+ * @returns {ReleasePlan} The same plan, or a blocked plan when a code change would be set aside.
+ */
+function refuseToSetAsideCodeChanges(plan, state, ignoreLocalChanges, commands) {
+  const codeChanges = ignoreLocalChanges && plan.steps.length > 0 ? listLocalChangesToSetAside(state, plan.mode).filter(isCodeChange) : [];
+
+  if (codeChanges.length === 0) {
+    return plan;
+  }
+
+  return { mode: RELEASE_MODE.blocked, steps: [], blockers: [codeChangesToSetAsideBlocker(codeChanges, commands)], warnings: [], pendingVersion: null };
+}
+
+/**
+ * Explains why `--ignore-local-changes` cannot set aside code or data changes (see
+ * {@link UNSETTABLE_ASIDE_EXTENSIONS}); shared with the monorepo mode.
+ *
+ * @param {string[]} codeChanges - `git status --porcelain` lines of the code or data changes.
+ * @param {ProjectCommands} commands - Project commands quoted by the hints.
+ * @returns {ReleaseBlocker} Blocker listing them.
+ */
+export function codeChangesToSetAsideBlocker(codeChanges, commands) {
+  return {
+    title: `--${CREATE_VERSION_FLAG.ignoreLocalChanges} no aparta cambios de código ni de datos (${[...UNSETTABLE_ASIDE_EXTENSIONS, PROJECT_NPM_CONFIG_FILE].join(", ")})`,
+    details: [
+      ...codeChanges.slice(0, MAX_LISTED_ITEMS),
+      `La configuración ya se cargó con esos cambios y puede depender de ellos: commitealos en una rama o guardalos con git stash, y volvé a correr ${commands.createVersion}.`,
+    ],
+  };
+}
+
+/**
  * Warns that a runnable plan sets uncommitted changes aside, so the user knows where they go.
  *
  * @param {ReleasePlan} plan - Plan.
@@ -367,6 +438,40 @@ function requireCleanChangelog(plan, state, commands) {
         details: [
           ...changelogChanges,
           `Retomar un release usa el ${CHANGELOG_FILE} de su commit: descartá los cambios (git restore ${CHANGELOG_FILE}) o guardalos (git stash) y volvé a correr ${commands.createVersion}.`,
+        ],
+      },
+    ],
+    warnings: [],
+    pendingVersion: null,
+  };
+}
+
+/**
+ * Blocks a resume plan while `beez-rp.config.js` or `beez-rp.config.mjs` has uncommitted changes:
+ * the run imports the configuration from the working tree, so resuming would check `versionFiles`
+ * (and run the hooks) with a configuration other than the one of the release commit.
+ *
+ * @param {ReleasePlan} plan - Resume plan (from `main` or from a detached release tag).
+ * @param {ReleaseState} state - Snapshot.
+ * @param {ProjectCommands} commands - Project commands quoted by the hints.
+ * @returns {ReleasePlan} The same plan, or a blocked plan when the configuration file is dirty.
+ */
+function requireCommittedConfig(plan, state, commands) {
+  const configChanges = state.workingTreeChanges.filter((line) => listPorcelainPaths(line).some((changedPath) => CREATE_VERSION_CONFIG_FILES.includes(changedPath)));
+
+  if (plan.mode !== RELEASE_MODE.resume || configChanges.length === 0) {
+    return plan;
+  }
+
+  return {
+    mode: RELEASE_MODE.blocked,
+    steps: [],
+    blockers: [
+      {
+        title: `La configuración tiene cambios sin commitear y el release ${plan.pendingVersion} ya está commiteado`,
+        details: [
+          ...configChanges,
+          `Retomar un release usa la configuración de su commit (versionFiles incluido): descartá los cambios (git restore) o guardalos (git stash) y volvé a correr ${commands.createVersion}.`,
         ],
       },
     ],
@@ -694,8 +799,10 @@ export function missingChecksBlocker(commands) {
  * @returns {ReleasePlan} Ordered plan.
  */
 export function buildReleasePlan(state, capabilities = DEFAULT_CAPABILITIES, planOptions = {}) {
-  const plan = planRelease(state, capabilities, planOptions);
-  return warnAboutSetAsideChanges(applyNpmAuth(plan, state.npmAuth, capabilities.commands ?? DEFAULT_PROJECT_COMMANDS), state, planOptions.ignoreLocalChanges ?? false);
+  const commands = capabilities.commands ?? DEFAULT_PROJECT_COMMANDS;
+  const ignoreLocalChanges = planOptions.ignoreLocalChanges ?? false;
+  const plan = refuseToSetAsideCodeChanges(planRelease(state, capabilities, planOptions), state, ignoreLocalChanges, commands);
+  return warnAboutSetAsideChanges(applyNpmAuth(plan, state.npmAuth, commands), state, ignoreLocalChanges);
 }
 
 /**
@@ -717,14 +824,14 @@ function planRelease(state, capabilities, { skipUnpublished = false, ignoreLocal
   const detachedVersion = findDetachedReleaseVersion(state);
 
   if (detachedVersion) {
-    const detachedPlan = planDetachedResume(detachedVersion, capabilities, state);
+    const detachedPlan = requireCommittedConfig(planDetachedResume(detachedVersion, capabilities, state), state, commands);
     return ignoreLocalChanges ? detachedPlan : requireCleanChangelog(detachedPlan, state, commands);
   }
 
   const resume = planResume(state, capabilities);
 
   if (resume) {
-    const resumePlan = checkUnpublishedBeforeResume(resume, state, skipUnpublished, commands);
+    const resumePlan = requireCommittedConfig(checkUnpublishedBeforeResume(resume, state, skipUnpublished, commands), state, commands);
     return ignoreLocalChanges ? resumePlan : requireCleanChangelog(resumePlan, state, commands);
   }
 

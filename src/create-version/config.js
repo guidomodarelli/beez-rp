@@ -25,6 +25,7 @@ import {
   RELEASE_REGISTRY,
 } from "../constants/create-version.js";
 import { DEFAULT_MONOREPO_TAG_FORMAT, TAG_FORMAT_PLACEHOLDER, WORKSPACES_PACKAGES } from "../constants/monorepo.js";
+import { RELEASE_COMMIT_BUILT_IN_FILES } from "../constants/version-files.js";
 import { RELEASE_TYPE_ORDER } from "../constants/versions.js";
 import { DEFAULT_PROJECT_COMMANDS, describeProjectCommands, detectPackageManager } from "../package-manager.js";
 
@@ -68,16 +69,19 @@ import { DEFAULT_PROJECT_COMMANDS, describeProjectCommands, detectPackageManager
  *   packages?: "workspaces" | string[],
  *   tagFormat?: string,
  * }} CreateVersionConfig
- *   `summary` lines replace `{version}` with the released version. Without `checks`, the release
+ *   `summary` lines replace `{version}` with the released version (in monorepo mode, a line with
+ *   `{version}` or `{name}` is printed once per released package). Without `checks`, the release
  *   runs `<package manager> run ci` (pnpm, bun, npm or yarn, detected from `packageManager` or the
  *   lockfile) when `package.json` declares a `ci` script; `false` skips the checks on purpose.
  *   `versionFiles` lists files (relative to the root) whose marked lines get the new version in the
  *   release commit: `beez-rp-version` / `x-release-please-version` lines and
- *   `beez-rp-start-version`…`beez-rp-end` blocks. `packages` turns on the monorepo mode: every
- *   non-private workspace package (`"workspaces"`: the ones the root `package.json` declares; or
- *   explicit patterns such as `["packages/*"]`) gets its own version, CHANGELOG and tag, formatted
- *   with `tagFormat` (`{component}-v{version}` by default). `preMajorShift` lowers the suggested
- *   release type one level while a version is `0.x` (breaking → minor, features → patch).
+ *   `beez-rp-start-version`…`beez-rp-end` blocks. Entries may use `/` or `\` and are resolved to the
+ *   `/`-separated form (`.\src\cli.js` → `src/cli.js`); each must be a file tracked by Git.
+ *   `packages` turns on the monorepo mode: every non-private workspace package (`"workspaces"`: the
+ *   ones the root `package.json` declares; or explicit patterns such as `["packages/*"]`) gets its
+ *   own version, CHANGELOG and tag, formatted with `tagFormat` (`{component}-v{version}` by default).
+ *   `preMajorShift` lowers the suggested release type one level while a version is `0.x`
+ *   (breaking → minor, features → patch).
  * @typedef {{
  *   projectName: string | null,
  *   changelog: { audience: string, language: "es" | "en" },
@@ -140,7 +144,8 @@ function invalidField(field, expectation) {
  * @returns {value is string[]} Whether it is a string list.
  */
 function isStringList(value) {
-  return Array.isArray(value) && value.every((item) => typeof item === "string" && item.trim().length > 0);
+  // Array.from turns holes into undefined, which every() would otherwise skip.
+  return Array.isArray(value) && Array.from(value).every((item) => typeof item === "string" && item.trim().length > 0);
 }
 
 /**
@@ -272,9 +277,17 @@ export function resolveCreateVersionConfig(rawConfig, { packageScripts = {}, com
     }
   }
 
-  const versionFiles = config.versionFiles ?? [];
-  if (!isStringList(versionFiles) || versionFiles.some((filePath) => !isPathInsideRoot(filePath))) {
+  const configuredVersionFiles = config.versionFiles ?? [];
+  if (!isStringList(configuredVersionFiles) || configuredVersionFiles.some((filePath) => !isPathInsideRoot(filePath))) {
     throw invalidField("versionFiles", "a list of file paths relative to the project root, inside it");
+  }
+  const versionFiles = configuredVersionFiles.map(toSlashSeparatedPath);
+  const builtInVersionFile = versionFiles.find((filePath) => RELEASE_COMMIT_BUILT_IN_FILES.includes(filePath));
+  if (builtInVersionFile !== undefined) {
+    throw invalidField(
+      "versionFiles",
+      `a list without ${RELEASE_COMMIT_BUILT_IN_FILES.join(" nor ")}, which the release commit already updates (found ${JSON.stringify(builtInVersionFile)})`
+    );
   }
 
   return {
@@ -303,8 +316,21 @@ export function resolveCreateVersionConfig(rawConfig, { packageScripts = {}, com
  * @param {string} filePath - Configured path.
  * @returns {boolean} Whether it is a relative path that cannot escape the root.
  */
-function isPathInsideRoot(filePath) {
-  return !path.isAbsolute(filePath) && !filePath.split(/[\\/]/u).includes("..");
+export function isPathInsideRoot(filePath) {
+  // The win32 root covers `/x`, `\x`, `C:\x` and the drive-relative `C:x` alike, on every platform.
+  return path.win32.parse(filePath).root === "" && !filePath.split(/[\\/]/u).includes("..");
+}
+
+/**
+ * Converts a configured path, written with `/` or `\` separators on any platform, to the
+ * `/`-separated form without `./` segments nor a trailing `/`: the form the file system, Git and
+ * the messages use.
+ *
+ * @param {string} filePath - Configured path, already known to stay inside the root.
+ * @returns {string} Path relative to the root with `/` separators, such as `src/cli.js`.
+ */
+function toSlashSeparatedPath(filePath) {
+  return path.posix.normalize(filePath.replaceAll("\\", "/")).replace(/\/+$/u, "");
 }
 
 /**

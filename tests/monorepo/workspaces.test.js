@@ -62,11 +62,42 @@ describe("discoverWorkspacePackages", () => {
   });
 
   it("rejects unsupported globs, missing packages and duplicated names", () => {
-    const root = createMonorepo({ "packages/a": { name: "a" }, "packages/b": { name: "a" } });
+    const root = createMonorepo({ "packages/a": { name: "a", version: "1.0.0" }, "packages/b": { name: "a", version: "1.0.0" } });
 
     expect(() => expandWorkspacePatterns(root, ["packages/**"])).toThrow(/not supported/);
+    for (const escapingPattern of ["../shared", "packages/../../shared", "!../shared", "/abs/packages/*", "C:\\repo\\packages"]) {
+      expect(() => expandWorkspacePatterns(root, [escapingPattern])).toThrow(/sale del repositorio/);
+    }
     expect(() => discoverWorkspacePackages(root, ["nothing/*"])).toThrow(/no workspace package found/);
     expect(() => discoverWorkspacePackages(root, "workspaces")).toThrow(/declared in both packages\/a and packages\/b/);
+  });
+
+  it("reports a malformed manifest of a matched workspace with its path", () => {
+    const root = createMonorepo({ "packages/a": { name: "a", version: "1.0.0" }, "packages/broken": {} });
+    writeFileSync(path.join(root, "packages/broken/package.json"), "{ \"name\": ");
+
+    expect(() => discoverWorkspacePackages(root, "workspaces")).toThrow(/no se pudo leer packages\/broken\/package\.json: .+/);
+    writeFileSync(path.join(root, "packages/broken/package.json"), "[]");
+    expect(() => discoverWorkspacePackages(root, "workspaces")).toThrow(/packages\/broken\/package\.json no es un objeto JSON/);
+  });
+
+  it("skips private workspaces without a name and rejects the non-private ones", () => {
+    const root = createMonorepo({ "packages/a": { name: "a", version: "1.0.0" }, "packages/tooling": { private: true } });
+    expect(discoverWorkspacePackages(root, "workspaces").map(({ name }) => name)).toEqual(["a"]);
+
+    writeFileSync(path.join(root, "packages/tooling/package.json"), JSON.stringify({ version: "1.0.0" }));
+    expect(() => discoverWorkspacePackages(root, "workspaces")).toThrow(/packages\/tooling\/package\.json no tiene "name"; agregale un "name"/);
+  });
+
+  it("rejects public workspaces without a stable X.Y.Z version and accepts private ones without it", () => {
+    const root = createMonorepo({ "packages/a": { name: "a", version: "1.0.0" }, "packages/internal": { name: "internal", private: true, version: "0.0.0-dev" } });
+    expect(discoverWorkspacePackages(root, "workspaces").map(({ name }) => name)).toEqual(["a", "internal"]);
+
+    writeFileSync(path.join(root, "packages/a/package.json"), JSON.stringify({ name: "a" }));
+    expect(() => discoverWorkspacePackages(root, "workspaces")).toThrow(/packages\/a\/package\.json no tiene "version"; un paquete publicado necesita una versión estable X\.Y\.Z/);
+
+    writeFileSync(path.join(root, "packages/a/package.json"), JSON.stringify({ name: "a", version: "1.1.0-beta.1" }));
+    expect(() => discoverWorkspacePackages(root, "workspaces")).toThrow(/packages\/a\/package\.json tiene "version": "1\.1\.0-beta\.1"; un paquete publicado necesita una versión estable X\.Y\.Z/);
   });
 });
 

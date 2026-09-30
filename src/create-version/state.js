@@ -295,7 +295,9 @@ export async function readRepositorySnapshot({ repositoryRoot, reader, onProgres
 
   onProgress("Leyendo el estado de Git");
   const currentBranch = await reader.tryGit(["symbolic-ref", "--quiet", "--short", "HEAD"]);
-  const statusOutput = await reader.git(["status", "--porcelain"]);
+  // Every untracked file, not only its directory, so the plan sees the extension of each one; with
+  // core.quotePath off, non-ASCII paths come verbatim instead of octal-escaped.
+  const statusOutput = await reader.git(["-c", "core.quotePath=false", "status", "--porcelain", "--untracked-files=all"]);
   const workingTreeChanges = statusOutput.split("\n").map((line) => line.trimEnd()).filter(Boolean);
   const localMainExists = (await reader.tryGit(["rev-parse", "--verify", "--quiet", MAIN_BRANCH])) !== null;
   const remoteMainExists = (await reader.tryGit(["rev-parse", "--verify", "--quiet", REMOTE_MAIN_REF])) !== null;

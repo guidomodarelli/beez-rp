@@ -23,6 +23,8 @@ import {
   WORKSPACE_WILDCARD_SUFFIX,
   WORKSPACES_PACKAGES,
 } from "../constants/monorepo.js";
+import { isPathInsideRoot } from "../create-version/config.js";
+import { isStableReleaseVersion } from "../versions.js";
 
 /**
  * @typedef {{
@@ -43,8 +45,9 @@ import {
  *   changePaths: string[],
  *   publishedDependencies: string[],
  * }} ReleaseUnit
- *   A released package: `component` names its tag, `changePaths` are the directories whose commits
- *   count as its changes (its own plus its private workspace dependencies), `publishedDependencies`
+ *   A released package: `component` names its tag, `changePaths` are the Git pathspecs whose commits
+ *   count as its changes (its own directory plus its private workspace dependencies, excluding the
+ *   released packages nested inside it), `publishedDependencies`
  *   the released packages it installs (they are published first).
  */
 
@@ -72,6 +75,28 @@ function readManifest(manifestPath) {
 }
 
 /**
+ * Reads the manifest of a matched workspace directory.
+ *
+ * @param {string} repositoryRoot - Repository root.
+ * @param {string} directory - Workspace directory relative to the root.
+ * @returns {Record<string, unknown>} Manifest.
+ * @throws {Error} When the manifest is not valid JSON or not an object.
+ */
+function readWorkspaceManifest(repositoryRoot, directory) {
+  const manifestPath = `${directory}/${PACKAGE_MANIFEST_FILE}`;
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(path.join(repositoryRoot, manifestPath), "utf8"));
+  } catch (error) {
+    throw new Error(`beez-rp create-version: no se pudo leer ${manifestPath}: ${error instanceof Error ? error.message : String(error)}; corregilo o excluí ese workspace`, { cause: error });
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`beez-rp create-version: ${manifestPath} no es un objeto JSON; corregilo o excluí ese workspace`);
+  }
+  return parsed;
+}
+
+/**
  * Reads the workspace patterns the root `package.json` declares (`workspaces` as a list, or as an
  * object with `packages`, as Yarn and Bun accept).
  *
@@ -91,7 +116,7 @@ export function readDeclaredWorkspaces(rootManifest) {
  * @param {string} repositoryRoot - Repository root.
  * @param {readonly string[]} patterns - Workspace patterns.
  * @returns {string[]} Directories relative to the root that hold a `package.json`, sorted.
- * @throws {Error} When a pattern uses a glob beyond a trailing `/*`.
+ * @throws {Error} When a pattern escapes the repository or uses a glob beyond a trailing `/*`.
  */
 export function expandWorkspacePatterns(repositoryRoot, patterns) {
   const included = new Set();
@@ -99,6 +124,9 @@ export function expandWorkspacePatterns(repositoryRoot, patterns) {
 
   for (const rawPattern of patterns) {
     const isExclusion = rawPattern.startsWith(WORKSPACE_EXCLUSION_PREFIX);
+    if (!isPathInsideRoot(isExclusion ? rawPattern.slice(WORKSPACE_EXCLUSION_PREFIX.length) : rawPattern)) {
+      throw new Error(`beez-rp create-version: el patrón de workspace "${rawPattern}" sale del repositorio; usá rutas relativas a la raíz, sin ".." ni rutas absolutas`);
+    }
     const pattern = toPosixPath(isExclusion ? rawPattern.slice(WORKSPACE_EXCLUSION_PREFIX.length) : rawPattern).replace(/^\.\//u, "");
     const base = pattern.endsWith(WORKSPACE_WILDCARD_SUFFIX) ? pattern.slice(0, -WORKSPACE_WILDCARD_SUFFIX.length) : pattern;
 
@@ -129,15 +157,22 @@ export function expandWorkspacePatterns(repositoryRoot, patterns) {
  *
  * @param {string} repositoryRoot - Repository root.
  * @param {"workspaces" | readonly string[]} packages - `packages` of the configuration: the root workspaces, or explicit patterns.
- * @returns {WorkspacePackage[]} Packages with a `name`, sorted by directory.
- * @throws {Error} When no package is found or two packages share a name.
+ * @returns {WorkspacePackage[]} Packages with a `name` (private ones without it are skipped), sorted by directory.
+ * @throws {Error} When a matched manifest is malformed, non-private without a `name` or without a stable `X.Y.Z` `version`, no package is found or two packages share a name.
  */
 export function discoverWorkspacePackages(repositoryRoot, packages) {
   const patterns = packages === WORKSPACES_PACKAGES ? readDeclaredWorkspaces(readManifest(path.join(repositoryRoot, PACKAGE_MANIFEST_FILE))) : packages;
   const found = expandWorkspacePatterns(repositoryRoot, patterns).flatMap((directory) => {
-    const manifest = readManifest(path.join(repositoryRoot, directory, PACKAGE_MANIFEST_FILE));
-    if (!manifest || typeof manifest.name !== "string" || manifest.name === "") {
-      return [];
+    const manifest = readWorkspaceManifest(repositoryRoot, directory);
+    if (typeof manifest.name !== "string" || manifest.name === "") {
+      if (manifest.private === true) {
+        return [];
+      }
+      throw new Error(`beez-rp create-version: ${directory}/${PACKAGE_MANIFEST_FILE} no tiene "name"; agregale un "name" para publicarlo, o "private": true (o excluí ese workspace) para omitirlo`);
+    }
+    if (manifest.private !== true && !isStableReleaseVersion(manifest.version)) {
+      const currentVersion = manifest.version === undefined ? "no tiene \"version\"" : `tiene "version": ${JSON.stringify(manifest.version)}`;
+      throw new Error(`beez-rp create-version: ${directory}/${PACKAGE_MANIFEST_FILE} ${currentVersion}; un paquete publicado necesita una versión estable X.Y.Z (por ejemplo "0.1.0"), o "private": true (o excluí ese workspace) para omitirlo`);
     }
     return [
       {
@@ -208,6 +243,21 @@ export function resolveReleaseUnits(workspacePackages) {
     });
   };
 
+  /**
+   * Git pathspecs whose commits count as changes of a package: its directory and its private
+   * dependencies, minus the released packages nested inside its directory (they release their own commits).
+   *
+   * @param {WorkspacePackage} workspacePackage - Released package.
+   * @param {string[]} dependencyDirectories - Directories of its private dependencies.
+   * @returns {string[]} Git pathspecs.
+   */
+  const listChangePaths = (workspacePackage, dependencyDirectories) => {
+    const nestedExclusions = workspacePackages
+      .filter((nestedPackage) => !nestedPackage.private && nestedPackage.directory.startsWith(`${workspacePackage.directory}/`))
+      .map((nestedPackage) => `:(exclude)${nestedPackage.directory}`);
+    return [...new Set([workspacePackage.directory, ...dependencyDirectories]), ...nestedExclusions];
+  };
+
   return workspacePackages
     .filter((workspacePackage) => !workspacePackage.private)
     .map((workspacePackage) => ({
@@ -217,7 +267,7 @@ export function resolveReleaseUnits(workspacePackages) {
       manifestPath: `${workspacePackage.directory}/${PACKAGE_MANIFEST_FILE}`,
       changelogPath: `${workspacePackage.directory}/${CHANGELOG_FILE}`,
       version: workspacePackage.version,
-      changePaths: [...new Set([workspacePackage.directory, ...privateDependencyDirectories(workspacePackage.name, new Set())])],
+      changePaths: listChangePaths(workspacePackage, privateDependencyDirectories(workspacePackage.name, new Set())),
       publishedDependencies: listWorkspaceDependencies(workspacePackage.manifest, PUBLISHED_DEPENDENCY_FIELDS, workspaceNames).filter(
         (dependencyName) => byName.get(dependencyName)?.private === false
       ),

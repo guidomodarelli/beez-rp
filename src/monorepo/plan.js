@@ -3,8 +3,8 @@
  * and decides, without touching Git or npm, what is still missing:
  *
  * - a new release: the packages with commits under their paths are the
- *   candidates; the run asks the version of each one (or skips it), fills
- *   empty changelogs, runs the checks, creates one release commit with a tag
+ *   candidates; the run asks the version of each one (or skips it) before
+ *   applying migrations, fills empty changelogs, runs the checks, creates one release commit with a tag
  *   per package, prepares, pushes and publishes in dependency order;
  * - the resume of a local release commit that never reached `origin`, or of
  *   tagged releases on `origin/main` that npm does not have yet;
@@ -14,7 +14,7 @@
  * @module monorepo/plan
  */
 
-import { CHANGE_TYPES, UNRELEASED_HEADING } from "../constants/changelog.js";
+import { UNRELEASED_HEADING } from "../constants/changelog.js";
 import {
   CREATE_VERSION_FLAG,
   MAIN_BRANCH,
@@ -22,12 +22,13 @@ import {
   MIGRATION_STATUS,
   NPM_AUTH_STATUS,
   NPM_LOOKUP_STATUS,
-  PORCELAIN_STATUS_WIDTH,
   RELEASE_MODE,
+  RELEASE_REMOTE,
   RELEASE_STEP,
+  REMOTE_MAIN_REF,
 } from "../constants/create-version.js";
 import { MONOREPO_RELEASE_STEP } from "../constants/monorepo.js";
-import { describeFeatureBranchGaps, foreignCommitsBlocker, missingChecksBlocker } from "../create-version/plan.js";
+import { codeChangesToSetAsideBlocker, describeFeatureBranchGaps, foreignCommitsBlocker, isCodeChange, listPorcelainPaths, missingChecksBlocker } from "../create-version/plan.js";
 import { describeNpmAuthProblem, describeNpmFirstPublicationWarning } from "../create-version/npm-auth.js";
 import { DEFAULT_PROJECT_COMMANDS } from "../package-manager.js";
 import { findHighestStableVersion, isStableReleaseVersion, isStableVersionAbove } from "../versions.js";
@@ -70,7 +71,7 @@ function createPlan(plan) {
  * @returns {boolean} Whether the line reports one of them.
  */
 function changesOneOf(line, paths) {
-  return paths.has(line.slice(PORCELAIN_STATUS_WIDTH));
+  return listPorcelainPaths(line).some((changedPath) => paths.has(changedPath));
 }
 
 /**
@@ -116,6 +117,14 @@ function findBlockers(state, ignoreLocalChanges, commands) {
       details: state.branch
         ? describeFeatureBranchGaps(state.branch, state.pullRequest ?? null, state.githubError ?? null, commands)
         : [`Hacé git switch ${MAIN_BRANCH} y volvé a correr ${commands.createVersion}.`],
+    });
+  }
+
+  // Without origin/main no package has commits to compare, so the plan would say everything is up to date.
+  if (!state.remoteMainExists) {
+    blockers.push({
+      title: `No existe ${REMOTE_MAIN_REF}: no se puede saber qué cambió en cada paquete`,
+      details: [`Subí ${MAIN_BRANCH} con git push -u ${RELEASE_REMOTE} ${MAIN_BRANCH} (o revisá el remoto ${RELEASE_REMOTE}) y volvé a correr ${commands.createVersion}.`],
     });
   }
 
@@ -277,6 +286,18 @@ function planPendingPublications(state, capabilities) {
 }
 
 /**
+ * Warns that `--skip-unpublished` leaves a tagged release out of npm on purpose.
+ *
+ * @param {string} name - Package name.
+ * @param {string} version - Skipped version.
+ * @param {string} tag - Its tag.
+ * @returns {string} Warning.
+ */
+function describeSkippedPublication(name, version, tag) {
+  return `Se saltea ${name}@${version} (tag ${tag}), que no está en npm: el release nuevo sale sin publicarla (--${CREATE_VERSION_FLAG.skipUnpublished}).`;
+}
+
+/**
  * Plans a new release of the packages that changed.
  *
  * @param {MonorepoSnapshot} state - Snapshot.
@@ -287,23 +308,9 @@ function planPendingPublications(state, capabilities) {
  */
 function planNewRelease(state, capabilities, commands, warnings) {
   const candidates = state.packages.filter((packageSnapshot) => packageSnapshot.unreleasedCommits.length > 0);
-
-  if (candidates.length === 0) {
-    return createPlan({ mode: RELEASE_MODE.upToDate, warnings });
-  }
-
-  const invalidChangelogs = candidates.filter((packageSnapshot) => packageSnapshot.changelog.unknownSections.length > 0);
-  if (invalidChangelogs.length > 0) {
-    return createPlan({
-      blockers: invalidChangelogs.map((packageSnapshot) => ({
-        title: `${packageSnapshot.unit.changelogPath} ${UNRELEASED_HEADING} usa secciones no válidas: ${packageSnapshot.changelog.unknownSections.join(", ")}`,
-        details: [`Usá solo ${CHANGE_TYPES.map((type) => `### ${type}`).join(", ")} y volvé a correr ${commands.createVersion}.`],
-      })),
-    });
-  }
-
   const candidateNames = candidates.map((packageSnapshot) => packageSnapshot.unit.name);
 
+  // Before the up-to-date check: the local checkout may not have the changes (or workspaces) origin already has.
   if (state.main.behindCount > 0) {
     return createPlan({
       mode: RELEASE_MODE.newRelease,
@@ -319,12 +326,33 @@ function planNewRelease(state, capabilities, commands, warnings) {
     });
   }
 
+  if (candidates.length === 0) {
+    return createPlan({ mode: RELEASE_MODE.upToDate, warnings });
+  }
+
+  // Only the packages chosen later need valid changelogs (checked when the versions are chosen):
+  // an invalid one must not block releasing the others, so the plan only warns about it.
+  for (const packageSnapshot of candidates) {
+    if (packageSnapshot.changelog.unknownSections.length > 0) {
+      warnings.push(
+        `${packageSnapshot.unit.changelogPath} ${UNRELEASED_HEADING} usa secciones no válidas (${packageSnapshot.changelog.unknownSections.join(", ")}): si elegís publicar ${packageSnapshot.unit.name}, el release se corta antes de tocar nada.`
+      );
+    }
+  }
+
   if (capabilities.checksMissing) {
     return createPlan({ blockers: [missingChecksBlocker(commands)] });
   }
 
+  // The versions are chosen first: skipping every package must not leave migrations applied.
   /** @type {ReleasePlanStep[]} */
-  const steps = [];
+  const steps = [
+    {
+      id: MONOREPO_RELEASE_STEP.chooseVersions,
+      title: `Elegir la versión de cada paquete con cambios (${candidates.length})`,
+      detail: candidateNames.join(", "),
+    },
+  ];
 
   if (state.migrations?.status === MIGRATION_STATUS.pending) {
     steps.push({
@@ -335,12 +363,6 @@ function planNewRelease(state, capabilities, commands, warnings) {
   } else if (state.migrations?.status === MIGRATION_STATUS.unknown) {
     warnings.push(`No se pudo verificar si hay migraciones pendientes: ${state.migrations.reason ?? "motivo desconocido"}.`);
   }
-
-  steps.push({
-    id: MONOREPO_RELEASE_STEP.chooseVersions,
-    title: `Elegir la versión de cada paquete con cambios (${candidates.length})`,
-    detail: candidateNames.join(", "),
-  });
 
   if (candidates.some((packageSnapshot) => packageSnapshot.changelog.entryCount === 0)) {
     steps.push({
@@ -429,10 +451,11 @@ export function listPackagesToAuthenticate(plan) {
  *
  * @param {MonorepoSnapshot} state - Snapshot gathered by `collectMonorepoState`.
  * @param {ReleaseCapabilities} capabilities - Steps the project configured.
- * @param {{ tagFormat: string, ignoreLocalChanges?: boolean }} options - Tag format and command-line options.
+ * @param {{ tagFormat: string, ignoreLocalChanges?: boolean, skipUnpublished?: boolean }} options - Tag format and
+ *   command-line options; `skipUnpublished` plans a new release even when tagged releases are missing from npm.
  * @returns {MonorepoPlan} Ordered plan.
  */
-export function buildMonorepoPlan(state, capabilities, { tagFormat, ignoreLocalChanges = false }) {
+export function buildMonorepoPlan(state, capabilities, { tagFormat, ignoreLocalChanges = false, skipUnpublished = false }) {
   const commands = capabilities.commands ?? DEFAULT_PROJECT_COMMANDS;
   const blockers = findBlockers(state, ignoreLocalChanges, commands);
 
@@ -442,8 +465,16 @@ export function buildMonorepoPlan(state, capabilities, { tagFormat, ignoreLocalC
 
   const localResume = planLocalResume(state, capabilities, tagFormat);
   const pending = localResume ? { plan: null, warnings: [] } : planPendingPublications(state, capabilities);
-  const plan = localResume ?? pending.plan ?? planNewRelease(state, capabilities, commands, pending.warnings);
+  const skipped = skipUnpublished && pending.plan ? pending.plan.pendingReleases.map(({ name, version, tag }) => describeSkippedPublication(name, version, tag)) : [];
+  const plan = localResume ?? (skipUnpublished ? null : pending.plan) ?? planNewRelease(state, capabilities, commands, [...pending.warnings, ...skipped]);
   const withAuth = applyNpmAuth(plan, state, commands);
+  // As in single-package mode: the configuration and the workspace manifests were already read from the
+  // working tree, so code and data changes cannot be set aside.
+  const codeChanges = ignoreLocalChanges && withAuth.steps.length > 0 ? listMonorepoChangesToSetAside(state, withAuth.mode).filter(isCodeChange) : [];
+
+  if (codeChanges.length > 0) {
+    return createPlan({ blockers: [codeChangesToSetAsideBlocker(codeChanges, commands)] });
+  }
 
   if (withAuth.mode === RELEASE_MODE.resume && !ignoreLocalChanges && state.workingTreeChanges.length > 0) {
     return createPlan({

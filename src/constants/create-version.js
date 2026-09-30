@@ -263,6 +263,16 @@ export const RECORD_SEPARATOR = "\x1e";
 /** Width of the `git status --porcelain` state columns before each path. */
 export const PORCELAIN_STATUS_WIDTH = 3;
 
+/** Separator between the original and the new path of a renamed or copied `git status --porcelain` entry. */
+export const PORCELAIN_RENAME_SEPARATOR = " -> ";
+
+/**
+ * Extensions of the files `--ignore-local-changes` refuses to set aside: the configuration is
+ * loaded before the changes are set aside, and it (or a hook) may import code or data from them,
+ * so the release would run with content that is not the committed one.
+ */
+export const UNSETTABLE_ASIDE_EXTENSIONS = Object.freeze([".js", ".mjs", ".cjs", ".ts", ".json"]);
+
 /** Maximum commits listed in a box. */
 export const MAX_LISTED_COMMITS = 12;
 

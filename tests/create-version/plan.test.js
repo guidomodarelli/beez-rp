@@ -197,7 +197,7 @@ describe("create-version plan", () => {
   });
 
   it("should point uncommitted changes to --ignore-local-changes and plan the release, with a warning, when it is chosen", () => {
-    const dirty = createMainState({ workingTreeChanges: [" M src/index.js", "?? notes.txt", " M CHANGELOG.md"] });
+    const dirty = createMainState({ workingTreeChanges: [" M docs/guide.md", "?? notes.txt", " M CHANGELOG.md"] });
 
     expect(buildReleasePlan(dirty, DEPLOYED_APP).blockers[0].details.at(-1)).toContain("--ignore-local-changes");
 
@@ -205,7 +205,39 @@ describe("create-version plan", () => {
     expect(plan.mode).toBe(RELEASE_MODE.newRelease);
     expect(plan.steps.map((planStep) => planStep.id)).toEqual([RELEASE_STEP.bumpVersion, RELEASE_STEP.pushRelease]);
     expect(plan.warnings).toEqual([expect.stringContaining("Se ignoran 2 cambio(s) sin commitear")]);
-    expect(listLocalChangesToSetAside(dirty, plan.mode)).toEqual([" M src/index.js", "?? notes.txt"]);
+    expect(listLocalChangesToSetAside(dirty, plan.mode)).toEqual([" M docs/guide.md", "?? notes.txt"]);
+  });
+
+  it.each([
+    { name: "a modified module", change: " M src/index.ts" },
+    { name: "an untracked data file", change: "?? config/local.json" },
+    { name: "a rename into a module", change: "R  notes.md -> lib/helper.cjs" },
+    { name: "a rename out of a module", change: "R  lib/helper.mjs -> notes.md" },
+    { name: "a quoted module name", change: String.raw` M "src/m\303\263dulo.js"` },
+    { name: "a modified project .npmrc", change: " M .npmrc" },
+  ])("should block --ignore-local-changes, also in a resume, when the changes to set aside include $name", ({ change }) => {
+    const npm = { status: NPM_LOOKUP_STATUS.ok, publishedVersions: ["0.1.0"], reason: null };
+    const states = [createMainState({ workingTreeChanges: [change, " M CHANGELOG.md"] }), createMainState({ headVersion: "0.2.0", headSubject: "0.2.0", npm, workingTreeChanges: [change] })];
+
+    for (const state of states) {
+      const plan = buildReleasePlan(state, NPM_PACKAGE, { ignoreLocalChanges: true });
+
+      expect(plan.mode).toBe(RELEASE_MODE.blocked);
+      expect(plan.blockers[0].title).toContain("--ignore-local-changes no aparta cambios de código ni de datos");
+      expect(plan.blockers[0].details).toEqual([change, expect.stringContaining("commitealos en una rama o guardalos con git stash")]);
+    }
+  });
+
+  it("should block resuming a release commit while the configuration has uncommitted changes, a rename included", () => {
+    const npm = { status: NPM_LOOKUP_STATUS.ok, publishedVersions: ["0.1.0"], reason: null };
+
+    for (const change of [" M beez-rp.config.js", "R  beez-rp.config.js -> beez-rp.config.mjs"]) {
+      const plan = buildReleasePlan(createMainState({ headVersion: "0.2.0", headSubject: "0.2.0", npm, workingTreeChanges: [change] }), NPM_PACKAGE, { ignoreLocalChanges: true });
+
+      expect(plan.mode).toBe(RELEASE_MODE.blocked);
+      expect(plan.blockers[0].title).toBe("La configuración tiene cambios sin commitear y el release 0.2.0 ya está commiteado");
+      expect(plan.blockers[0].details[0]).toBe(change);
+    }
   });
 
   it("should resume a release commit with --ignore-local-changes even when CHANGELOG.md is dirty, setting it aside too", () => {

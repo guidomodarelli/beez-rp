@@ -26,20 +26,21 @@ import {
   FAILURE_EXIT_CODE,
   GITHUB_REPOSITORY_PATTERN,
   MAIN_BRANCH,
+  MAX_LISTED_ITEMS,
   NPM_LOOKUP_STATUS,
   NPM_PUBLISHER,
   NPM_TOKEN_LOCATIONS,
   NPM_TOKEN_VARIABLE,
   PACKAGE_MANIFEST_FILE,
-  PACKAGE_VERSION_FIELD_PATTERN,
   RELEASE_MODE,
   RELEASE_REGISTRY,
   RELEASE_REMOTE,
   RELEASE_STEP,
   SHORT_SHA_LENGTH,
+  SUMMARY_VERSION_PLACEHOLDER,
   buildMainSyncedRestartMessage,
 } from "../constants/create-version.js";
-import { AUDIENCE_PACKAGE_PLACEHOLDER, MONOREPO_RELEASE_STEP, SKIP_PACKAGE_CHOICE } from "../constants/monorepo.js";
+import { AUDIENCE_PACKAGE_PLACEHOLDER, MONOREPO_RELEASE_STEP, SKIP_PACKAGE_CHOICE, SUMMARY_PACKAGE_PLACEHOLDER } from "../constants/monorepo.js";
 import { RELEASE_TYPE_ORDER } from "../constants/versions.js";
 import { findPnpmPackRewrites, findPreparedArtifact, expandArtifactPattern, isSafeArtifactPath, verifyPreparedArtifact, withArtifactOutsidePackageRoot } from "../create-version/artifact.js";
 import { ReleaseStepError } from "../create-version/errors.js";
@@ -52,12 +53,17 @@ import {
   ReleaseCancelledError,
   applyMigrationsStep,
   askToIgnoreLocalChanges,
+  assertNoTrackedChanges,
   checkPinnedNodeVersion,
   createHookContext,
   describeReleaseCapabilities,
+  assertReleaseFilesMatchHead,
+  commitReleaseFiles,
   prepareVersionFileUpdates,
+  readReleaseFile,
   renderCommitList,
   renderNpmAuthRow,
+  rewriteManifestVersion,
   renderPlan,
   runChecksStep,
   runConfiguredCommands,
@@ -65,7 +71,7 @@ import {
   syncMainStep,
 } from "../create-version/run.js";
 import { BOX_TONE, ICON, formatDuration, measureActiveMs, paint, print, renderBanner, renderBox, renderRow, renderStepHeader, select, startSpinner } from "../terminal-ui.js";
-import { bumpReleaseVersion, isStableReleaseVersion, suggestNextReleaseType } from "../versions.js";
+import { bumpReleaseVersion, compareReleaseVersions, findHighestStableVersion, isStableReleaseVersion, suggestNextReleaseType } from "../versions.js";
 import { buildMonorepoPlan, listMonorepoChangesToSetAside, listPackagesToAuthenticate } from "./plan.js";
 import { buildMonorepoReleaseSubject } from "./release-commit.js";
 import { collectMonorepoState } from "./state.js";
@@ -186,6 +192,51 @@ function readWorkingVersion(context, unit) {
 }
 
 /**
+ * Checks, before anything is written, that the release tag of a package is a valid Git ref name and
+ * does not exist locally, so `git tag` cannot fail after the release commit.
+ *
+ * @param {MonorepoContext} context - Context.
+ * @param {string} tag - Tag the release would create.
+ * @returns {Promise<void>}
+ * @throws {ReleaseStepError} When the tag is invalid or already exists.
+ */
+async function assertTagCanBeCreated(context, tag) {
+  if ((await context.reader.tryGit(["check-ref-format", `refs/tags/${tag}`])) === null) {
+    throw new ReleaseStepError(
+      `El tag ${tag} no es un nombre de tag válido para Git (tagFormat "${context.tagFormat}").`,
+      `No se escribió nada. Ajustá tagFormat o el nombre del paquete y volvé a correr ${context.commands.createVersion}.`
+    );
+  }
+  if (await context.reader.tryGit(["rev-parse", "--verify", "--quiet", `refs/tags/${tag}`])) {
+    throw new ReleaseStepError(
+      `El tag ${tag} ya existe en local.`,
+      `No se escribió nada. Revisalo con git show ${tag}; si sobra, borralo con git tag -d ${tag} y volvé a correr ${context.commands.createVersion}.`
+    );
+  }
+}
+
+/**
+ * Checks that the `[Unreleased]` block of every chosen package uses only valid sections, so a package
+ * left out of the release never blocks the others. Empty blocks are filled by Codex later.
+ *
+ * @param {MonorepoContext} context - Context, with the chosen packages.
+ * @returns {void}
+ * @throws {ReleaseStepError} When a chosen changelog uses unknown sections.
+ */
+function assertChosenChangelogsAreValid(context) {
+  const invalid = context.chosen
+    .map(({ unit }) => ({ unit, unknownSections: readPackageUnreleased(path.join(context.repositoryRoot, unit.changelogPath)).unknownSections }))
+    .filter(({ unknownSections }) => unknownSections.length > 0);
+
+  if (invalid.length > 0) {
+    throw new ReleaseStepError(
+      `${invalid.map(({ unit, unknownSections }) => `${unit.changelogPath} ${UNRELEASED_HEADING} usa secciones no válidas: ${unknownSections.join(", ")}`).join("; ")}.`,
+      `No se escribió nada. Usá solo ${CHANGE_TYPES.map((type) => `### ${type}`).join(", ")} (o elegí "No publicar ahora" para ese paquete) y volvé a correr ${context.commands.createVersion}.`
+    );
+  }
+}
+
+/**
  * Asks (or takes from the flags) the version of every package with changes; a package can be left
  * out of this release.
  *
@@ -229,13 +280,43 @@ async function chooseVersionsStep(context) {
     }
 
     const version = bumpReleaseVersion(currentVersion, /** @type {"patch" | "minor" | "major"} */ (choice));
+    // As in single-package mode: a version not above the highest one on npm is either already
+    // published or would move `latest` back.
+    const highestPublished = findHighestStableVersion(packageSnapshot.npm?.publishedVersions ?? []);
+    if (highestPublished && compareReleaseVersions(version, highestPublished) <= 0) {
+      throw new ReleaseStepError(
+        `${unit.name}@${version} no es mayor que ${highestPublished}, la versión más alta publicada en npm.`,
+        `No se escribió nada. Llevá la versión de ${unit.manifestPath} a ${highestPublished} o elegí otro tipo de versión, y volvé a correr ${context.commands.createVersion}.`
+      );
+    }
     context.chosen.push({ unit, snapshot: packageSnapshot, version, tag: formatPackageTag(context.tagFormat, unit, version), commitSha: null });
     print(`${ICON.success} ${unit.name}: ${currentVersion} → ${paint(["bold", "cyan"], version)} (${choice})`);
+  }
+
+  const duplicatedTag = context.chosen.find((release, index) => context.chosen.findIndex(({ tag }) => tag === release.tag) !== index);
+  if (duplicatedTag) {
+    throw new ReleaseStepError(
+      `Dos paquetes del release generan el mismo tag ${duplicatedTag.tag} (tagFormat "${context.tagFormat}").`,
+      `No se escribió nada. Usá {name} en tagFormat, o carpetas de paquete con nombres distintos, y volvé a correr ${context.commands.createVersion}.`
+    );
+  }
+
+  for (const { tag } of context.chosen) {
+    await assertTagCanBeCreated(context, tag);
   }
 
   if (context.chosen.length === 0) {
     print(renderBox({ title: "Release cancelado", lines: [`${ICON.info} No elegiste ningún paquete: no se tocó nada.`], tone: BOX_TONE.info }));
     throw new ReleaseCancelledError();
+  }
+
+  assertChosenChangelogsAreValid(context);
+
+  // Checked again before the commit; here it stops the release before migrations are applied.
+  const versionFilesByPackage = await assertReleaseScope(context);
+  for (const { unit, version } of context.chosen) {
+    // Only validates: a missing, untracked or unmarked versionFiles entry stops the release before migrations.
+    await prepareVersionFileUpdates(context, versionFilesByPackage.get(unit.name) ?? [], version);
   }
 }
 
@@ -292,18 +373,28 @@ async function generateChangelogsStep(context) {
  *
  * @param {MonorepoContext} context - Context.
  * @returns {Map<string, string[]>} Files per package name.
- * @throws {ReleaseStepError} When an entry is outside every released package.
+ * @throws {ReleaseStepError} When an entry is outside every released package, or is the manifest or
+ *   changelog of its package (the release commit already writes them).
  */
 function groupVersionFilesByPackage(context) {
   /** @type {Map<string, string[]>} */
   const grouped = new Map();
 
   for (const filePath of context.config.versionFiles) {
-    const owner = context.units.find((unit) => filePath.startsWith(`${unit.directory}/`));
+    // With nested workspaces the file belongs to the deepest package that contains it.
+    const owner = context.units
+      .filter((unit) => filePath.startsWith(`${unit.directory}/`))
+      .reduce((/** @type {typeof context.units[number] | undefined} */ closest, unit) => (closest && closest.directory.length >= unit.directory.length ? closest : unit), undefined);
     if (!owner) {
       throw new ReleaseStepError(
         `${filePath} (versionFiles) no está dentro de ningún paquete publicado.`,
         `En un monorepo cada archivo toma la versión del paquete que lo contiene: movelo o sacalo de versionFiles y volvé a correr ${context.commands.createVersion}.`
+      );
+    }
+    if (filePath === owner.manifestPath || filePath === owner.changelogPath) {
+      throw new ReleaseStepError(
+        `${filePath} (versionFiles) es el package.json o el CHANGELOG.md de ${owner.name}: el commit de release ya lo escribe.`,
+        `Sacalo de versionFiles en beez-rp.config.(m)js y volvé a correr ${context.commands.createVersion}; no se tocó la versión.`
       );
     }
     grouped.set(owner.name, [...(grouped.get(owner.name) ?? []), filePath]);
@@ -313,24 +404,104 @@ function groupVersionFilesByPackage(context) {
 }
 
 /**
+ * Lists the paths of a `git diff --name-only --no-renames -z` run: both sides of a rename count.
+ *
+ * @param {MonorepoContext} context - Context.
+ * @param {string[]} diffArguments - Arguments after `git diff --name-only --no-renames -z`.
+ * @returns {Promise<string[]>} Paths relative to the root.
+ */
+async function listDiffPaths(context, diffArguments) {
+  return (await context.reader.git(["diff", "--name-only", "--no-renames", "-z", ...diffArguments])).split("\0").filter(Boolean);
+}
+
+/**
+ * Stops the release before writing anything when the release commit would carry changes that are
+ * not of the chosen packages: `git commit` takes the whole index, and the changelogs of every package
+ * are allowed to stay uncommitted during the plan.
+ *
+ * @param {MonorepoContext} context - Context.
+ * @param {ReadonlySet<string>} releasePaths - Manifests, changelogs and `versionFiles` of the chosen packages.
+ * @returns {Promise<void>}
+ * @throws {ReleaseStepError} When something outside those files is staged, differs from `HEAD` or is untracked (and not ignored), or the changelog of a package left out has changes.
+ */
+async function assertOnlyReleaseChanges(context, releasePaths) {
+  const foreignStaged = (await listDiffPaths(context, ["--cached"])).filter((filePath) => !releasePaths.has(filePath));
+  if (foreignStaged.length > 0) {
+    throw new ReleaseStepError(
+      `Hay cambios staged que no son del release y entrarían en su commit: ${foreignStaged.slice(0, MAX_LISTED_ITEMS).join(", ")}.`,
+      `No se escribió nada. Sacalos del índice con git restore --staged <archivo> (o commitealos aparte) y volvé a correr ${context.commands.createVersion}.`
+    );
+  }
+
+  const chosenNames = new Set(context.chosen.map(({ unit }) => unit.name));
+  const skippedChangelogs = new Set(context.units.filter((unit) => !chosenNames.has(unit.name)).map((unit) => unit.changelogPath));
+  // `git diff HEAD` does not list untracked files, yet `npm publish` packs them from the package directory.
+  const untrackedPaths = (await context.reader.git(["ls-files", "--others", "--exclude-standard", "-z"])).split(" ").filter(Boolean);
+  const changedPaths = [...(await listDiffPaths(context, ["HEAD"])), ...untrackedPaths];
+  const dirtySkippedChangelogs = changedPaths.filter((filePath) => skippedChangelogs.has(filePath));
+  if (dirtySkippedChangelogs.length > 0) {
+    throw new ReleaseStepError(
+      `Hay cambios sin commitear en el CHANGELOG de paquetes que no salen en este release: ${dirtySkippedChangelogs.join(", ")}.`,
+      `No se escribió nada. Commitealos aparte o guardalos con git stash, o elegí también esos paquetes, y volvé a correr ${context.commands.createVersion}.`
+    );
+  }
+
+  // Unstaged changes (for example, a check that rewrites a file) stay out of the commit but not out of what gets published.
+  // The plan blocks untracked files (or sets them aside with --ignore-local-changes), so an earlier step created these.
+  const foreignUntracked = untrackedPaths.filter((filePath) => !releasePaths.has(filePath));
+  if (foreignUntracked.length > 0) {
+    throw new ReleaseStepError(
+      `Un paso anterior (por ejemplo, un check) creó ${foreignUntracked.slice(0, MAX_LISTED_ITEMS).join(", ")}, que no son del release: quedarían fuera del commit pero se publicarían.`,
+      `No se escribió nada. Revisá el check, borralos o agregalos a .gitignore, y volvé a correr ${context.commands.createVersion}.`
+    );
+  }
+
+  const foreignChanged = changedPaths.filter((filePath) => !releasePaths.has(filePath));
+  if (foreignChanged.length > 0) {
+    throw new ReleaseStepError(
+      `Un paso anterior (por ejemplo, un check) modificó ${foreignChanged.slice(0, MAX_LISTED_ITEMS).join(", ")}, que no son del release: se publicarían sin estar commiteados.`,
+      `No se escribió nada. Revisá el check o commiteá esos cambios aparte, y volvé a correr ${context.commands.createVersion}.`
+    );
+  }
+}
+
+/**
+ * Checks that only the files of the chosen packages would enter the release commit.
+ *
+ * @param {MonorepoContext} context - Context.
+ * @returns {Promise<Map<string, string[]>>} `versionFiles` per package name.
+ * @throws {ReleaseStepError} When a `versionFiles` entry has no package, or other changes would enter the commit.
+ */
+async function assertReleaseScope(context) {
+  const versionFilesByPackage = groupVersionFilesByPackage(context);
+  await assertOnlyReleaseChanges(
+    context,
+    new Set(context.chosen.flatMap(({ unit }) => [unit.manifestPath, unit.changelogPath, ...(versionFilesByPackage.get(unit.name) ?? [])]))
+  );
+  return versionFilesByPackage;
+}
+
+/**
  * Writes the new versions, releases every chosen changelog and creates the release commit with an
- * annotated tag per package. Every file is computed before anything is written.
+ * annotated tag per package. Every file is computed before anything is written, and the commit
+ * reuses the single-package one: literal staging, rollback on failure and the prepared-tree check.
  *
  * @param {MonorepoContext} context - Context.
  * @returns {Promise<void>}
  */
 async function bumpPackagesStep(context) {
   const today = new Date().toISOString().split("T")[0];
-  const versionFilesByPackage = groupVersionFilesByPackage(context);
-  /** @type {{ filePath: string, content: string }[]} */
-  const writes = [];
+  const versionFilesByPackage = await assertReleaseScope(context);
+  await assertReleaseFilesMatchHead(context, [...context.chosen.map(({ unit }) => unit.manifestPath), ...context.config.versionFiles]);
+  /** @type {import("../create-version/run.js").ReleaseFileUpdate[]} */
+  const releaseFiles = [];
 
   for (const { unit, version } of context.chosen) {
-    const changelogAbsolutePath = path.join(context.repositoryRoot, unit.changelogPath);
+    const changelog = readReleaseFile(context, unit.changelogPath, unit.changelogPath);
     let releasedChangelog;
 
     try {
-      releasedChangelog = releaseUnreleased(readFileSync(changelogAbsolutePath, "utf8"), version, today);
+      releasedChangelog = releaseUnreleased(changelog.text, version, today);
     } catch (error) {
       throw new ReleaseStepError(
         `${unit.changelogPath} no está listo: ${error instanceof Error ? error.message : String(error)}`,
@@ -339,29 +510,17 @@ async function bumpPackagesStep(context) {
       );
     }
 
-    const manifest = readFileSync(path.join(context.repositoryRoot, unit.manifestPath), "utf8");
-    writes.push(
-      { filePath: unit.manifestPath, content: manifest.replace(PACKAGE_VERSION_FIELD_PATTERN, `$1${version}$2`) },
-      { filePath: unit.changelogPath, content: releasedChangelog },
-      ...prepareVersionFileUpdates(context, versionFilesByPackage.get(unit.name) ?? [], version)
+    const manifest = readReleaseFile(context, unit.manifestPath, unit.manifestPath);
+    releaseFiles.push(
+      { filePath: unit.manifestPath, originalBytes: manifest.originalBytes, content: rewriteManifestVersion(context, unit.manifestPath, manifest.text, version) },
+      { filePath: unit.changelogPath, originalBytes: changelog.originalBytes, content: releasedChangelog },
+      ...(await prepareVersionFileUpdates(context, versionFilesByPackage.get(unit.name) ?? [], version))
     );
-  }
-
-  for (const { filePath, content } of writes) {
-    writeFileSync(path.join(context.repositoryRoot, filePath), content);
   }
 
   const ordered = sortByPublicationOrder(context.chosen.map((release) => ({ ...release, name: release.unit.name, publishedDependencies: release.unit.publishedDependencies })));
   const subject = buildMonorepoReleaseSubject(ordered.map(({ name, version }) => ({ name, version })));
-  const filePaths = writes.map(({ filePath }) => filePath);
-
-  await runGitStep(context, ["add", "--", ...filePaths], "No se pudieron stagear los archivos del release", "Revisá git status.");
-  await runGitStep(
-    context,
-    ["commit", "--quiet", "-m", subject],
-    "El commit de release falló",
-    `Corregí el error, descartá los cambios con git checkout -- ${filePaths.join(" ")} y volvé a correr ${context.commands.createVersion}.`
-  );
+  await commitReleaseFiles(context, releaseFiles, subject);
 
   const commitSha = await context.reader.git(["rev-parse", "HEAD"]);
   for (const release of context.chosen) {
@@ -432,8 +591,14 @@ async function pushPackagesStep(context) {
   const releases = listRunReleases(context);
 
   for (const release of releases) {
-    if ((await context.reader.tryGit(["rev-parse", "--verify", "--quiet", `refs/tags/${release.tag}`])) === null) {
+    const taggedSha = await context.reader.tryGit(["rev-parse", "--verify", "--quiet", `refs/tags/${release.tag}^{commit}`]);
+    if (taggedSha === null) {
       await runGitStep(context, ["tag", "-a", release.tag, "-m", `${release.name}@${release.version}`, release.commitSha], `No se pudo crear el tag ${release.tag}`, `Revisá git tag --list ${release.tag}.`);
+    } else if (taggedSha !== release.commitSha) {
+      throw new ReleaseStepError(
+        `El tag local ${release.tag} apunta a ${taggedSha.slice(0, SHORT_SHA_LENGTH)} y el commit de release de ${release.name}@${release.version} es ${release.commitSha.slice(0, SHORT_SHA_LENGTH)}.`,
+        `No se subió nada. Revisalo con git show ${release.tag}; si sobra, borralo con git tag -d ${release.tag} y volvé a correr ${context.commands.createVersion}.`
+      );
     }
   }
 
@@ -467,11 +632,6 @@ async function resolvePackageArtifact(context, packageRoot, manifest, version) {
   const { artifact } = context.config;
   if (!artifact) {
     return null;
-  }
-
-  const rewrites = findPnpmPackRewrites(manifest);
-  if (rewrites.length > 0) {
-    throw new ReleaseStepError(`${String(manifest.name)} depende de reescrituras del package manager al empaquetar: ${rewrites.join("; ")}.`, "No se publicó nada. Reemplazá workspace:/catalog:/jsr: por rangos de versión.");
   }
 
   const release = { version, packageName: String(manifest.name) };
@@ -514,16 +674,31 @@ async function publishPackage(context, checkoutRoot, release) {
     return;
   }
 
+  // npm publishes the checkout of the release commit: no tracked file may differ from it, and npm
+  // would upload as they are the specifiers only pnpm rewrites when packing.
+  await assertNoTrackedChanges({ reader: createGitReader(checkoutRoot), commands: context.commands });
   const manifest = JSON.parse(readFileSync(path.join(packageRoot, PACKAGE_MANIFEST_FILE), "utf8"));
+  if (manifest.name !== release.name) {
+    throw new ReleaseStepError(
+      `El commit de release ${release.tag} publica ${String(manifest.name)} desde ${unit.manifestPath}, pero el paquete ahora se llama ${release.name}.`,
+      `No se publicó nada. Publicá ese release a mano con su nombre original, o dalo por descartado con --${CREATE_VERSION_FLAG.skipUnpublished}.`
+    );
+  }
+  const rewrites = findPnpmPackRewrites(manifest);
+  if (rewrites.length > 0) {
+    throw new ReleaseStepError(`${release.name} depende de reescrituras del package manager al empaquetar: ${rewrites.join("; ")}.`, "No se publicó nada. Reemplazá workspace:/catalog:/jsr: por rangos de versión.");
+  }
+
   let registryUrl;
   try {
-    registryUrl = await resolvePublishRegistry(manifest, checkoutRoot);
+    // Resolved in the repository, as the diagnosis did: a temporary release checkout lacks an untracked project .npmrc.
+    registryUrl = await resolvePublishRegistry(manifest, context.repositoryRoot);
   } catch (error) {
     throw new ReleaseStepError(`No se puede publicar ${release.name}: ${error instanceof Error ? error.message : String(error)}.`, "Corregí el registry (publishConfig) y volvé a correr el comando.");
   }
 
   const artifactPath = await resolvePackageArtifact(context, packageRoot, manifest, release.version);
-  const result = await publishToNpm(context.repositoryRoot, { authConfigLine: buildNpmAuthConfigLine(registryUrl), artifactPath, packageRoot });
+  const result = await publishToNpm(context.repositoryRoot, { authConfigLine: buildNpmAuthConfigLine(registryUrl), artifactPath, packageRoot, registryUrl });
 
   if (result.missingToken) {
     throw new ReleaseStepError(`Falta ${NPM_TOKEN_VARIABLE} para publicar ${release.name}@${release.version}.`, `Definilo en ${NPM_TOKEN_LOCATIONS} y corré ${context.commands.createVersion}: retoma solo lo que falta publicar.`);
@@ -635,11 +810,14 @@ function renderMonorepoSummary(context, remoteUrl, startedAt) {
     lines.push(`${ICON.info} ${paint("bold", "Tags")}  https://github.com/${githubRepository}/tags`);
   }
   for (const line of context.config.summary) {
-    lines.push(`${ICON.info} ${line}`);
+    const perPackage = line.includes(SUMMARY_VERSION_PLACEHOLDER) || line.includes(SUMMARY_PACKAGE_PLACEHOLDER);
+    const expanded = perPackage ? releases.map(({ name, version }) => line.replaceAll(SUMMARY_VERSION_PLACEHOLDER, version).replaceAll(SUMMARY_PACKAGE_PLACEHOLDER, name)) : [line];
+    lines.push(...expanded.map((expandedLine) => `${ICON.info} ${expandedLine}`));
   }
   lines.push("", paint("gray", `Tiempo total: ${formatDuration(measureActiveMs(startedAt))} (sin contar la espera de tus respuestas)`));
 
-  return renderBox({ title: `${ICON.rocket} ${releases.length} paquete(s) publicados`, lines, tone: BOX_TONE.success });
+  const outcome = context.published.length > 0 ? "publicados" : "releaseados (sin publicar)";
+  return renderBox({ title: `${ICON.rocket} ${releases.length} paquete(s) ${outcome}`, lines, tone: BOX_TONE.success });
 }
 
 /**
@@ -744,7 +922,7 @@ export async function runMonorepoCreateVersion({ repositoryRoot, config, options
       trackNpm: config.registry === RELEASE_REGISTRY.npm,
       checkMigrations: migrations ? () => migrations.check(createHookContext(repositoryRoot, reader, null)) : null,
       checkNpmAuthFor: (snapshot) =>
-        config.publish === NPM_PUBLISHER ? listPackagesToAuthenticate(buildMonorepoPlan(snapshot, capabilities, { tagFormat, ignoreLocalChanges: true })) : [],
+        config.publish === NPM_PUBLISHER ? listPackagesToAuthenticate(buildMonorepoPlan(snapshot, capabilities, { tagFormat, ignoreLocalChanges: true, skipUnpublished: options.skipUnpublished })) : [],
       onProgress: (label) => spinner.update(label),
     });
     spinner.succeed("Diagnóstico completo");
@@ -764,10 +942,10 @@ export async function runMonorepoCreateVersion({ repositoryRoot, config, options
   print(renderBanner({ projectName: config.projectName ?? rootName, publishedLabel: `${units.length} paquete(s)` }));
   print(renderMonorepoDiagnosis(state, repositoryRoot));
 
-  let plan = buildMonorepoPlan(state, capabilities, { tagFormat, ignoreLocalChanges: options.ignoreLocalChanges });
+  let plan = buildMonorepoPlan(state, capabilities, { tagFormat, ignoreLocalChanges: options.ignoreLocalChanges, skipUnpublished: options.skipUnpublished });
 
   if (plan.blockers.length > 0 && !options.ignoreLocalChanges && !options.dryRun && process.stdin.isTTY) {
-    const planIgnoringChanges = buildMonorepoPlan(state, capabilities, { tagFormat, ignoreLocalChanges: true });
+    const planIgnoringChanges = buildMonorepoPlan(state, capabilities, { tagFormat, ignoreLocalChanges: true, skipUnpublished: options.skipUnpublished });
     if (planIgnoringChanges.blockers.length === 0 && planIgnoringChanges.steps.length > 0) {
       if (!(await askToIgnoreLocalChanges(listMonorepoChangesToSetAside(state, planIgnoringChanges.mode)))) {
         print(`${ICON.info} Release cancelado: no se tocó nada. Commiteá o guardá los cambios y volvé a correr ${commands.createVersion}.`);

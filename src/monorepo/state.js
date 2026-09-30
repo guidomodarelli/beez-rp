@@ -27,6 +27,7 @@ import {
   readMigrations,
   readRepositorySnapshot,
 } from "../create-version/state.js";
+import { parseMonorepoReleaseSubject } from "./release-commit.js";
 import { formatPackageTag } from "./workspaces.js";
 
 /**
@@ -68,12 +69,18 @@ import { formatPackageTag } from "./workspaces.js";
  * Lists the tags `origin` has, so pending publications only resume releases whose tag reached it.
  *
  * @param {GitReader} reader - Git reader.
- * @returns {Promise<Set<string>>} Tag names; empty when `origin` cannot be read.
+ * @returns {Promise<Set<string>>} Tag names.
+ * @throws {Error} When `origin` cannot be read: an empty set would hide tags that already reached it.
  */
 async function readRemoteTags(reader) {
   const output = await reader.tryGit(["ls-remote", "--tags", "--refs", RELEASE_REMOTE]);
+  if (output === null) {
+    throw new Error(
+      `No se pudieron listar los tags de ${RELEASE_REMOTE} (git ls-remote --tags ${RELEASE_REMOTE} falló): sin ellos no se sabe qué releases llegaron a ${RELEASE_REMOTE}. Revisá la conexión y el acceso a ${RELEASE_REMOTE} y volvé a correr el comando.`
+    );
+  }
   return new Set(
-    (output ?? "")
+    output
       .split("\n")
       .map((line) => line.trim().split(/\s+/u)[1] ?? "")
       .filter((ref) => ref.startsWith("refs/tags/"))
@@ -90,7 +97,8 @@ async function readRemoteTags(reader) {
  * @param {ReleaseUnit} unit - Released package.
  * @param {string} tagFormat - Tag format.
  * @param {ReadonlySet<string>} remoteTags - Tags on `origin`.
- * @returns {Promise<PackageLastRelease | null>} Last release, or `null` without history.
+ * @returns {Promise<PackageLastRelease | null>} Last release, or `null` without history or when the
+ *   newest version change is the untagged commit that added the package or leaves it at `0.0.0`.
  */
 export async function findLastPackageRelease(reader, revision, unit, tagFormat, remoteTags) {
   const sha = await reader.tryGit(["log", "-1", "--format=%H", `-G${VERSION_FIELD_CHANGE_PATTERN}`, revision, "--", unit.manifestPath]);
@@ -107,6 +115,12 @@ export async function findLastPackageRelease(reader, revision, unit, tagFormat, 
   const subject = await reader.tryGit(["log", "-1", "--format=%s", sha]);
   const tag = version ? formatPackageTag(tagFormat, unit, version) : null;
   const taggedSha = tag ? await reader.tryGit(["rev-parse", "--verify", "--quiet", `refs/tags/${tag}^{commit}`]) : null;
+  // The commit that adds the package carries its initial version without releasing it: only its own tag,
+  // or a release commit that lists it (its tag may follow an older tagFormat), makes it a release.
+  const listedInReleaseCommit = parseMonorepoReleaseSubject(subject)?.some((release) => release.name === unit.name && release.version === version) ?? false;
+  if (taggedSha !== sha && !listedInReleaseCommit && (await reader.tryGit(["cat-file", "-e", `${sha}^:${unit.manifestPath}`])) === null) {
+    return null;
+  }
   return { sha, version, subject, tag, tagged: taggedSha === sha, tagOnOrigin: tag !== null && remoteTags.has(tag) };
 }
 
