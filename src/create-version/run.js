@@ -1085,6 +1085,17 @@ async function listPathsModifiedDuringReleaseCommit(context, fileUpdates, pathsD
 }
 
 /**
+ * Lists the untracked files Git does not ignore (`git status` shows them and `npm publish` without
+ * a prepared archive packs them), to spot the ones a commit hook creates.
+ *
+ * @param {ReleaseContext} context - Release context.
+ * @returns {Promise<string[]>} Repository-relative paths, separated with `/`.
+ */
+async function listUntrackedPaths(context) {
+  return (await context.reader.git(["ls-files", "--others", "--exclude-standard", "-z"])).split("\0").filter(Boolean);
+}
+
+/**
  * Builds the failure of a release commit that differs from the prepared index (a hook changed a
  * release file or staged another change).
  *
@@ -1114,8 +1125,23 @@ function modifiedDuringReleaseCommitError(version, modifiedPaths) {
 }
 
 /**
+ * Builds the failure of a release commit after which a hook left new untracked files, which the
+ * commit does not hold but `npm publish` of the working tree would pack.
+ *
+ * @param {string} version - Version of the undone commit.
+ * @param {string[]} createdPaths - Untracked paths that did not exist before the commit.
+ * @returns {ReleaseStepError} Failure.
+ */
+function createdDuringReleaseCommitError(version, createdPaths) {
+  return new ReleaseStepError(
+    `Después del commit de versión ${version} aparecieron archivos sin trackear: ${createdPaths.slice(0, MAX_LISTED_ITEMS).join(", ")} (por ejemplo, los creó un hook pre-commit o commit-msg): el release los publicaría aunque no están en el commit; no se creó el tag ${toReleaseTag(version)}.`,
+    "Esos archivos quedaron donde estaban (revisalos con git status: commitealos en una rama, agregalos a .gitignore o borralos); los cambios de package.json, CHANGELOG.md y versionFiles se descartaron. Evitá que los hooks creen archivos durante el commit de release."
+  );
+}
+
+/**
  * Undoes a release commit before it is tagged (a hook changed a release file, staged another
- * change or left files modified): the commit is dropped with `git reset --soft`, so changes outside
+ * change, left files modified or created untracked files): the commit is dropped with `git reset --soft`, so changes outside
  * the release files stay for the user to review, and the release files go back to their content
  * and staging before the release.
  *
@@ -1262,6 +1288,8 @@ async function bumpVersionStep(context) {
   // Tracked changes that exist before the release (such as a CHANGELOG.md kept in the working tree),
   // so only what the commit hooks leave modified stops the release.
   const pathsDifferentBeforeRelease = await listPathsDifferentFromHead(context.reader);
+  // Untracked files that exist before the release, so only the ones a commit hook creates stop it.
+  const untrackedPathsBeforeRelease = new Set(await listUntrackedPaths(context));
   writeReleaseFiles(context, releaseFileUpdates);
 
   const tag = toReleaseTag(nextRelease.version);
@@ -1297,6 +1325,12 @@ async function bumpVersionStep(context) {
 
   if (modifiedPaths.length > 0) {
     throw await undoReleaseCommit(context, releaseFileUpdates, indexTree, modifiedDuringReleaseCommitError(nextRelease.version, modifiedPaths));
+  }
+
+  const createdPaths = (await listUntrackedPaths(context)).filter((untrackedPath) => !untrackedPathsBeforeRelease.has(untrackedPath));
+
+  if (createdPaths.length > 0) {
+    throw await undoReleaseCommit(context, releaseFileUpdates, indexTree, createdDuringReleaseCommitError(nextRelease.version, createdPaths));
   }
 
   await verifyCommittedVersionFiles(context, nextRelease.version);
@@ -1844,7 +1878,8 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   // loaded for the first time after this point comes from the working tree without the set-aside
   // changes (tracked files hidden with skip-worktree or assume-unchanged already block the
   // diagnosis); a module a step imports for the first time must pass the late module guard below.
-  const recheckedPlan = buildReleasePlan({ ...state, ...(await inspectConfigModules(reader, repositoryRoot)) }, capabilities, { ...planOptions, ignoreLocalChanges: options.ignoreLocalChanges });
+  const { configModules, uncommittedConfigModules, inspectedModuleUrls } = await inspectConfigModules(reader, repositoryRoot);
+  const recheckedPlan = buildReleasePlan({ ...state, configModules, uncommittedConfigModules }, capabilities, { ...planOptions, ignoreLocalChanges: options.ignoreLocalChanges });
 
   if (recheckedPlan.blockers.length > 0) {
     print(renderPlan(recheckedPlan));
@@ -1867,11 +1902,12 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   }
 
   try {
-    // From here on, a module the steps load for the first time must pass the same rules as the
+    // From here on, a module the steps resolve must pass the same rules as the
     // inspection above: a repository file tracked, identical to HEAD (listed after setting local
     // changes aside), without filter nor index flags and named by its full path, or an installed
-    // dependency or beez-rp itself outside the repository.
-    guardLateModules(repositoryRoot, await listCleanTrackedFiles(reader));
+    // dependency or beez-rp itself outside the repository. Only the modules of the configuration
+    // graph inspected above skip it once cached; any other module this process loaded is checked.
+    guardLateModules(repositoryRoot, await listCleanTrackedFiles(reader), inspectedModuleUrls);
     return await runPlanSteps(context, plan, remoteUrl, startedAt);
   } finally {
     liftLateModuleGuard();

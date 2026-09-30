@@ -2538,6 +2538,65 @@ describe("beez-rp create-version command", () => {
   );
 
   it(
+    "should undo the release commit without tagging it when a commit hook creates an untracked file, and leave that file in place",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", "};"]);
+      const manifest = readFileSync(path.join(repositoryRoot, "package.json"), "utf8");
+      // A hook that writes a report next to the sources: npm publish of the working tree would pack it.
+      writeFileSync(path.join(repositoryRoot, ".git", "hooks", "pre-commit"), '#!/bin/sh\necho "report" > hook-report.txt\n', { mode: 0o755 });
+
+      const release = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(release.status, release.output).toBe(1);
+      expect(flattenOutput(release.output)).toContain("Después del commit de versión 0.2.0 aparecieron archivos sin trackear: hook-report.txt");
+      expect(runGit(["log", "-1", "--format=%s", "main"], repositoryRoot)).toBe("chore: configure releases");
+      expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+      expect(runGit(["log", "-1", "--format=%s", "main"], remoteRoot)).toBe("chore: configure releases");
+      expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe("?? hook-report.txt");
+      expect(readFileSync(path.join(repositoryRoot, "hook-report.txt"), "utf8")).toBe("report\n");
+      expect(readFileSync(path.join(repositoryRoot, "package.json"), "utf8")).toBe(manifest);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should stop a release hook that imports a repository module the command loaded outside the configuration graph that Git ignores, even though Node cached it",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      for (const directory of ["bin", "src"]) {
+        cpSync(path.join(BEEZ_RP_ROOT, directory), path.join(repositoryRoot, directory), { recursive: true });
+        writeFileSync(path.join(repositoryRoot, directory, "package.json"), `${JSON.stringify({ type: "module" })}\n`);
+      }
+      // bin/beez-rp.js loads src/constants/build-gate.js before reading the configuration, which never imports it.
+      writeFileSync(path.join(repositoryRoot, ".gitignore"), "src/constants/build-gate.js\n");
+      pushConfiguration(repositoryRoot, [
+        "export default {",
+        '  changelog: { audience: "equipo" },',
+        "  checks: false,",
+        "  prepare: async () => {",
+        '    await import("./src/constants/build-gate.js");',
+        "  },",
+        "};",
+      ]);
+
+      const result = spawnSync(process.execPath, [path.join(repositoryRoot, "bin", "beez-rp.js"), "create-version", "--bump", "minor"], {
+        cwd: repositoryRoot,
+        encoding: "utf8",
+        env: commandEnvironment(),
+      });
+      const output = `${result.stdout}${result.stderr}`;
+
+      expect(result.status, output).toBe(1);
+      expect(flattenOutput(output)).toContain("beez-rp no carga src/constants/build-gate.js durante el release: solo corren archivos trackeados idénticos a HEAD");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+      expect(runGit(["log", "-1", "--format=%s", "main"], remoteRoot)).toBe("chore: configure releases");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
     "should stop a release hook that imports, only when it runs, a repository module Git ignores, before evaluating it",
     () => {
       const { repositoryRoot, remoteRoot } = createReleasedRepository();

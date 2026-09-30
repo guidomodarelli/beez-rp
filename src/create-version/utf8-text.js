@@ -7,8 +7,14 @@
  * @module create-version/utf8-text
  */
 
-/** Byte that ends a line; it never appears inside a multi-byte UTF-8 sequence. */
-const LINE_FEED_BYTE = 0x0a;
+import { LINE_TERMINATOR_BOUNDARY_PATTERN } from "../constants/version-files.js";
+
+/**
+ * Decoder that maps each byte to one character, so a line split by characters keeps the byte
+ * length of each line. The line terminators (`\n`, `\r`) never appear inside a multi-byte UTF-8
+ * sequence, so they split lines the same way before decoding.
+ */
+const SINGLE_BYTE_DECODER = new TextDecoder("latin1");
 
 /** Decoder that throws on invalid UTF-8 and keeps a leading byte order mark in the text. */
 const STRICT_UTF8_DECODER = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
@@ -36,9 +42,9 @@ function findFirstInvalidLine(bytes) {
   let lineStart = 0;
   let lineNumber = 1;
 
-  while (lineStart < bytes.length) {
-    const lineFeedIndex = bytes.indexOf(LINE_FEED_BYTE, lineStart);
-    const lineEnd = lineFeedIndex === -1 ? bytes.length : lineFeedIndex + 1;
+  // Same line terminators as the version markers: `\n`, `\r\n` and a lone `\r`.
+  for (const line of SINGLE_BYTE_DECODER.decode(bytes).split(LINE_TERMINATOR_BOUNDARY_PATTERN)) {
+    const lineEnd = lineStart + line.length;
 
     try {
       STRICT_UTF8_DECODER.decode(bytes.subarray(lineStart, lineEnd));

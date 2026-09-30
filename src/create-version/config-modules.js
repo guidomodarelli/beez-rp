@@ -105,6 +105,43 @@ function collectReachableModules(trace, configRequestedUrl) {
 }
 
 /**
+ * Finds the graph of this configuration only, under any spelling of the repository root: other
+ * configurations loaded in this process (another repository) are not reachable from it.
+ *
+ * @param {ModuleTrace} trace - Trace of this process.
+ * @param {string[]} repositoryRoots - Spellings of the repository root (as given and real).
+ * @param {string} configFile - Configuration file, relative to the root.
+ * @returns {ReturnType<typeof collectReachableModules>} Graph of the configuration, or `null` when
+ *   this process never imported it after the trace started.
+ */
+function findConfigGraph(trace, repositoryRoots, configFile) {
+  return repositoryRoots.map((root) => collectReachableModules(trace, pathToFileURL(path.join(root, configFile)).href)).find((graph) => graph !== null) ?? null;
+}
+
+/**
+ * Lists the `file:` URLs of the modules reachable from the configuration file, the only ones
+ * {@link listConfigModules} lists for the inspection that compares them with `HEAD` (or allows them
+ * as installed dependencies or beez-rp itself). Other modules this process loaded (outside that
+ * graph) were never inspected, so the late module guard must not take them as safe.
+ *
+ * @param {string} repositoryRoot - Repository root.
+ * @param {string} configFile - Configuration file the run loaded, relative to the root.
+ * @returns {string[]} `file:` URLs of the configuration graph, empty when the trace never started
+ *   or the configuration was not loaded after it started.
+ */
+export function listConfigModuleUrls(repositoryRoot, configFile) {
+  const moduleTraceState = readModuleTrace();
+
+  if (!moduleTraceState) {
+    return [];
+  }
+
+  const repositoryRoots = [...new Set([path.resolve(repositoryRoot), realpathSync.native(repositoryRoot)])];
+  const configGraph = findConfigGraph(moduleTraceState.trace, repositoryRoots, configFile);
+  return [...(configGraph?.moduleUrls ?? [])].filter((moduleUrl) => moduleUrl.startsWith(FILE_URL_SCHEME));
+}
+
+/**
  * Resolves the directory of a path through symbolic links and, on Windows, to its real casing,
  * keeping the last segment as it is: the module URLs and the repository root then compare equal
  * whatever spelling each one used, and a module that is itself a symbolic link keeps its own path
@@ -231,12 +268,8 @@ export function listConfigModules(repositoryRoot, configFile) {
     }
   };
 
-  const { trace, startedExplicitly } = moduleTraceState;
-  // The graph of this configuration only: other configurations loaded in this process (another
-  // repository) are not reachable from it.
-  const configGraph = repositoryRoots
-    .map((root) => collectReachableModules(trace, pathToFileURL(path.join(root, configFile)).href))
-    .find((graph) => graph !== null);
+  const { startedExplicitly } = moduleTraceState;
+  const configGraph = findConfigGraph(moduleTraceState.trace, repositoryRoots, configFile);
 
   // Other schemes (`data:`, `node:`) only lead to files; they are not files themselves.
   for (const moduleUrl of configGraph?.moduleUrls ?? []) {

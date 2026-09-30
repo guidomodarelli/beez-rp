@@ -69,12 +69,14 @@ const BEEZ_RP_PACKAGE_ROOT = realpathSync.native(fileURLToPath(new URL("../..", 
 let moduleTraceState = null;
 
 /**
- * @typedef {{ repositoryRoots: string[], canonicalRoot: string, committedBlobIdByPath: Map<string, string>, loadedModuleUrls: Set<string> }} LateModuleGuard
+ * @typedef {{ repositoryRoots: string[], canonicalRoot: string, committedBlobIdByPath: Map<string, string>, inspectedModuleUrls: Set<string> }} LateModuleGuard
  *   Roots of the repository (as given and its real path); the tracked paths (relative to the root,
  *   separated with `/`) whose working-tree file was safe to load when the guard started (identical
  *   to `HEAD`, without a `filter` attribute nor an index flag that hides its changes), with their
- *   committed blob id; and the module URLs this process had already resolved by then, which the
- *   inspection before the release steps already compared with `HEAD` and Node never reads again.
+ *   committed blob id; and the URLs of the modules of the configuration graph, which the inspection
+ *   before the release steps already compared with `HEAD` and Node never reads again. Any other
+ *   module this process already loaded (outside that graph) was never inspected, so it goes through
+ *   the whole check even when Node would take it from its cache.
  */
 
 /** Guard active while the release steps run; `null` while modules load freely. */
@@ -137,13 +139,15 @@ function hashWorkingTreeFile(repositoryRoot, repositoryPath) {
 }
 
 /**
- * Stops a module that loads for the first time while the guard is active unless the inspection
- * before the release steps would have let it run: a repository module (outside `node_modules`)
+ * Stops a module a step resolves while the guard is active (loaded for the first time, or taken from
+ * the cache outside the inspected graph) unless the inspection before the release steps would have
+ * let it run: a repository module (outside `node_modules`)
  * must be one of the clean tracked files, named by its own full path (no symbolic link on the way,
  * no added extension, folder index nor `#alias`) whose content still hashes to its committed blob
  * (an earlier step, such as a check or a hook, may have rewritten it after the guard started), and
  * a module outside the repository must pass
- * {@link isAllowedExternalModule}. A hook that imports a helper only when it runs would otherwise
+ * {@link isAllowedExternalModule}. Only a module of the inspected configuration graph skips it,
+ * even if Node already cached any other one. A hook that imports a helper only when it runs would otherwise
  * run bytes nobody compared with `HEAD`. Throwing from the resolution keeps Node from evaluating it.
  *
  * @param {string} moduleUrl - URL Node resolved, with the real path of a file.
@@ -151,7 +155,7 @@ function hashWorkingTreeFile(repositoryRoot, repositoryPath) {
  * @throws {Error} When the active guard does not allow the module.
  */
 function requireAllowedLateModule(moduleUrl, requestedUrl) {
-  if (!lateModuleGuard || !moduleUrl.startsWith(FILE_URL_SCHEME) || lateModuleGuard.loadedModuleUrls.has(moduleUrl)) {
+  if (!lateModuleGuard || !moduleUrl.startsWith(FILE_URL_SCHEME) || lateModuleGuard.inspectedModuleUrls.has(moduleUrl)) {
     return;
   }
 
@@ -287,8 +291,8 @@ export function ensureTracingConfigModules() {
 }
 
 /**
- * Makes the module hook reject, until {@link liftLateModuleGuard}, every module loaded for the
- * first time that the inspection before the release steps would not allow (see
+ * Makes the module hook reject, until {@link liftLateModuleGuard}, every module a step resolves
+ * (outside the inspected configuration graph) that the inspection before the release steps would not allow (see
  * {@link requireAllowedLateModule}). The run calls it after its last comparison of the loaded
  * modules with `HEAD` and after setting local changes aside, right before the release steps run
  * configuration code (hooks, `migrations.apply`) that may import more modules. Without
@@ -298,11 +302,13 @@ export function ensureTracingConfigModules() {
  * @param {Map<string, string>} committedBlobIdByPath - Committed blob id of each tracked path safe to
  *   load (identical to `HEAD`, without a `filter` attribute nor index flags), keyed by its path
  *   relative to the root and separated with `/`.
+ * @param {Iterable<string>} inspectedModuleUrls - URLs of the modules of the configuration graph
+ *   that the inspection before the release steps compared with `HEAD` (or allowed as installed
+ *   dependencies or beez-rp itself): the only already loaded modules that skip the check.
  */
-export function guardLateModules(repositoryRoot, committedBlobIdByPath) {
+export function guardLateModules(repositoryRoot, committedBlobIdByPath, inspectedModuleUrls) {
   const canonicalRoot = realpathSync.native(repositoryRoot);
-  const loadedModuleUrls = new Set([...(moduleTraceState?.trace.moduleUrlsByParent.values() ?? [])].flatMap((moduleUrls) => [...moduleUrls]));
-  lateModuleGuard = { repositoryRoots: [...new Set([path.resolve(repositoryRoot), canonicalRoot])], canonicalRoot, committedBlobIdByPath, loadedModuleUrls };
+  lateModuleGuard = { repositoryRoots: [...new Set([path.resolve(repositoryRoot), canonicalRoot])], canonicalRoot, committedBlobIdByPath, inspectedModuleUrls: new Set(inspectedModuleUrls) };
 }
 
 /** Lifts the guard of {@link guardLateModules} once the release steps end. */

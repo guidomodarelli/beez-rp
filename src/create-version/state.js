@@ -36,7 +36,7 @@ import {
 } from "../constants/create-version.js";
 import { toReleaseTag } from "../versions.js";
 import { findCreateVersionConfigFile } from "./config.js";
-import { listConfigModules } from "./config-modules.js";
+import { listConfigModules, listConfigModuleUrls } from "./config-modules.js";
 import { listFilteredFiles } from "./git-attributes.js";
 import { listUncheckedIndexPaths } from "./git-status.js";
 import { listFilesDifferentFromHead } from "./head-files.js";
@@ -314,20 +314,22 @@ export async function listHiddenLocalChanges(reader, repositoryRoot) {
  *
  * @param {GitReader} reader - Git reader.
  * @param {string} repositoryRoot - Repository root.
- * @returns {Promise<{ configModules: ConfigModuleGraph | null, uncommittedConfigModules: HeadFileDifference[] }>} Module
- *   graph (`null` without configuration) and the modules that differ from `HEAD`.
+ * @returns {Promise<{ configModules: ConfigModuleGraph | null, uncommittedConfigModules: HeadFileDifference[], inspectedModuleUrls: string[] }>} Module
+ *   graph (`null` without configuration), the modules that differ from `HEAD`, and the `file:`
+ *   URLs of the modules this inspection covered (the graph of the configuration), the only
+ *   already loaded modules the late module guard may take as compared with `HEAD`.
  */
 export async function inspectConfigModules(reader, repositoryRoot) {
   const configFile = findCreateVersionConfigFile(repositoryRoot);
 
   if (!configFile) {
-    return { configModules: null, uncommittedConfigModules: [] };
+    return { configModules: null, uncommittedConfigModules: [], inspectedModuleUrls: [] };
   }
 
   const configModules = listConfigModules(repositoryRoot, configFile);
 
   if (!configModules.loaded) {
-    return { configModules, uncommittedConfigModules: [] };
+    return { configModules, uncommittedConfigModules: [], inspectedModuleUrls: [] };
   }
 
   /** @type {HeadFileDifference[]} */
@@ -343,7 +345,7 @@ export async function inspectConfigModules(reader, repositoryRoot) {
     ...externalModules,
     ...implicitModules,
   ];
-  return { configModules, uncommittedConfigModules };
+  return { configModules, uncommittedConfigModules, inspectedModuleUrls: listConfigModuleUrls(repositoryRoot, configFile) };
 }
 
 /**
