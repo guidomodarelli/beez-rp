@@ -90,7 +90,7 @@ async function readRemoteTags(reader) {
 
 /**
  * Finds the last release of a package on a revision: the newest commit that changed its `version`,
- * unless that version is the `0.0.0` placeholder of a package that was never released.
+ * unless that version is an untagged `0.0.0` placeholder of a package that was never released.
  *
  * @param {GitReader} reader - Git reader.
  * @param {string} revision - Revision such as `origin/main`.
@@ -98,7 +98,8 @@ async function readRemoteTags(reader) {
  * @param {string} tagFormat - Tag format.
  * @param {ReadonlySet<string>} remoteTags - Tags on `origin`.
  * @returns {Promise<PackageLastRelease | null>} Last release, or `null` without history or when the
- *   newest version change is the untagged commit that added the package or leaves it at `0.0.0`.
+ *   newest version change is the untagged commit that added the package or leaves it at `0.0.0`
+ *   (neither pointed at by the package's own tag nor listed in a `release: …` commit).
  */
 export async function findLastPackageRelease(reader, revision, unit, tagFormat, remoteTags) {
   const sha = await reader.tryGit(["log", "-1", "--format=%H", `-G${VERSION_FIELD_CHANGE_PATTERN}`, revision, "--", unit.manifestPath]);
@@ -108,17 +109,17 @@ export async function findLastPackageRelease(reader, revision, unit, tagFormat, 
   }
 
   const version = await readPackageVersionAt(reader, sha, unit.manifestPath);
-  if (version === UNRELEASED_PLACEHOLDER_VERSION) {
-    return null;
-  }
-
   const subject = await reader.tryGit(["log", "-1", "--format=%s", sha]);
   const tag = version ? formatPackageTag(tagFormat, unit, version) : null;
   const taggedSha = tag ? await reader.tryGit(["rev-parse", "--verify", "--quiet", `refs/tags/${tag}^{commit}`]) : null;
-  // The commit that adds the package carries its initial version without releasing it: only its own tag,
-  // or a release commit that lists it (its tag may follow an older tagFormat), makes it a release.
+  // Only the package's own tag, or a release commit that lists it (its tag may follow an older
+  // tagFormat), makes the commit a release when it adds the package or leaves it at the `0.0.0` placeholder.
   const listedInReleaseCommit = parseMonorepoReleaseSubject(subject)?.some((release) => release.name === unit.name && release.version === version) ?? false;
-  if (taggedSha !== sha && !listedInReleaseCommit && (await reader.tryGit(["cat-file", "-e", `${sha}^:${unit.manifestPath}`])) === null) {
+  const releasedHere = taggedSha === sha || listedInReleaseCommit;
+  if (!releasedHere && version === UNRELEASED_PLACEHOLDER_VERSION) {
+    return null;
+  }
+  if (!releasedHere && (await reader.tryGit(["cat-file", "-e", `${sha}^:${unit.manifestPath}`])) === null) {
     return null;
   }
   return { sha, version, subject, tag, tagged: taggedSha === sha, tagOnOrigin: tag !== null && remoteTags.has(tag) };
