@@ -196,15 +196,28 @@ export async function listPathsDifferentFromHead(reader) {
  * can prove it: identical to `HEAD` (`git diff HEAD`), without a `filter` attribute (whose clean
  * filter can map a local edit back to the committed blob) and without the `skip-worktree` or
  * `assume-unchanged` flag (whose changes `git diff` does not see). These are the only repository
- * modules a release step may load for the first time.
+ * modules a release step may load for the first time, and only while they still hash to the
+ * committed blob returned here: an earlier step may rewrite one before a later step imports it.
  *
  * @param {GitReader} reader - Git reader of the repository root.
- * @returns {Promise<string[]>} Repository-relative paths separated with `/`.
+ * @returns {Promise<Map<string, string>>} Committed blob id of each clean file, keyed by its
+ *   repository-relative path separated with `/`.
  */
-export async function listCleanTrackedPaths(reader) {
-  const unfilteredPaths = (await reader.git(["ls-files", "-z", "--", ...UNFILTERED_FILE_PATHSPECS])).split("\0").filter(Boolean);
+export async function listCleanTrackedFiles(reader) {
+  // An entry is `<mode> <object> <stage>\t<path>`; a file identical to HEAD has the HEAD blob in the index too.
+  const indexEntries = (await reader.git(["ls-files", "-s", "-z", "--", ...UNFILTERED_FILE_PATHSPECS])).split("\0").filter(Boolean);
   const uncleanPaths = new Set([...(await listPathsDifferentFromHead(reader)), ...(await listUncheckedIndexPaths(reader))]);
-  return unfilteredPaths.filter((filePath) => !uncleanPaths.has(filePath));
+  const blobIdByPath = new Map();
+
+  for (const entry of indexEntries) {
+    const separatorIndex = entry.indexOf(LS_TREE_ENTRY_PATH_SEPARATOR);
+    const filePath = entry.slice(separatorIndex + 1);
+    if (!uncleanPaths.has(filePath)) {
+      blobIdByPath.set(filePath, entry.slice(0, separatorIndex).split(" ")[1]);
+    }
+  }
+
+  return blobIdByPath;
 }
 
 /**

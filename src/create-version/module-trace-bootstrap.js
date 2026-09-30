@@ -13,6 +13,7 @@
  * @module create-version/module-trace-bootstrap
  */
 
+import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import module from "node:module";
 import path from "node:path";
@@ -33,6 +34,9 @@ const RELATIVE_SPECIFIER_PREFIXES = Object.freeze(["./", "../"]);
  * this bootstrap cannot import repository modules (see the module description).
  */
 const NODE_MODULES_DIRECTORY = "node_modules";
+
+/** Git executable, run to hash a module that loads for the first time while the guard is active. */
+const GIT_EXECUTABLE = "git";
 
 /** Segment of a relative path that leaves its base directory. */
 const PARENT_DIRECTORY_SEGMENT = "..";
@@ -65,10 +69,12 @@ const BEEZ_RP_PACKAGE_ROOT = realpathSync.native(fileURLToPath(new URL("../..", 
 let moduleTraceState = null;
 
 /**
- * @typedef {{ repositoryRoots: string[], canonicalRoot: string, cleanTrackedPaths: Set<string> }} LateModuleGuard
- *   Roots of the repository (as given and its real path), and the tracked paths (relative to the
- *   root, separated with `/`) whose working-tree file is safe to load: identical to `HEAD`, without
- *   a `filter` attribute nor an index flag that hides its changes.
+ * @typedef {{ repositoryRoots: string[], canonicalRoot: string, committedBlobIdByPath: Map<string, string>, loadedModuleUrls: Set<string> }} LateModuleGuard
+ *   Roots of the repository (as given and its real path); the tracked paths (relative to the root,
+ *   separated with `/`) whose working-tree file was safe to load when the guard started (identical
+ *   to `HEAD`, without a `filter` attribute nor an index flag that hides its changes), with their
+ *   committed blob id; and the module URLs this process had already resolved by then, which the
+ *   inspection before the release steps already compared with `HEAD` and Node never reads again.
  */
 
 /** Guard active while the release steps run; `null` while modules load freely. */
@@ -114,10 +120,29 @@ function toRepositoryPath(repositoryRoots, requestedPath) {
 }
 
 /**
+ * Hashes a working-tree file as `git add` would store it (line endings normalized; the guarded
+ * files have no `filter` attribute), to compare it with its committed blob.
+ *
+ * @param {string} repositoryRoot - Canonical repository root.
+ * @param {string} repositoryPath - Path relative to the root, separated with `/`.
+ * @returns {string} Blob id of the current working-tree content.
+ * @throws {Error} When `git hash-object` fails, with the Git error as `cause`.
+ */
+function hashWorkingTreeFile(repositoryRoot, repositoryPath) {
+  try {
+    return execFileSync(GIT_EXECUTABLE, ["hash-object", "--", repositoryPath], { cwd: repositoryRoot, encoding: "utf8" }).trim();
+  } catch (error) {
+    throw new Error(`beez-rp no pudo comparar ${repositoryPath} con HEAD antes de cargarlo durante el release (git hash-object falló en ${repositoryRoot}).`, { cause: error });
+  }
+}
+
+/**
  * Stops a module that loads for the first time while the guard is active unless the inspection
  * before the release steps would have let it run: a repository module (outside `node_modules`)
  * must be one of the clean tracked files, named by its own full path (no symbolic link on the way,
- * no added extension, folder index nor `#alias`), and a module outside the repository must pass
+ * no added extension, folder index nor `#alias`) whose content still hashes to its committed blob
+ * (an earlier step, such as a check or a hook, may have rewritten it after the guard started), and
+ * a module outside the repository must pass
  * {@link isAllowedExternalModule}. A hook that imports a helper only when it runs would otherwise
  * run bytes nobody compared with `HEAD`. Throwing from the resolution keeps Node from evaluating it.
  *
@@ -126,7 +151,7 @@ function toRepositoryPath(repositoryRoots, requestedPath) {
  * @throws {Error} When the active guard does not allow the module.
  */
 function requireAllowedLateModule(moduleUrl, requestedUrl) {
-  if (!lateModuleGuard || !moduleUrl.startsWith(FILE_URL_SCHEME)) {
+  if (!lateModuleGuard || !moduleUrl.startsWith(FILE_URL_SCHEME) || lateModuleGuard.loadedModuleUrls.has(moduleUrl)) {
     return;
   }
 
@@ -149,9 +174,17 @@ function requireAllowedLateModule(moduleUrl, requestedUrl) {
 
   const namedPath = requestedUrl ? toRepositoryPath(lateModuleGuard.repositoryRoots, fileURLToPath(requestedUrl)) : null;
 
-  if (namedPath !== repositoryPath || !lateModuleGuard.cleanTrackedPaths.has(repositoryPath)) {
+  const committedBlobId = lateModuleGuard.committedBlobIdByPath.get(repositoryPath);
+
+  if (namedPath !== repositoryPath || committedBlobId === undefined) {
     throw new Error(
       `beez-rp no carga ${repositoryPath} durante el release: solo corren archivos trackeados idénticos a HEAD, sin atributo filter ni marca skip-worktree o assume-unchanged, importados por su ruta relativa completa (sin enlaces simbólicos, extensión implícita ni alias #…). Commitealo tal cual en una rama y llevalo a main (o quitale el filter o la marca, o importalo por su ruta real), o dejá de importarlo desde los hooks de beez-rp.config.(m)js, y volvé a correr el release.`
+    );
+  }
+
+  if (hashWorkingTreeFile(lateModuleGuard.canonicalRoot, repositoryPath) !== committedBlobId) {
+    throw new Error(
+      `beez-rp no carga ${repositoryPath} durante el release: cambió después de empezar los pasos del release (lo reescribió un check o un hook anterior), así que ya no es idéntico a HEAD. Hacé que los checks y hooks de beez-rp.config.(m)js no modifiquen ese archivo (o commiteá el resultado en una rama y llevalo a main), restaurá su contenido con git restore -- ${repositoryPath} y volvé a correr el release.`
     );
   }
 }
@@ -262,12 +295,14 @@ export function ensureTracingConfigModules() {
  * `module.registerHooks` nothing is checked, but the plan already blocks such a run.
  *
  * @param {string} repositoryRoot - Repository root.
- * @param {string[]} cleanTrackedPaths - Tracked paths safe to load (identical to `HEAD`, without a
- *   `filter` attribute nor index flags), relative to the root and separated with `/`.
+ * @param {Map<string, string>} committedBlobIdByPath - Committed blob id of each tracked path safe to
+ *   load (identical to `HEAD`, without a `filter` attribute nor index flags), keyed by its path
+ *   relative to the root and separated with `/`.
  */
-export function guardLateModules(repositoryRoot, cleanTrackedPaths) {
+export function guardLateModules(repositoryRoot, committedBlobIdByPath) {
   const canonicalRoot = realpathSync.native(repositoryRoot);
-  lateModuleGuard = { repositoryRoots: [...new Set([path.resolve(repositoryRoot), canonicalRoot])], canonicalRoot, cleanTrackedPaths: new Set(cleanTrackedPaths) };
+  const loadedModuleUrls = new Set([...(moduleTraceState?.trace.moduleUrlsByParent.values() ?? [])].flatMap((moduleUrls) => [...moduleUrls]));
+  lateModuleGuard = { repositoryRoots: [...new Set([path.resolve(repositoryRoot), canonicalRoot])], canonicalRoot, committedBlobIdByPath, loadedModuleUrls };
 }
 
 /** Lifts the guard of {@link guardLateModules} once the release steps end. */

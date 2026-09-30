@@ -660,6 +660,34 @@ describe("beez-rp create-version command", () => {
   );
 
   it(
+    "should not push nor publish a resumed release commit while a versionFiles entry has a .gitattributes filter",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      const cliPath = path.join(repositoryRoot, "src", "cli.js");
+      mkdirSync(path.dirname(cliPath));
+      writeFileSync(cliPath, 'program.version("0.1.0"); // beez-rp-version\n');
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", '  versionFiles: ["src/cli.js"],', "};"]);
+      writeFileSync(cliPath, 'program.version("0.2.0"); // beez-rp-version\n');
+      writeFileSync(path.join(repositoryRoot, "package.json"), `${JSON.stringify({ name: "fixture-app", version: "0.2.0" }, null, 2)}\n`);
+      writeFileSync(path.join(repositoryRoot, "CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n## [0.2.0] - 2026-01-01\n\n### Added\n\n- Algo nuevo.\n");
+      runGit(["add", "-A"], repositoryRoot);
+      runGit(["commit", "--quiet", "-m", "0.2.0"], repositoryRoot);
+      // The release commit already carries 0.2.0; only the filter decides now what Git reads and checks out.
+      runGit(["config", "filter.passthrough.clean", "cat"], repositoryRoot);
+      writeFileSync(path.join(repositoryRoot, ".git", "info", "attributes"), "src/cli.js filter=passthrough\n");
+
+      const resumed = runCli(repositoryRoot, []);
+
+      expect(resumed.status, resumed.output).toBe(1);
+      expect(flattenOutput(resumed.output)).toContain("src/cli.js tiene un atributo filter en .gitattributes");
+      expect(flattenOutput(resumed.output)).toContain("no se subió ni publicó nada");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+      expect(runGit(["log", "-1", "--format=%s", "main"], remoteRoot)).toBe("chore: configure releases");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
     "should stop before writing anything when a versionFiles entry is ignored by Git, instead of failing at git add with the files rewritten",
     () => {
       const { repositoryRoot } = createReleasedRepository();
@@ -2537,6 +2565,39 @@ describe("beez-rp create-version command", () => {
       expect(release.status, release.output).toBe(1);
       expect(flattenOutput(release.output)).toContain("beez-rp no carga release/local-helper.js durante el release: solo corren archivos trackeados idénticos a HEAD");
       expect(readFileSync(hookLog, "utf8")).toBe("tracked\n");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+      expect(runGit(["log", "-1", "--format=%s", "main"], remoteRoot)).toBe("chore: configure releases");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should stop a release hook that imports a tracked module an earlier hook rewrote after the release steps started, before evaluating it",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      const hookLog = path.join(path.dirname(repositoryRoot), "hooks.log");
+      const helperPath = path.join(repositoryRoot, "release", "tracked-helper.js");
+      const helperSource = (/** @type {string} */ marker) => `import { appendFileSync } from "node:fs";\nappendFileSync(${JSON.stringify(hookLog)}, "${marker}\\n");\n`;
+      mkdirSync(path.dirname(helperPath));
+      writeFileSync(helperPath, helperSource("committed"));
+      // The helper is clean when the guard starts: prepare rewrites it and only then imports it.
+      pushConfiguration(repositoryRoot, [
+        'import { writeFileSync } from "node:fs";',
+        "export default {",
+        '  changelog: { audience: "equipo" },',
+        "  checks: false,",
+        "  prepare: async () => {",
+        `    writeFileSync(${JSON.stringify(helperPath)}, ${JSON.stringify(helperSource("rewritten"))});`,
+        '    await import("./release/tracked-helper.js");',
+        "  },",
+        "};",
+      ]);
+
+      const release = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(release.status, release.output).toBe(1);
+      expect(flattenOutput(release.output)).toContain("beez-rp no carga release/tracked-helper.js durante el release: cambió después de empezar los pasos del release");
+      expect(existsSync(hookLog)).toBe(false);
       expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
       expect(runGit(["log", "-1", "--format=%s", "main"], remoteRoot)).toBe("chore: configure releases");
     },

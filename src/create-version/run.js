@@ -88,7 +88,7 @@ import { loadCreateVersionConfig } from "./config.js";
 import { ReleaseStepError } from "./errors.js";
 import { listUncheckedIndexPaths } from "./git-status.js";
 import { listFilteredFiles } from "./git-attributes.js";
-import { findSymbolicLinkSegment, listCleanTrackedPaths, listPathsDifferentFromHead } from "./head-files.js";
+import { findSymbolicLinkSegment, listCleanTrackedFiles, listPathsDifferentFromHead } from "./head-files.js";
 import { guardLateModules, liftLateModuleGuard } from "./module-trace-bootstrap.js";
 import {
   buildNpmAuthConfigLine,
@@ -872,23 +872,26 @@ async function requireReleaseFilesWithoutIndexFlags(context) {
 }
 
 /**
- * Stops the release, before anything is written, when `package.json`, `CHANGELOG.md` or a
- * `versionFiles` entry has a `filter` attribute (`.gitattributes`): its clean filter decides what
- * `git add` stores, so the release commit could hold other content than the one the release wrote
- * (the marked version included or not). Without filters the committed blob only differs from the
- * written file by line-ending normalization.
+ * Stops the release when `package.json`, `CHANGELOG.md` or a `versionFiles` entry has a `filter`
+ * attribute (`.gitattributes`): its clean filter decides what `git add` stores and its smudge
+ * filter what the working tree holds, so the release commit and what gets published could hold
+ * other content than the released version (the marked version included or not). A new release
+ * checks it before anything is written, and a resumed one before pushing or publishing its
+ * existing commit. Without filters the committed blob only differs from the working-tree file by
+ * line-ending normalization.
  *
  * @param {VersionFilesContext} context - Release context.
+ * @param {string} untouchedNote - What the stop leaves untouched, closing the hint.
  * @returns {Promise<void>}
- * @throws {ReleaseStepError} When a file the release writes has a `filter` attribute.
+ * @throws {ReleaseStepError} When a release file has a `filter` attribute.
  */
-async function requireReleaseFilesWithoutFilters(context) {
+async function requireReleaseFilesWithoutFilters(context, untouchedNote) {
   const filteredFiles = await listFilteredFiles(context.reader, [...RELEASE_COMMIT_BUILT_IN_FILES, ...context.config.versionFiles]);
 
   if (filteredFiles.length > 0) {
     throw new ReleaseStepError(
-      `${filteredFiles.join(", ")} tiene un atributo filter en .gitattributes: su filtro clean decide qué guarda git add, así que el commit de release podría no tener el contenido que escribió el release.`,
-      `Quitale el atributo filter (git check-attr filter -- ${filteredFiles.join(" ")} muestra cuál aplica) o sacalo de versionFiles en beez-rp.config.(m)js, y volvé a correr ${context.commands.createVersion}; no se tocó la versión.`
+      `${filteredFiles.join(", ")} tiene un atributo filter en .gitattributes: sus filtros clean y smudge deciden qué guarda Git y qué queda en el working tree, así que el commit de release y lo que se publica podrían no tener el contenido de la versión.`,
+      `Quitale el atributo filter (git check-attr filter -- ${filteredFiles.join(" ")} muestra cuál aplica) o sacalo de versionFiles en beez-rp.config.(m)js, y volvé a correr ${context.commands.createVersion}; ${untouchedNote}.`
     );
   }
 }
@@ -945,7 +948,7 @@ async function prepareVersionFileUpdates(context, version) {
   await requireTrackedVersionFiles(context);
   requireReleaseFilesWithoutHardLinks(context);
   await requireReleaseFilesWithoutIndexFlags(context);
-  await requireReleaseFilesWithoutFilters(context);
+  await requireReleaseFilesWithoutFilters(context, "no se tocó la versión");
   await requireReleaseFilesUnchangedFromHead(context, [PACKAGE_MANIFEST_FILE, ...context.config.versionFiles]);
 
   return context.config.versionFiles.map((filePath) => {
@@ -1795,10 +1798,13 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
     print(`${ICON.warning} ${paint("yellow", `Se ignoran --bump y --set-version: se retoma ${plan.pendingVersion}, que ya tiene versión y CHANGELOG.`)}`);
   }
 
-  // A resume never rewrites versionFiles: before pushing or publishing, HEAD must already carry the pending version.
+  // A resume never rewrites versionFiles: before pushing or publishing, HEAD must already carry the
+  // pending version, and no release file may go through a filter, as for a new release.
   if (plan.mode === RELEASE_MODE.resume && plan.pendingVersion) {
+    const versionFilesContext = { repositoryRoot, config, reader, commands: config.commands };
     try {
-      await verifyReleasedVersionFiles({ repositoryRoot, config, reader, commands: config.commands }, plan.pendingVersion);
+      await requireReleaseFilesWithoutFilters(versionFilesContext, "no se subió ni publicó nada");
+      await verifyReleasedVersionFiles(versionFilesContext, plan.pendingVersion);
     } catch (error) {
       const hint = error instanceof ReleaseStepError ? ` ${error.hint}` : "";
       print(`${ICON.failure} ${paint("red", `${error instanceof Error ? error.message : String(error)}${hint}`)}`);
@@ -1865,7 +1871,7 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
     // inspection above: a repository file tracked, identical to HEAD (listed after setting local
     // changes aside), without filter nor index flags and named by its full path, or an installed
     // dependency or beez-rp itself outside the repository.
-    guardLateModules(repositoryRoot, await listCleanTrackedPaths(reader));
+    guardLateModules(repositoryRoot, await listCleanTrackedFiles(reader));
     return await runPlanSteps(context, plan, remoteUrl, startedAt);
   } finally {
     liftLateModuleGuard();
