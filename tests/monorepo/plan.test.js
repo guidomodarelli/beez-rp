@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { NPM_AUTH_STATUS, NPM_LOOKUP_STATUS, RELEASE_MODE, RELEASE_STEP } from "../../src/constants/create-version.js";
+import { MIGRATION_STATUS, NPM_AUTH_STATUS, NPM_LOOKUP_STATUS, RELEASE_MODE, RELEASE_STEP } from "../../src/constants/create-version.js";
 import { MONOREPO_RELEASE_STEP } from "../../src/constants/monorepo.js";
 import { buildMonorepoPlan, listMonorepoChangesToSetAside, listPackagesToAuthenticate } from "../../src/monorepo/plan.js";
 
@@ -156,12 +156,32 @@ describe("buildMonorepoPlan", () => {
 
   it("lets the package changelogs stay uncommitted in a new release but blocks any other change", () => {
     const changelogOnly = monorepoState({ workingTreeChanges: [" M packages/widget/CHANGELOG.md"] });
-    const withSource = monorepoState({ workingTreeChanges: [" M packages/widget/CHANGELOG.md", " M packages/widget/src/index.ts"] });
+    const withDocs = monorepoState({ workingTreeChanges: [" M packages/widget/CHANGELOG.md", " M packages/widget/README.md"] });
 
     expect(buildMonorepoPlan(changelogOnly, NPM_PACKAGE, { tagFormat: TAG_FORMAT }).mode).toBe(RELEASE_MODE.newRelease);
-    expect(buildMonorepoPlan(withSource, NPM_PACKAGE, { tagFormat: TAG_FORMAT }).blockers[0]?.title).toBe("Hay 1 archivo(s) sin commitear");
-    expect(buildMonorepoPlan(withSource, NPM_PACKAGE, { tagFormat: TAG_FORMAT, ignoreLocalChanges: true }).mode).toBe(RELEASE_MODE.newRelease);
-    expect(listMonorepoChangesToSetAside(withSource, RELEASE_MODE.newRelease)).toEqual([" M packages/widget/src/index.ts"]);
+    expect(buildMonorepoPlan(withDocs, NPM_PACKAGE, { tagFormat: TAG_FORMAT }).blockers[0]?.title).toBe("Hay 1 archivo(s) sin commitear");
+    expect(buildMonorepoPlan(withDocs, NPM_PACKAGE, { tagFormat: TAG_FORMAT, ignoreLocalChanges: true }).mode).toBe(RELEASE_MODE.newRelease);
+    expect(listMonorepoChangesToSetAside(withDocs, RELEASE_MODE.newRelease)).toEqual([" M packages/widget/README.md"]);
+  });
+
+  it("does not set aside code or data changes with --ignore-local-changes, such as a workspace manifest discovery already read", () => {
+    const state = monorepoState({ workingTreeChanges: [" M packages/cli/package.json", " M packages/widget/src/index.ts", " M packages/widget/README.md"] });
+
+    const plan = buildMonorepoPlan(state, NPM_PACKAGE, { tagFormat: TAG_FORMAT, ignoreLocalChanges: true });
+
+    expect(plan.mode).toBe(RELEASE_MODE.blocked);
+    expect(plan.blockers[0]?.title).toContain("--ignore-local-changes no aparta cambios de código ni de datos");
+    expect(plan.blockers[0]?.details).toEqual(expect.arrayContaining([" M packages/cli/package.json", " M packages/widget/src/index.ts"]));
+    expect(plan.blockers[0]?.details).not.toContain(" M packages/widget/README.md");
+  });
+
+  it("chooses the versions before applying migrations, so skipping every package leaves the database untouched", () => {
+    const state = monorepoState({ migrations: { status: MIGRATION_STATUS.pending, pending: ["001_init"], target: "db", reason: null } });
+
+    const ids = stepIds(buildMonorepoPlan(state, NPM_PACKAGE, { tagFormat: TAG_FORMAT }));
+
+    expect(ids.indexOf(MONOREPO_RELEASE_STEP.chooseVersions)).toBe(0);
+    expect(ids.indexOf(RELEASE_STEP.applyMigrations)).toBe(1);
   });
 
   it("blocks when a package about to be published has credentials that cannot publish", () => {

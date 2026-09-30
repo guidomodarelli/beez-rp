@@ -3,8 +3,8 @@
  * and decides, without touching Git or npm, what is still missing:
  *
  * - a new release: the packages with commits under their paths are the
- *   candidates; the run asks the version of each one (or skips it), fills
- *   empty changelogs, runs the checks, creates one release commit with a tag
+ *   candidates; the run asks the version of each one (or skips it) before
+ *   applying migrations, fills empty changelogs, runs the checks, creates one release commit with a tag
  *   per package, prepares, pushes and publishes in dependency order;
  * - the resume of a local release commit that never reached `origin`, or of
  *   tagged releases on `origin/main` that npm does not have yet;
@@ -27,7 +27,7 @@ import {
   RELEASE_STEP,
 } from "../constants/create-version.js";
 import { MONOREPO_RELEASE_STEP } from "../constants/monorepo.js";
-import { describeFeatureBranchGaps, foreignCommitsBlocker, missingChecksBlocker } from "../create-version/plan.js";
+import { codeChangesToSetAsideBlocker, describeFeatureBranchGaps, foreignCommitsBlocker, isCodeChange, missingChecksBlocker } from "../create-version/plan.js";
 import { describeNpmAuthProblem, describeNpmFirstPublicationWarning } from "../create-version/npm-auth.js";
 import { DEFAULT_PROJECT_COMMANDS } from "../package-manager.js";
 import { findHighestStableVersion, isStableReleaseVersion, isStableVersionAbove } from "../versions.js";
@@ -335,8 +335,15 @@ function planNewRelease(state, capabilities, commands, warnings) {
     return createPlan({ blockers: [missingChecksBlocker(commands)] });
   }
 
+  // The versions are chosen first: skipping every package must not leave migrations applied.
   /** @type {ReleasePlanStep[]} */
-  const steps = [];
+  const steps = [
+    {
+      id: MONOREPO_RELEASE_STEP.chooseVersions,
+      title: `Elegir la versión de cada paquete con cambios (${candidates.length})`,
+      detail: candidateNames.join(", "),
+    },
+  ];
 
   if (state.migrations?.status === MIGRATION_STATUS.pending) {
     steps.push({
@@ -347,12 +354,6 @@ function planNewRelease(state, capabilities, commands, warnings) {
   } else if (state.migrations?.status === MIGRATION_STATUS.unknown) {
     warnings.push(`No se pudo verificar si hay migraciones pendientes: ${state.migrations.reason ?? "motivo desconocido"}.`);
   }
-
-  steps.push({
-    id: MONOREPO_RELEASE_STEP.chooseVersions,
-    title: `Elegir la versión de cada paquete con cambios (${candidates.length})`,
-    detail: candidateNames.join(", "),
-  });
 
   if (candidates.some((packageSnapshot) => packageSnapshot.changelog.entryCount === 0)) {
     steps.push({
@@ -458,6 +459,13 @@ export function buildMonorepoPlan(state, capabilities, { tagFormat, ignoreLocalC
   const skipped = skipUnpublished && pending.plan ? pending.plan.pendingReleases.map(({ name, version, tag }) => describeSkippedPublication(name, version, tag)) : [];
   const plan = localResume ?? (skipUnpublished ? null : pending.plan) ?? planNewRelease(state, capabilities, commands, [...pending.warnings, ...skipped]);
   const withAuth = applyNpmAuth(plan, state, commands);
+  // As in single-package mode: the configuration and the workspace manifests were already read from the
+  // working tree, so code and data changes cannot be set aside.
+  const codeChanges = ignoreLocalChanges && withAuth.steps.length > 0 ? listMonorepoChangesToSetAside(state, withAuth.mode).filter(isCodeChange) : [];
+
+  if (codeChanges.length > 0) {
+    return createPlan({ blockers: [codeChangesToSetAsideBlocker(codeChanges, commands)] });
+  }
 
   if (withAuth.mode === RELEASE_MODE.resume && !ignoreLocalChanges && state.workingTreeChanges.length > 0) {
     return createPlan({

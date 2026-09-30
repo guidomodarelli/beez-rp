@@ -69,7 +69,7 @@ function createReleasedMonorepo() {
   }
   writeFileSync(
     path.join(repositoryRoot, "beez-rp.config.js"),
-    ['export default {', '  changelog: { audience: "quien usa {name}" },', '  packages: "workspaces",', "  checks: false,", '  publish: "npm",', "};", ""].join("\n")
+    ['export default {', '  changelog: { audience: "quien usa {name}" },', '  packages: "workspaces",', "  checks: false,", '  publish: "npm",', '  summary: ["Deploy de {name} {version}.", "Revisá el deploy."],', "};", ""].join("\n")
   );
   commitAll(repositoryRoot, "release: @acme/widget@1.0.0, @acme/adapter@0.3.0");
   runGit(["tag", "-a", "widget-v1.0.0", "-m", "@acme/widget@1.0.0"], repositoryRoot);
@@ -129,6 +129,10 @@ describe("create-version in monorepo mode", () => {
       expect(JSON.parse(runGit(["show", "main:packages/adapter/package.json"], remoteRoot)).version).toBe("0.3.0");
       expect(runGit(["show", "main:packages/widget/CHANGELOG.md"], remoteRoot)).toMatch(/## \[Unreleased\]\n\n## \[1\.1\.0\] - \d{4}-\d{2}-\d{2}\n\n### Added\n\n- Respuesta nueva\./u);
       expect(registry.publications).toEqual([{ packageName: "@acme/widget", version: "1.1.0", user: OWNER_USER }]);
+      const releaseOutput = flattenOutput(release.output);
+      expect(releaseOutput).toContain("Deploy de @acme/widget 1.1.0.");
+      expect(releaseOutput).not.toContain("{version}");
+      expect(releaseOutput.split("Revisá el deploy.")).toHaveLength(2);
 
       const again = await runCliAsync(repositoryRoot, ["--dry-run"], npmEnvironment(registry.registryUrl));
       expect(again.output).toContain("Todo al día");
@@ -168,6 +172,34 @@ describe("create-version in monorepo mode", () => {
       expect(readFileSync(path.join(repositoryRoot, "packages/adapter/package.json"), "utf8")).toContain('"version": "0.3.1"');
     },
     GIT_FIXTURE_TEST_TIMEOUT_MS * 2
+  );
+
+  it(
+    "does not create the release commit while a package left out of the release has a staged or uncommitted changelog",
+    async () => {
+      const { repositoryRoot, remoteRoot } = createReleasedMonorepo();
+      pushCoreFeature(repositoryRoot);
+      const releasedSha = runGit(["rev-parse", "HEAD"], repositoryRoot);
+      writeFileSync(path.join(repositoryRoot, "packages/adapter/CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n- Todavía no sale.\n");
+      runGit(["add", "packages/adapter/CHANGELOG.md"], repositoryRoot);
+      const registry = await startRegistry();
+
+      const staged = await runCliAsync(repositoryRoot, ["--accept-suggested"], npmEnvironment(registry.registryUrl));
+
+      expect(staged.status, staged.output).toBe(1);
+      expect(flattenOutput(staged.output)).toContain("Hay cambios staged que no son del release y entrarían en su commit: packages/adapter/CHANGELOG.md.");
+      expect(runGit(["rev-parse", "HEAD"], repositoryRoot)).toBe(releasedSha);
+      expect(runGit(["tag", "--list", "widget-v1.1.0"], repositoryRoot)).toBe("");
+
+      runGit(["restore", "--staged", "packages/adapter/CHANGELOG.md"], repositoryRoot);
+      const unstaged = await runCliAsync(repositoryRoot, ["--accept-suggested"], npmEnvironment(registry.registryUrl));
+
+      expect(unstaged.status, unstaged.output).toBe(1);
+      expect(flattenOutput(unstaged.output)).toContain("Hay cambios sin commitear en el CHANGELOG de paquetes que no salen en este release: packages/adapter/CHANGELOG.md.");
+      expect(runGit(["rev-parse", "main"], remoteRoot)).toBe(releasedSha);
+      expect(registry.publications).toEqual([]);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
   );
 
   it(

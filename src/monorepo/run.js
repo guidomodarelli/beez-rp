@@ -26,6 +26,7 @@ import {
   FAILURE_EXIT_CODE,
   GITHUB_REPOSITORY_PATTERN,
   MAIN_BRANCH,
+  MAX_LISTED_ITEMS,
   NPM_LOOKUP_STATUS,
   NPM_PUBLISHER,
   NPM_TOKEN_LOCATIONS,
@@ -37,9 +38,10 @@ import {
   RELEASE_REMOTE,
   RELEASE_STEP,
   SHORT_SHA_LENGTH,
+  SUMMARY_VERSION_PLACEHOLDER,
   buildMainSyncedRestartMessage,
 } from "../constants/create-version.js";
-import { AUDIENCE_PACKAGE_PLACEHOLDER, MONOREPO_RELEASE_STEP, SKIP_PACKAGE_CHOICE } from "../constants/monorepo.js";
+import { AUDIENCE_PACKAGE_PLACEHOLDER, MONOREPO_RELEASE_STEP, SKIP_PACKAGE_CHOICE, SUMMARY_PACKAGE_PLACEHOLDER } from "../constants/monorepo.js";
 import { RELEASE_TYPE_ORDER } from "../constants/versions.js";
 import { findPnpmPackRewrites, findPreparedArtifact, expandArtifactPattern, isSafeArtifactPath, verifyPreparedArtifact, withArtifactOutsidePackageRoot } from "../create-version/artifact.js";
 import { ReleaseStepError } from "../create-version/errors.js";
@@ -317,6 +319,47 @@ function groupVersionFilesByPackage(context) {
 }
 
 /**
+ * Lists the paths of a `git diff --name-only -z` run.
+ *
+ * @param {MonorepoContext} context - Context.
+ * @param {string[]} diffArguments - Arguments after `git diff --name-only -z`.
+ * @returns {Promise<string[]>} Paths relative to the root.
+ */
+async function listDiffPaths(context, diffArguments) {
+  return (await context.reader.git(["diff", "--name-only", "-z", ...diffArguments])).split("\0").filter(Boolean);
+}
+
+/**
+ * Stops the release before writing anything when the release commit would carry changes that are
+ * not of the chosen packages: `git commit` takes the whole index, and the changelogs of every package
+ * are allowed to stay uncommitted during the plan.
+ *
+ * @param {MonorepoContext} context - Context.
+ * @param {ReadonlySet<string>} releasePaths - Manifests, changelogs and `versionFiles` of the chosen packages.
+ * @returns {Promise<void>}
+ * @throws {ReleaseStepError} When something outside those files is staged, or the changelog of a package left out has changes.
+ */
+async function assertOnlyReleaseChanges(context, releasePaths) {
+  const foreignStaged = (await listDiffPaths(context, ["--cached"])).filter((filePath) => !releasePaths.has(filePath));
+  if (foreignStaged.length > 0) {
+    throw new ReleaseStepError(
+      `Hay cambios staged que no son del release y entrarían en su commit: ${foreignStaged.slice(0, MAX_LISTED_ITEMS).join(", ")}.`,
+      `No se escribió nada. Sacalos del índice con git restore --staged <archivo> (o commitealos aparte) y volvé a correr ${context.commands.createVersion}.`
+    );
+  }
+
+  const chosenNames = new Set(context.chosen.map(({ unit }) => unit.name));
+  const skippedChangelogs = new Set(context.units.filter((unit) => !chosenNames.has(unit.name)).map((unit) => unit.changelogPath));
+  const dirtySkippedChangelogs = skippedChangelogs.size > 0 ? (await listDiffPaths(context, ["HEAD"])).filter((filePath) => skippedChangelogs.has(filePath)) : [];
+  if (dirtySkippedChangelogs.length > 0) {
+    throw new ReleaseStepError(
+      `Hay cambios sin commitear en el CHANGELOG de paquetes que no salen en este release: ${dirtySkippedChangelogs.join(", ")}.`,
+      `No se escribió nada. Commitealos aparte o guardalos con git stash, o elegí también esos paquetes, y volvé a correr ${context.commands.createVersion}.`
+    );
+  }
+}
+
+/**
  * Writes the new versions, releases every chosen changelog and creates the release commit with an
  * annotated tag per package. Every file is computed before anything is written, and the commit
  * reuses the single-package one: literal staging, rollback on failure and the prepared-tree check.
@@ -327,6 +370,10 @@ function groupVersionFilesByPackage(context) {
 async function bumpPackagesStep(context) {
   const today = new Date().toISOString().split("T")[0];
   const versionFilesByPackage = groupVersionFilesByPackage(context);
+  await assertOnlyReleaseChanges(
+    context,
+    new Set(context.chosen.flatMap(({ unit }) => [unit.manifestPath, unit.changelogPath, ...(versionFilesByPackage.get(unit.name) ?? [])]))
+  );
   await assertReleaseFilesMatchHead(context, [...context.chosen.map(({ unit }) => unit.manifestPath), ...context.config.versionFiles]);
   /** @type {import("../create-version/run.js").ReleaseFileUpdate[]} */
   const releaseFiles = [];
@@ -639,7 +686,9 @@ function renderMonorepoSummary(context, remoteUrl, startedAt) {
     lines.push(`${ICON.info} ${paint("bold", "Tags")}  https://github.com/${githubRepository}/tags`);
   }
   for (const line of context.config.summary) {
-    lines.push(`${ICON.info} ${line}`);
+    const perPackage = line.includes(SUMMARY_VERSION_PLACEHOLDER) || line.includes(SUMMARY_PACKAGE_PLACEHOLDER);
+    const expanded = perPackage ? releases.map(({ name, version }) => line.replaceAll(SUMMARY_VERSION_PLACEHOLDER, version).replaceAll(SUMMARY_PACKAGE_PLACEHOLDER, name)) : [line];
+    lines.push(...expanded.map((expandedLine) => `${ICON.info} ${expandedLine}`));
   }
   lines.push("", paint("gray", `Tiempo total: ${formatDuration(measureActiveMs(startedAt))} (sin contar la espera de tus respuestas)`));
 

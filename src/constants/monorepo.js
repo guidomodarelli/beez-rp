@@ -23,6 +23,12 @@ export const DEFAULT_MONOREPO_TAG_FORMAT = `${TAG_FORMAT_PLACEHOLDER.component}-
 /** Placeholder of `changelog.audience` replaced by the package name in monorepo mode. */
 export const AUDIENCE_PACKAGE_PLACEHOLDER = "{name}";
 
+/**
+ * Placeholder of `summary` replaced by the name of each released package in monorepo mode (next
+ * to `{version}`, its version): a line with either one is printed once per released package.
+ */
+export const SUMMARY_PACKAGE_PLACEHOLDER = "{name}";
+
 /** Prefix of the release commit subject: `release: @scope/a@1.2.0, @scope/b@0.3.1`. */
 export const MONOREPO_RELEASE_SUBJECT_PREFIX = "release: ";
 

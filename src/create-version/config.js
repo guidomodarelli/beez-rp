@@ -68,7 +68,8 @@ import { DEFAULT_PROJECT_COMMANDS, describeProjectCommands, detectPackageManager
  *   packages?: "workspaces" | string[],
  *   tagFormat?: string,
  * }} CreateVersionConfig
- *   `summary` lines replace `{version}` with the released version. Without `checks`, the release
+ *   `summary` lines replace `{version}` with the released version (in monorepo mode, a line with
+ *   `{version}` or `{name}` is printed once per released package). Without `checks`, the release
  *   runs `<package manager> run ci` (pnpm, bun, npm or yarn, detected from `packageManager` or the
  *   lockfile) when `package.json` declares a `ci` script; `false` skips the checks on purpose.
  *   `versionFiles` lists files (relative to the root) whose marked lines get the new version in the

@@ -341,7 +341,7 @@ function listPorcelainPaths(line) {
  * @param {string} line - Porcelain line.
  * @returns {boolean} `true` when any of its paths has one of those extensions.
  */
-function isCodeChange(line) {
+export function isCodeChange(line) {
   return listPorcelainPaths(line).some((changedPath) => UNSETTABLE_ASIDE_EXTENSIONS.some((extension) => changedPath.endsWith(extension)));
 }
 
@@ -363,20 +363,24 @@ function refuseToSetAsideCodeChanges(plan, state, ignoreLocalChanges, commands) 
     return plan;
   }
 
+  return { mode: RELEASE_MODE.blocked, steps: [], blockers: [codeChangesToSetAsideBlocker(codeChanges, commands)], warnings: [], pendingVersion: null };
+}
+
+/**
+ * Explains why `--ignore-local-changes` cannot set aside code or data changes (see
+ * {@link UNSETTABLE_ASIDE_EXTENSIONS}); shared with the monorepo mode.
+ *
+ * @param {string[]} codeChanges - `git status --porcelain` lines of the code or data changes.
+ * @param {ProjectCommands} commands - Project commands quoted by the hints.
+ * @returns {ReleaseBlocker} Blocker listing them.
+ */
+export function codeChangesToSetAsideBlocker(codeChanges, commands) {
   return {
-    mode: RELEASE_MODE.blocked,
-    steps: [],
-    blockers: [
-      {
-        title: `--${CREATE_VERSION_FLAG.ignoreLocalChanges} no aparta cambios de código ni de datos (${UNSETTABLE_ASIDE_EXTENSIONS.join(", ")})`,
-        details: [
-          ...codeChanges.slice(0, MAX_LISTED_ITEMS),
-          `La configuración ya se cargó con esos cambios y puede depender de ellos: commitealos en una rama o guardalos con git stash, y volvé a correr ${commands.createVersion}.`,
-        ],
-      },
+    title: `--${CREATE_VERSION_FLAG.ignoreLocalChanges} no aparta cambios de código ni de datos (${UNSETTABLE_ASIDE_EXTENSIONS.join(", ")})`,
+    details: [
+      ...codeChanges.slice(0, MAX_LISTED_ITEMS),
+      `La configuración ya se cargó con esos cambios y puede depender de ellos: commitealos en una rama o guardalos con git stash, y volvé a correr ${commands.createVersion}.`,
     ],
-    warnings: [],
-    pendingVersion: null,
   };
 }
 
