@@ -67,4 +67,42 @@ describe("findLastPackageRelease", () => {
     expect(await findLastPackageRelease(reader, "HEAD", releaseUnit("alpha"), "{component}@{version}", new Set())).toMatchObject({ version: "0.1.0", tagged: false });
     expect(await findLastPackageRelease(reader, "HEAD", releaseUnit("beta"), "{component}@{version}", new Set())).toBeNull();
   });
+
+  it("does not take a later commit that sets a package to the 0.0.0 placeholder as its release", async () => {
+    const repositoryRoot = createRepositoryAddingTwoPackages("feat: add alpha and beta");
+    const manifestPath = path.join(repositoryRoot, "packages/alpha/package.json");
+    writeFileSync(manifestPath, `${JSON.stringify({ name: "@acme/alpha", version: "0.0.0" }, null, 2)}\n`);
+    runGit(["commit", "--quiet", "-am", "chore(alpha): use the release-please placeholder"], repositoryRoot);
+    const reader = createGitReader(repositoryRoot);
+
+    expect(await findLastPackageRelease(reader, "HEAD", releaseUnit("alpha"), TAG_FORMAT, new Set())).toBeNull();
+  });
+
+  it("keeps a 0.0.0 version as the release when the package's own tag points at its commit", async () => {
+    const repositoryRoot = createRepositoryAddingTwoPackages("feat: add alpha and beta");
+    const manifestPath = path.join(repositoryRoot, "packages/alpha/package.json");
+    writeFileSync(manifestPath, `${JSON.stringify({ name: "@acme/alpha", version: "0.0.0" }, null, 2)}
+`);
+    runGit(["commit", "--quiet", "-am", "chore(alpha): release 0.0.0"], repositoryRoot);
+    runGit(["tag", "alpha-v0.0.0"], repositoryRoot);
+    const reader = createGitReader(repositoryRoot);
+
+    expect(await findLastPackageRelease(reader, "HEAD", releaseUnit("alpha"), TAG_FORMAT, new Set(["alpha-v0.0.0"]))).toMatchObject({
+      version: "0.0.0",
+      tag: "alpha-v0.0.0",
+      tagged: true,
+      tagOnOrigin: true,
+    });
+  });
+
+  it("keeps a 0.0.0 version as the release when a release commit lists the package at 0.0.0", async () => {
+    const repositoryRoot = createRepositoryAddingTwoPackages("feat: add alpha and beta");
+    const manifestPath = path.join(repositoryRoot, "packages/alpha/package.json");
+    writeFileSync(manifestPath, `${JSON.stringify({ name: "@acme/alpha", version: "0.0.0" }, null, 2)}
+`);
+    runGit(["commit", "--quiet", "-am", "release: @acme/alpha@0.0.0"], repositoryRoot);
+    const reader = createGitReader(repositoryRoot);
+
+    expect(await findLastPackageRelease(reader, "HEAD", releaseUnit("alpha"), TAG_FORMAT, new Set())).toMatchObject({ version: "0.0.0", tagged: false });
+  });
 });

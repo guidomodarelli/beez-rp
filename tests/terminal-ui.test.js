@@ -38,6 +38,7 @@ describe("terminal boxes", () => {
 
   it("should align the value column of status rows", () => {
     expect(stripVTControlCharacters(renderRow("*", "Rama", "main"))).toBe(`* ${"Rama".padEnd(16)}main`);
+    expect(stripVTControlCharacters(renderRow("*", "@siteping/adapter-drizzle", "al día"))).toBe("* @siteping/adapter-drizzle al día");
   });
 });
 

@@ -43,6 +43,7 @@ import {
 import { AUDIENCE_PACKAGE_PLACEHOLDER, MONOREPO_RELEASE_STEP, SKIP_PACKAGE_CHOICE, SUMMARY_PACKAGE_PLACEHOLDER } from "../constants/monorepo.js";
 import { RELEASE_TYPE_ORDER } from "../constants/versions.js";
 import { findPnpmPackRewrites, findPreparedArtifact, expandArtifactPattern, isSafeArtifactPath, verifyPreparedArtifact, withArtifactOutsidePackageRoot } from "../create-version/artifact.js";
+import { describeReleaseTypes } from "../create-version/config.js";
 import { ReleaseStepError } from "../create-version/errors.js";
 import { restoreLocalChanges, setAsideLocalChanges } from "../create-version/local-changes.js";
 import { buildNpmAuthConfigLine, checkNpmPublishAccess, describePublishedRelease, publishToNpm, readNpmPackIntegrity, resolvePublishRegistry } from "../create-version/npm.js";
@@ -71,7 +72,7 @@ import {
   syncMainStep,
 } from "../create-version/run.js";
 import { BOX_TONE, ICON, formatDuration, measureActiveMs, paint, print, renderBanner, renderBox, renderRow, renderStepHeader, select, startSpinner } from "../terminal-ui.js";
-import { bumpReleaseVersion, compareReleaseVersions, findHighestStableVersion, isStableReleaseVersion, suggestReleaseType } from "../versions.js";
+import { bumpReleaseVersion, compareReleaseVersions, findHighestStableVersion, isStableReleaseVersion, suggestNextReleaseType } from "../versions.js";
 import { buildMonorepoPlan, listMonorepoChangesToSetAside, listPackagesToAuthenticate } from "./plan.js";
 import { buildMonorepoReleaseSubject } from "./release-commit.js";
 import { collectMonorepoState } from "./state.js";
@@ -248,7 +249,7 @@ async function chooseVersionsStep(context) {
     const packageSnapshot = requirePackage(context, name);
     const { unit, unreleasedCommits } = packageSnapshot;
     const currentVersion = readWorkingVersion(context, unit);
-    const suggestion = suggestReleaseType(unreleasedCommits);
+    const suggestion = suggestNextReleaseType(unreleasedCommits, currentVersion, { preMajorShift: context.config.preMajorShift });
     print(renderCommitList(unreleasedCommits, `${unit.name} · ${unreleasedCommits.length} commit(s) sin publicar`));
 
     /** @type {string} */
@@ -258,13 +259,14 @@ async function chooseVersionsStep(context) {
     } else if (context.options.acceptSuggested) {
       choice = suggestion.releaseType;
     } else {
+      const releaseTypeDescriptions = describeReleaseTypes(context.config, currentVersion);
       choice = await select({
         message: `¿Qué versión de ${unit.name}? (actual ${currentVersion})`,
         options: [
           ...RELEASE_TYPE_ORDER.map((releaseType) => ({
             label: `${releaseType.padEnd(5)}  ${currentVersion} → ${bumpReleaseVersion(currentVersion, releaseType)}`,
             hint: releaseType === suggestion.releaseType ? `${ICON.star} sugerida: ${suggestion.reason}` : undefined,
-            description: context.config.releaseTypeDescriptions[releaseType],
+            description: releaseTypeDescriptions[releaseType],
             value: releaseType,
           })),
           { label: "No publicar ahora", hint: "queda para un release siguiente", value: SKIP_PACKAGE_CHOICE },

@@ -12,11 +12,14 @@ import {
   CONVENTIONAL_HEADER_PATTERN,
   FEATURE_COMMIT_TYPE,
   LEGACY_FEATURE_SUBJECT_PATTERN,
+  PRE_MAJOR_SHIFTED_RELEASE_TYPE,
+  PRE_MAJOR_VERSION,
   RELEASE_TAG_PREFIX,
   RELEASE_TYPE,
   RELEASE_TYPE_ORDER,
   RELEASE_VERSION_PATTERN,
   SEMVER_PATTERN,
+  UNRELEASED_PLACEHOLDER_VERSION,
 } from "./constants/versions.js";
 
 /**
@@ -262,4 +265,39 @@ export function suggestReleaseType(commits) {
   }
 
   return { releaseType: RELEASE_TYPE.patch, reason: "solo hay arreglos y mantenimiento" };
+}
+
+/**
+ * Tells whether `preMajorShift` lowers the release levels after `currentVersion`: only when the
+ * option is on and the version is `0.x`, except the `0.0.0` placeholder of a package never released.
+ *
+ * @param {string} currentVersion - Current `X.Y.Z` version.
+ * @param {{ preMajorShift?: boolean }} [options] - Project versioning options.
+ * @returns {boolean} `true` when the release levels move one level down.
+ */
+export function isPreMajorShiftActive(currentVersion, { preMajorShift = false } = {}) {
+  return preMajorShift && currentVersion !== UNRELEASED_PLACEHOLDER_VERSION && parseReleaseVersion(currentVersion)[0] === PRE_MAJOR_VERSION;
+}
+
+/**
+ * Suggests the release type of the next version after `currentVersion`: {@link suggestReleaseType},
+ * shifted one level down while the version is `0.x` when `preMajorShift` is on (breaking changes
+ * suggest `minor` and features `patch`, so a suggestion never jumps to `1.0.0`). The first release
+ * of a `0.0.0` package is not shifted.
+ *
+ * @param {{ subject: string, body?: string }[]} commits - Commits since the last release.
+ * @param {string} currentVersion - Current `X.Y.Z` version.
+ * @param {{ preMajorShift?: boolean }} [options] - Project versioning options.
+ * @returns {{ releaseType: ReleaseType, reason: string }} Suggested type and a Spanish explanation.
+ */
+export function suggestNextReleaseType(commits, currentVersion, { preMajorShift = false } = {}) {
+  const suggestion = suggestReleaseType(commits);
+  if (!isPreMajorShiftActive(currentVersion, { preMajorShift })) {
+    return suggestion;
+  }
+
+  const shiftedReleaseType = PRE_MAJOR_SHIFTED_RELEASE_TYPE[suggestion.releaseType];
+  return shiftedReleaseType === suggestion.releaseType
+    ? suggestion
+    : { releaseType: shiftedReleaseType, reason: `${suggestion.reason}; antes de 1.0.0 baja un nivel` };
 }

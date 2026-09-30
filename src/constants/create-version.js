@@ -463,3 +463,21 @@ export const MAIN_SYNCED_RESTART_MESSAGE = buildMainSyncedRestartMessage(DEFAULT
 
 /** Exit code of a release stopped by a failed step, invalid arguments or configuration. */
 export const FAILURE_EXIT_CODE = 1;
+
+/** What each release type means when a project does not describe it. */
+export const DEFAULT_RELEASE_TYPE_DESCRIPTIONS = Object.freeze({
+  patch: "Solo arreglos o cambios internos; nada nuevo para quien lo usa.",
+  minor: "Funcionalidades nuevas compatibles; lo existente sigue funcionando igual.",
+  major: "Cambio incompatible: quien lo usa tiene que adaptarse.",
+});
+
+/**
+ * Default descriptions while `preMajorShift` applies to a `0.x` version: each release type carries
+ * the changes of the level above (a patch ships features, a minor breaking changes) and a major
+ * leaves `0.x`.
+ */
+export const PRE_MAJOR_SHIFTED_RELEASE_TYPE_DESCRIPTIONS = Object.freeze({
+  patch: "Arreglos o funcionalidades nuevas compatibles; lo existente sigue funcionando igual.",
+  minor: "Cambio incompatible: quien lo usa tiene que adaptarse.",
+  major: "Sale de 0.x: primera versión estable 1.0.0.",
+});

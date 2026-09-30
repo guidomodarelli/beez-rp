@@ -69,7 +69,7 @@ function createReleasedMonorepo() {
   }
   writeFileSync(
     path.join(repositoryRoot, "beez-rp.config.js"),
-    ['export default {', '  changelog: { audience: "quien usa {name}" },', '  packages: "workspaces",', "  checks: false,", '  publish: "npm",', '  summary: ["Deploy de {name} {version}.", "Revisá el deploy."],', "};", ""].join("\n")
+    ['export default {', '  changelog: { audience: "quien usa {name}" },', '  packages: "workspaces",', "  preMajorShift: true,", "  checks: false,", '  publish: "npm",', '  summary: ["Deploy de {name} {version}.", "Revisá el deploy."],', "};", ""].join("\n")
   );
   commitAll(repositoryRoot, "release: @acme/widget@1.0.0, @acme/adapter@0.3.0");
   runGit(["tag", "-a", "widget-v1.0.0", "-m", "@acme/widget@1.0.0"], repositoryRoot);
@@ -114,6 +114,27 @@ const npmEnvironment = (registryUrl) => ({ NPM_TOKEN: OWNER_TOKEN, npm_config_re
 
 describe("create-version in monorepo mode", () => {
   it(
+    "releases a package added at the 0.0.0 placeholder with the unshifted suggestion, since it was never released",
+    async () => {
+      const { repositoryRoot, remoteRoot } = createReleasedMonorepo();
+      writeJson(repositoryRoot, "packages/server/package.json", { name: "@acme/server", version: "0.0.0" });
+      writeFileSync(path.join(repositoryRoot, "packages/server/CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Server.\n");
+      commitAll(repositoryRoot, "feat(server): add the server package");
+      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+      const registry = await startRegistry();
+
+      const release = await runCliAsync(repositoryRoot, ["--accept-suggested"], npmEnvironment(registry.registryUrl));
+
+      expect(release.status, release.output).toBe(0);
+      // preMajorShift leaves the first release alone: a feature on 0.0.0 gives 0.1.0.
+      expect(runGit(["log", "-1", "--format=%s", "main"], remoteRoot)).toBe("release: @acme/server@0.1.0");
+      expect(runGit(["tag", "--list", "--points-at", "main"], remoteRoot)).toBe("server-v0.1.0");
+      expect(registry.publications).toEqual([{ packageName: "@acme/server", version: "0.1.0", user: OWNER_USER }]);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
     "releases only the package whose paths changed (a private bundled dependency included), with its own tag, changelog and publication",
     async () => {
       const { repositoryRoot, remoteRoot } = createReleasedMonorepo();
@@ -156,8 +177,9 @@ describe("create-version in monorepo mode", () => {
 
       // The adapter changes after the release: HEAD is no longer the widget's release commit.
       writeFileSync(path.join(repositoryRoot, "packages/adapter/index.js"), "export {};\n");
-      writeFileSync(path.join(repositoryRoot, "packages/adapter/CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n- Arreglo.\n");
-      commitAll(repositoryRoot, "fix(adapter): patch");
+      writeFileSync(path.join(repositoryRoot, "packages/adapter/CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Opción nueva.\n");
+      // A feature on the 0.x adapter suggests a patch with preMajorShift; the 1.x widget above still took a minor.
+      commitAll(repositoryRoot, "feat(adapter): add an option");
       runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
 
       const registry = await startRegistry();

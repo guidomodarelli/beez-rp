@@ -274,7 +274,8 @@ export function renderBox({ title, lines, tone = BOX_TONE.neutral, width = resol
  * @returns {string} Row.
  */
 export function renderRow(icon, label, value, labelWidth = ROW_LABEL_WIDTH) {
-  return `${icon} ${paint("bold", label.padEnd(labelWidth))}${value}`;
+  // A label as wide as the column still keeps one space before its value.
+  return `${icon} ${paint("bold", label.padEnd(Math.max(labelWidth, label.length + 1)))}${value}`;
 }
 
 /**
