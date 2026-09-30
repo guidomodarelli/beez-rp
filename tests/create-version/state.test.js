@@ -663,6 +663,30 @@ describe("beez-rp create-version command", () => {
   );
 
   it(
+    "should stop before bumping when a check modifies a versionFiles entry, instead of shipping that change in the release commit",
+    () => {
+      const { repositoryRoot } = createReleasedRepository();
+      const cliPath = path.join(repositoryRoot, "src", "cli.js");
+      const cliContent = 'program.version("0.1.0"); // beez-rp-version\n';
+      mkdirSync(path.dirname(cliPath));
+      writeFileSync(cliPath, cliContent);
+      // Stands in for a formatter run with --fix: the check succeeds but rewrites a versionFiles entry.
+      writeFileSync(path.join(repositoryRoot, "format.mjs"), 'import { appendFileSync } from "node:fs";\nappendFileSync("src/cli.js", "// formatted\\n");\n');
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', '  checks: ["node format.mjs"],', '  versionFiles: ["src/cli.js"],', "};"]);
+
+      const blocked = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(blocked.status, blocked.output).toBe(1);
+      expect(flattenOutput(blocked.output)).toContain("Un paso anterior (por ejemplo, un check) modificó src/cli.js");
+      expect(readFileSync(cliPath, "utf8")).toBe(`${cliContent}// formatted\n`);
+      expect(JSON.parse(readFileSync(path.join(repositoryRoot, "package.json"), "utf8")).version).toBe("0.1.0");
+      expect(runGit(["log", "-1", "--format=%s"], repositoryRoot)).toBe("chore: configure releases");
+      expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
     "should read a versionFiles entry written with backslashes and ./ as the same file on every platform, and name it with slashes",
     () => {
       const { repositoryRoot, remoteRoot } = createReleasedRepository();

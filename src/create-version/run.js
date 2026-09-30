@@ -796,6 +796,27 @@ async function verifyReleasedVersionFiles(context, version) {
 }
 
 /**
+ * Stops the release when an earlier step (such as a check running a formatter with `--fix`) changed
+ * `package.json` or a `versionFiles` entry: the plan requires them clean, so any difference from
+ * `HEAD` would be read as the original content and shipped in the release commit.
+ *
+ * @param {VersionFilesContext} context - Release context.
+ * @returns {Promise<void>}
+ * @throws {ReleaseStepError} When any of those files differs from `HEAD`.
+ */
+async function assertReleaseFilesMatchHead(context) {
+  const releasePathspecs = [PACKAGE_MANIFEST_FILE, ...context.config.versionFiles].map(toLiteralPathspec);
+  const changedPaths = (await context.reader.git(["diff", "--name-only", "-z", "HEAD", "--", ...releasePathspecs])).split("\0").filter(Boolean);
+
+  if (changedPaths.length > 0) {
+    throw new ReleaseStepError(
+      `Un paso anterior (por ejemplo, un check) modificó ${changedPaths.join(", ")}: el commit de release incluiría esos cambios.`,
+      `Revisá el check o commiteá esos cambios, y volvé a correr ${context.commands.createVersion}; no se tocó la versión.`
+    );
+  }
+}
+
+/**
  * Chooses the next version (flags or prompt), releases the CHANGELOG
  * `[Unreleased]` block and creates the release commit and annotated tag.
  *
@@ -803,6 +824,7 @@ async function verifyReleasedVersionFiles(context, version) {
  * @returns {Promise<void>}
  */
 async function bumpVersionStep(context) {
+  await assertReleaseFilesMatchHead(context);
   // Re-read the manifest: syncing main may have brought a newer version.
   const manifest = readReleaseFile(context, PACKAGE_MANIFEST_FILE, PACKAGE_MANIFEST_FILE);
   const currentVersion = JSON.parse(manifest.text).version;
