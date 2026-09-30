@@ -452,3 +452,10 @@ export const MAIN_SYNCED_RESTART_MESSAGE = buildMainSyncedRestartMessage(DEFAULT
 
 /** Exit code of a release stopped by a failed step, invalid arguments or configuration. */
 export const FAILURE_EXIT_CODE = 1;
+
+/**
+ * Modes `git ls-tree` reports for a regular file (plain or executable). Any other mode of a
+ * `versionFiles` entry in the release commit (`120000` symbolic link, `160000` submodule) means the
+ * commit does not carry the file with the version itself.
+ */
+export const GIT_REGULAR_FILE_MODES = Object.freeze(["100644", "100755"]);

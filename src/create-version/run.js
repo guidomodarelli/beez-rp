@@ -27,6 +27,7 @@ import { CODEX_NOT_FOUND_EXIT_CODE } from "../constants/changelog-ai.js";
 import {
   CREATE_VERSION_FLAG,
   FAILURE_EXIT_CODE,
+  GIT_REGULAR_FILE_MODES,
   GITHUB_REPOSITORY_PATTERN,
   MAIN_BRANCH,
   MAX_LISTED_COMMITS,
@@ -624,13 +625,72 @@ function requireVersionFileWithoutLinks(context, filePath) {
 }
 
 /**
- * Converts a configured path to the `/`-separated form Git expects in revisions and pathspecs.
+ * Builds the pathspec that matches a `versionFiles` entry literally, so a name such as `-v.txt`,
+ * `:version` or `v*.txt` is a file, never an option, pathspec magic nor a glob.
  *
- * @param {string} filePath - Configured path, relative to the root.
- * @returns {string} Path relative to the root with `/` separators and no `./` prefix.
+ * @param {string} filePath - Configured path, already `/`-separated by the configuration.
+ * @returns {string} Literal pathspec, to pass after `--`.
  */
-function toGitPath(filePath) {
-  return path.posix.normalize(filePath.split(path.sep).join("/"));
+function toLiteralPathspec(filePath) {
+  return `${GIT_LITERAL_PATHSPEC_PREFIX}${filePath}`;
+}
+
+/**
+ * Stops the release, before anything is written, when a `versionFiles` entry is not tracked by Git:
+ * an ignored file (such as generated output) or one never committed would make `git add` fail, or
+ * leave the release commit without it, after package.json and CHANGELOG.md were already rewritten.
+ *
+ * @param {VersionFilesContext} context - Release context.
+ * @returns {Promise<void>}
+ * @throws {ReleaseStepError} When an entry is not in the Git index.
+ */
+async function requireTrackedVersionFiles(context) {
+  const { versionFiles } = context.config;
+
+  if (versionFiles.length === 0) {
+    return;
+  }
+
+  const listing = await context.reader.git(["ls-files", "-z", "--", ...versionFiles.map(toLiteralPathspec)]);
+  const trackedPaths = new Set(listing.split("\0"));
+  const untrackedPath = versionFiles.find((filePath) => !trackedPaths.has(filePath));
+
+  if (untrackedPath !== undefined) {
+    throw new ReleaseStepError(
+      `${untrackedPath} (versionFiles) no está trackeado en Git (lo ignora .gitignore o nunca se commiteó): el commit de release no podría incluirlo.`,
+      `Commitealo (si está ignorado, sacalo de .gitignore o agregalo con git add -f) o sacalo de versionFiles en beez-rp.config.(m)js, y volvé a correr ${context.commands.createVersion}; no se tocó la versión.`
+    );
+  }
+}
+
+/**
+ * Stops a resume when a `versionFiles` entry is not a regular file in the release commit (`HEAD`),
+ * such as a committed symbolic link or a submodule. It reads the commit, not the working tree: a
+ * local change about to be set aside (`--ignore-local-changes`) never decides what gets pushed.
+ *
+ * @param {VersionFilesContext} context - Release context.
+ * @param {string} filePath - Configured path.
+ * @param {string} version - Version of the pending release.
+ * @returns {Promise<boolean>} Whether the entry exists in `HEAD` (as a regular file).
+ * @throws {ReleaseStepError} When the entry exists in `HEAD` but is not a regular file.
+ */
+async function requireRegularFileInReleaseCommit(context, filePath, version) {
+  const entry = await context.reader.git(["ls-tree", "-z", "HEAD", "--", toLiteralPathspec(filePath)]);
+
+  if (entry === "") {
+    return false;
+  }
+
+  const mode = entry.split(" ", 1)[0];
+
+  if (!GIT_REGULAR_FILE_MODES.includes(mode)) {
+    throw new ReleaseStepError(
+      `${filePath} (versionFiles) no es un archivo regular en el commit de release ${version} (HEAD, modo ${mode}): Git no llevaría la versión en ese archivo.`,
+      `Reemplazalo en el commit de release por el archivo real con sus líneas marcadas en ${version}, o corregí versionFiles en beez-rp.config.(m)js, y volvé a correr ${context.commands.createVersion}; no se subió ni publicó nada.`
+    );
+  }
+
+  return true;
 }
 
 /**
@@ -717,43 +777,48 @@ function rewriteMarkedVersions(context, filePath, content, version, untouchedNot
 
 /**
  * Computes the new content of every configured `versionFiles` entry, before anything is written,
- * so a missing file, a linked path, a file without markers or with block markers paired wrongly stops
- * the release with the version untouched.
+ * so a missing file, a linked path, a file Git does not track, a file without markers or with block
+ * markers paired wrongly stops the release with the version untouched.
  *
  * @param {ReleaseContext} context - Release context.
  * @param {string} version - Version being released.
- * @returns {{ filePath: string, content: string }[]} Files to write, relative to the root.
- * @throws {ReleaseStepError} When a file is missing, goes through a symbolic link, has block markers
- *   paired wrongly or none of its lines is marked.
+ * @returns {Promise<{ filePath: string, content: string }[]>} Files to write, relative to the root.
+ * @throws {ReleaseStepError} When a file is missing, goes through a symbolic link, is not tracked by
+ *   Git, has block markers paired wrongly or none of its lines is marked.
  */
-function prepareVersionFileUpdates(context, version) {
-  return context.config.versionFiles.map((filePath) => {
-    const absolutePath = path.join(context.repositoryRoot, filePath);
+async function prepareVersionFileUpdates(context, version) {
+  for (const filePath of context.config.versionFiles) {
     requireVersionFileWithoutLinks(context, filePath);
 
-    if (!existsSync(absolutePath)) {
+    if (!existsSync(path.join(context.repositoryRoot, filePath))) {
       throw new ReleaseStepError(`${filePath} (versionFiles) no existe.`, `Corregí versionFiles en beez-rp.config.(m)js y volvé a correr ${context.commands.createVersion}; no se tocó la versión.`);
     }
+  }
 
-    return { filePath, content: rewriteMarkedVersions(context, filePath, readFileSync(absolutePath, "utf8"), version, "no se tocó la versión") };
-  });
+  await requireTrackedVersionFiles(context);
+
+  return context.config.versionFiles.map((filePath) => ({
+    filePath,
+    content: rewriteMarkedVersions(context, filePath, readFileSync(path.join(context.repositoryRoot, filePath), "utf8"), version, "no se tocó la versión"),
+  }));
 }
 
 /**
  * Checks, before resuming a release commit that already exists (created by a previous run or by
  * hand), that every configured `versionFiles` entry in `HEAD` already carries the pending version
  * in its marked lines: the resume never rewrites them, so it would push or publish stale versions.
+ * Everything is read from `HEAD`, the content that gets pushed: the working tree may hold local
+ * changes that `--ignore-local-changes` sets aside afterwards.
  *
  * @param {VersionFilesContext} context - Release context.
  * @param {string} version - Version of the pending release.
  * @returns {Promise<void>}
- * @throws {ReleaseStepError} When a file is missing from `HEAD`, goes through a symbolic link, has
+ * @throws {ReleaseStepError} When a file is missing from `HEAD` or is not a regular file there, has
  *   block markers paired wrongly, has no marked version or has a marked version other than the pending one.
  */
 async function verifyReleasedVersionFiles(context, version) {
   for (const filePath of context.config.versionFiles) {
-    requireVersionFileWithoutLinks(context, filePath);
-    const content = await context.reader.tryGit(["show", `HEAD:${toGitPath(filePath)}`]);
+    const content = (await requireRegularFileInReleaseCommit(context, filePath, version)) ? await context.reader.git(["show", `HEAD:${filePath}`]) : null;
 
     if (content === null) {
       throw new ReleaseStepError(
@@ -825,7 +890,7 @@ async function bumpVersionStep(context) {
     );
   }
 
-  const versionFileUpdates = prepareVersionFileUpdates(context, nextRelease.version);
+  const versionFileUpdates = await prepareVersionFileUpdates(context, nextRelease.version);
   print(renderBox({ title: `CHANGELOG · ${UNRELEASED_HEADING} → [${nextRelease.version}]`, lines: readWorkingUnreleased(context.repositoryRoot).body.split("\n"), tone: BOX_TONE.info }));
   writeFileSync(manifestPath, manifest.replace(PACKAGE_VERSION_FIELD_PATTERN, `$1${nextRelease.version}$2`));
   writeFileSync(changelogPath, releasedChangelog);
@@ -836,7 +901,7 @@ async function bumpVersionStep(context) {
   const tag = toReleaseTag(nextRelease.version);
   const versionFilePaths = versionFileUpdates.map(({ filePath }) => filePath);
   // Literal pathspecs after `--`: a configured name such as `-v.txt` or `:version` is a file, never an option nor pathspec magic.
-  const versionFilePathspecs = versionFilePaths.map((filePath) => `${GIT_LITERAL_PATHSPEC_PREFIX}${toGitPath(filePath)}`);
+  const versionFilePathspecs = versionFilePaths.map(toLiteralPathspec);
   await runGitStep(
     context,
     ["add", "--", PACKAGE_MANIFEST_FILE, CHANGELOG_FILE, ...versionFilePathspecs],

@@ -614,6 +614,84 @@ describe("beez-rp create-version command", () => {
   );
 
   it(
+    "should stop before writing anything when a versionFiles entry is ignored by Git, instead of failing at git add with the files rewritten",
+    () => {
+      const { repositoryRoot } = createReleasedRepository();
+      const generatedPath = path.join(repositoryRoot, "dist", "cli.js");
+      const generatedContent = 'program.version("0.1.0"); // beez-rp-version\n';
+      writeFileSync(path.join(repositoryRoot, ".gitignore"), "dist/\n");
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", '  versionFiles: ["dist/cli.js"],', "};"]);
+      mkdirSync(path.dirname(generatedPath));
+      writeFileSync(generatedPath, generatedContent);
+
+      const blocked = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(blocked.status, blocked.output).toBe(1);
+      expect(flattenOutput(blocked.output)).toContain("dist/cli.js (versionFiles) no está trackeado en Git");
+      expect(flattenOutput(blocked.output)).toContain("git add -f");
+      expect(readFileSync(generatedPath, "utf8")).toBe(generatedContent);
+      expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe("");
+      expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should read a versionFiles entry written with backslashes as the same file on every platform, and name it with slashes",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      const cliPath = path.join(repositoryRoot, "src", "cli.js");
+      mkdirSync(path.dirname(cliPath));
+      writeFileSync(cliPath, 'program.version("0.1.0");\n');
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", `  versionFiles: [${JSON.stringify(".\\src\\cli.js")}],`, "};"]);
+
+      const blocked = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(blocked.status, blocked.output).toBe(1);
+      expect(flattenOutput(blocked.output)).toContain("src/cli.js (versionFiles) no tiene ninguna versión marcada para actualizar.");
+
+      writeFileSync(cliPath, 'program.version("0.1.0"); // beez-rp-version\n');
+      runGit(["commit", "--quiet", "-am", "chore: mark the version"], repositoryRoot);
+      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+
+      const release = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(release.status, release.output).toBe(0);
+      expect(runGit(["show", "main:src/cli.js"], remoteRoot)).toBe('program.version("0.2.0"); // beez-rp-version');
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should resume a release commit with --ignore-local-changes when a versionFiles entry was replaced locally by a symbolic link, checking the committed file",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      const sourceRoot = path.join(repositoryRoot, "src");
+      const externalRoot = path.join(path.dirname(repositoryRoot), "external");
+      mkdirSync(sourceRoot);
+      writeFileSync(path.join(sourceRoot, "cli.js"), 'program.version("0.1.0"); // beez-rp-version\n');
+      pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", '  versionFiles: ["src/cli.js"],', "};"]);
+      writeFileSync(path.join(sourceRoot, "cli.js"), 'program.version("0.2.0"); // beez-rp-version\n');
+      writeFileSync(path.join(repositoryRoot, "package.json"), `${JSON.stringify({ name: "fixture-app", version: "0.2.0" }, null, 2)}\n`);
+      writeFileSync(path.join(repositoryRoot, "CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n## [0.2.0] - 2026-01-01\n\n### Added\n\n- Algo nuevo.\n");
+      runGit(["add", "-A"], repositoryRoot);
+      runGit(["commit", "--quiet", "-m", "0.2.0"], repositoryRoot);
+      // The tracked directory becomes a link to an outside copy (a junction on Windows: no symlink privilege needed).
+      mkdirSync(externalRoot);
+      writeFileSync(path.join(externalRoot, "cli.js"), 'program.version("9.9.9"); // beez-rp-version\n');
+      rmSync(sourceRoot, { recursive: true });
+      symlinkSync(externalRoot, sourceRoot, process.platform === "win32" ? "junction" : "dir");
+
+      const resumed = runCli(repositoryRoot, ["--ignore-local-changes"]);
+
+      expect(resumed.status, resumed.output).toBe(0);
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("v0.2.0");
+      expect(runGit(["show", "main:src/cli.js"], remoteRoot)).toBe('program.version("0.2.0"); // beez-rp-version');
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
     "should require --bump or --set-version without an interactive terminal, since the version prompt has no default",
     () => {
       const { repositoryRoot, remoteRoot } = createReleasedRepository();

@@ -66,7 +66,8 @@ import { DEFAULT_PROJECT_COMMANDS, describeProjectCommands, detectPackageManager
  *   lockfile) when `package.json` declares a `ci` script; `false` skips the checks on purpose.
  *   `versionFiles` lists files (relative to the root) whose marked lines get the new version in the
  *   release commit: `beez-rp-version` / `x-release-please-version` lines and
- *   `beez-rp-start-version`…`beez-rp-end` blocks.
+ *   `beez-rp-start-version`…`beez-rp-end` blocks. Each entry must be a file tracked by Git, written
+ *   with `/` or `\` separators.
  * @typedef {{
  *   projectName: string | null,
  *   changelog: { audience: string, language: "es" | "en" },
@@ -84,7 +85,9 @@ import { DEFAULT_PROJECT_COMMANDS, describeProjectCommands, detectPackageManager
  * }} ResolvedCreateVersionConfig
  *   `checks` is empty when they are skipped on purpose and `null` when none are configured nor
  *   found, which blocks a new release. `commands` are the project's package manager commands, used
- *   by the default checks and by every "run it again" hint.
+ *   by the default checks and by every "run it again" hint. `versionFiles` holds every entry in
+ *   `/`-separated form without `./` segments (`.\src\cli.js` → `src/cli.js`), the form the file
+ *   system, Git and the messages use.
  * @typedef {{ packageScripts?: Record<string, unknown>, commands?: ProjectCommands }} ConfigResolutionContext
  */
 
@@ -238,11 +241,11 @@ export function resolveCreateVersionConfig(rawConfig, { packageScripts = {}, com
     throw invalidField("publishedLabel", "a string");
   }
 
-  const versionFiles = config.versionFiles ?? [];
-  if (!isStringList(versionFiles) || versionFiles.some((filePath) => !isPathInsideRoot(filePath))) {
+  const configuredVersionFiles = config.versionFiles ?? [];
+  if (!isStringList(configuredVersionFiles) || configuredVersionFiles.some((filePath) => !isPathInsideRoot(filePath))) {
     throw invalidField("versionFiles", "a list of file paths relative to the project root, inside it");
   }
-  const builtInVersionFile = versionFiles.find(isReleaseCommitBuiltInFile);
+  const builtInVersionFile = configuredVersionFiles.find(isReleaseCommitBuiltInFile);
   if (builtInVersionFile !== undefined) {
     throw invalidField(
       "versionFiles",
@@ -262,7 +265,7 @@ export function resolveCreateVersionConfig(rawConfig, { packageScripts = {}, com
     publish: /** @type {"npm" | ReleaseHook | null} */ (publish),
     artifact: /** @type {string | null} */ (artifact),
     summary,
-    versionFiles,
+    versionFiles: configuredVersionFiles.map(toSlashSeparatedPath),
     commands,
   };
 }
@@ -274,7 +277,20 @@ export function resolveCreateVersionConfig(rawConfig, { packageScripts = {}, com
  * @returns {boolean} Whether it is a relative path that cannot escape the root.
  */
 function isPathInsideRoot(filePath) {
-  return !path.isAbsolute(filePath) && !filePath.split(/[\\/]/u).includes("..");
+  // The win32 root covers `/x`, `\x`, `C:\x` and the drive-relative `C:x` alike, on every platform.
+  return path.win32.parse(filePath).root === "" && !filePath.split(/[\\/]/u).includes("..");
+}
+
+/**
+ * Converts a configured path, written with `/` or `\` separators on any platform, to the
+ * `/`-separated form without `./` segments, so the file system (where POSIX would read a `\` as part
+ * of the name), Git and the messages all name the same file.
+ *
+ * @param {string} filePath - Configured path, already known to stay inside the root.
+ * @returns {string} Path relative to the root with `/` separators, such as `src/cli.js`.
+ */
+function toSlashSeparatedPath(filePath) {
+  return path.posix.normalize(filePath.replaceAll("\\", "/"));
 }
 
 /**
@@ -285,7 +301,7 @@ function isPathInsideRoot(filePath) {
  * @returns {boolean} Whether it is `package.json` or `CHANGELOG.md` at the root.
  */
 function isReleaseCommitBuiltInFile(filePath) {
-  const normalizedPath = path.posix.normalize(filePath.replaceAll("\\", "/")).replace(/\/+$/u, "").toLowerCase();
+  const normalizedPath = toSlashSeparatedPath(filePath).replace(/\/+$/u, "").toLowerCase();
   return RELEASE_COMMIT_BUILT_IN_FILES.some((builtInFile) => builtInFile.toLowerCase() === normalizedPath);
 }
 

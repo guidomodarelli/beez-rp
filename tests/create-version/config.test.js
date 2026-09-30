@@ -22,9 +22,19 @@ describe("create-version config", () => {
 
     expect(resolveCreateVersionConfig({ ...base, versionFiles: ["src/cli.ts", "docs/install.md"] }).versionFiles).toEqual(["src/cli.ts", "docs/install.md"]);
     expect(resolveCreateVersionConfig(base).versionFiles).toEqual([]);
-    for (const versionFiles of [["../outside.ts"], ["src/../../outside.ts"], [path.resolve("absolute.ts")], [""], "src/cli.ts"]) {
+    for (const versionFiles of [["../outside.ts"], ["src/../../outside.ts"], ["src\\..\\..\\outside.ts"], [path.resolve("absolute.ts")], ["/absolute.ts"], ["\\absolute.ts"], ["C:\\absolute.ts"], [""], "src/cli.ts"]) {
       expect(() => resolveCreateVersionConfig({ ...base, versionFiles })).toThrow(/versionFiles must be a list of file paths relative to the project root/);
     }
+  });
+
+  it("should resolve versionFiles written with backslashes or ./ segments to the same slash-separated path on every platform", () => {
+    const base = { changelog: { audience: "equipo" } };
+
+    expect(resolveCreateVersionConfig({ ...base, versionFiles: ["src\\cli.js", ".\\docs/install.md", "./lib//version.js"] }).versionFiles).toEqual([
+      "src/cli.js",
+      "docs/install.md",
+      "lib/version.js",
+    ]);
   });
 
   it("should reject versionFiles naming package.json or CHANGELOG.md under any spelling, since the release commit already writes them", () => {
