@@ -422,7 +422,7 @@ async function listDiffPaths(context, diffArguments) {
  * @param {MonorepoContext} context - Context.
  * @param {ReadonlySet<string>} releasePaths - Manifests, changelogs and `versionFiles` of the chosen packages.
  * @returns {Promise<void>}
- * @throws {ReleaseStepError} When something outside those files is staged, or the changelog of a package left out has changes.
+ * @throws {ReleaseStepError} When something outside those files is staged or differs from `HEAD`, or the changelog of a package left out has changes.
  */
 async function assertOnlyReleaseChanges(context, releasePaths) {
   const foreignStaged = (await listDiffPaths(context, ["--cached"])).filter((filePath) => !releasePaths.has(filePath));
@@ -435,11 +435,21 @@ async function assertOnlyReleaseChanges(context, releasePaths) {
 
   const chosenNames = new Set(context.chosen.map(({ unit }) => unit.name));
   const skippedChangelogs = new Set(context.units.filter((unit) => !chosenNames.has(unit.name)).map((unit) => unit.changelogPath));
-  const dirtySkippedChangelogs = skippedChangelogs.size > 0 ? (await listDiffPaths(context, ["HEAD"])).filter((filePath) => skippedChangelogs.has(filePath)) : [];
+  const changedPaths = await listDiffPaths(context, ["HEAD"]);
+  const dirtySkippedChangelogs = changedPaths.filter((filePath) => skippedChangelogs.has(filePath));
   if (dirtySkippedChangelogs.length > 0) {
     throw new ReleaseStepError(
       `Hay cambios sin commitear en el CHANGELOG de paquetes que no salen en este release: ${dirtySkippedChangelogs.join(", ")}.`,
       `No se escribió nada. Commitealos aparte o guardalos con git stash, o elegí también esos paquetes, y volvé a correr ${context.commands.createVersion}.`
+    );
+  }
+
+  // Unstaged changes (for example, a check that rewrites a file) stay out of the commit but not out of what gets published.
+  const foreignChanged = changedPaths.filter((filePath) => !releasePaths.has(filePath));
+  if (foreignChanged.length > 0) {
+    throw new ReleaseStepError(
+      `Un paso anterior (por ejemplo, un check) modificó ${foreignChanged.slice(0, MAX_LISTED_ITEMS).join(", ")}, que no son del release: se publicarían sin estar commiteados.`,
+      `No se escribió nada. Revisá el check o commiteá esos cambios aparte, y volvé a correr ${context.commands.createVersion}.`
     );
   }
 }

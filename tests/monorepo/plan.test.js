@@ -109,6 +109,17 @@ describe("buildMonorepoPlan", () => {
     expect(plan.mode).toBe(RELEASE_MODE.upToDate);
   });
 
+  it("syncs main before saying up to date when origin/main has new commits", () => {
+    const plan = buildMonorepoPlan(
+      monorepoState({ main: { aheadCommits: [], behindCount: 2 }, packages: [packageSnapshot("widget"), packageSnapshot("cli")] }),
+      NPM_PACKAGE,
+      { tagFormat: TAG_FORMAT }
+    );
+
+    expect(plan.mode).toBe(RELEASE_MODE.newRelease);
+    expect(stepIds(plan)).toEqual([RELEASE_STEP.syncMain]);
+  });
+
   it("resumes a local release commit that never reached origin, publishing what npm lacks", () => {
     const state = monorepoState({
       main: { aheadCommits: [{ sha: "local-release", subject: "release: @acme/widget@1.1.0, @acme/cli@1.0.1", body: "" }], behindCount: 0 },

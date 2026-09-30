@@ -308,23 +308,9 @@ function describeSkippedPublication(name, version, tag) {
  */
 function planNewRelease(state, capabilities, commands, warnings) {
   const candidates = state.packages.filter((packageSnapshot) => packageSnapshot.unreleasedCommits.length > 0);
-
-  if (candidates.length === 0) {
-    return createPlan({ mode: RELEASE_MODE.upToDate, warnings });
-  }
-
-  // Only the packages chosen later need valid changelogs (checked when the versions are chosen):
-  // an invalid one must not block releasing the others, so the plan only warns about it.
-  for (const packageSnapshot of candidates) {
-    if (packageSnapshot.changelog.unknownSections.length > 0) {
-      warnings.push(
-        `${packageSnapshot.unit.changelogPath} ${UNRELEASED_HEADING} usa secciones no válidas (${packageSnapshot.changelog.unknownSections.join(", ")}): si elegís publicar ${packageSnapshot.unit.name}, el release se corta antes de tocar nada.`
-      );
-    }
-  }
-
   const candidateNames = candidates.map((packageSnapshot) => packageSnapshot.unit.name);
 
+  // Before the up-to-date check: the local checkout may not have the changes (or workspaces) origin already has.
   if (state.main.behindCount > 0) {
     return createPlan({
       mode: RELEASE_MODE.newRelease,
@@ -338,6 +324,20 @@ function planNewRelease(state, capabilities, commands, warnings) {
       warnings,
       candidates: candidateNames,
     });
+  }
+
+  if (candidates.length === 0) {
+    return createPlan({ mode: RELEASE_MODE.upToDate, warnings });
+  }
+
+  // Only the packages chosen later need valid changelogs (checked when the versions are chosen):
+  // an invalid one must not block releasing the others, so the plan only warns about it.
+  for (const packageSnapshot of candidates) {
+    if (packageSnapshot.changelog.unknownSections.length > 0) {
+      warnings.push(
+        `${packageSnapshot.unit.changelogPath} ${UNRELEASED_HEADING} usa secciones no válidas (${packageSnapshot.changelog.unknownSections.join(", ")}): si elegís publicar ${packageSnapshot.unit.name}, el release se corta antes de tocar nada.`
+      );
+    }
   }
 
   if (capabilities.checksMissing) {

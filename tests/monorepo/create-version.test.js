@@ -505,6 +505,36 @@ describe("create-version in monorepo mode", () => {
   );
 
   it(
+    "stops before the release commit when a check rewrites a tracked file without staging it",
+    async () => {
+      const { repositoryRoot, remoteRoot } = createReleasedMonorepo();
+      mkdirSync(path.join(repositoryRoot, "scripts"), { recursive: true });
+      writeFileSync(
+        path.join(repositoryRoot, "scripts/format.mjs"),
+        'import { appendFileSync } from "node:fs";\nappendFileSync("packages/core/index.js", "// formatted\\n");\n'
+      );
+      writeFileSync(
+        path.join(repositoryRoot, "beez-rp.config.js"),
+        ['export default {', '  changelog: { audience: "quien usa {name}" },', '  packages: "workspaces",', '  checks: ["node scripts/format.mjs"],', '  publish: "npm",', "};", ""].join("\n")
+      );
+      commitAll(repositoryRoot, "chore: format check");
+      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+      pushCoreFeature(repositoryRoot);
+      const releasedSha = runGit(["rev-parse", "HEAD"], repositoryRoot);
+      const registry = await startRegistry();
+
+      const release = await runCliAsync(repositoryRoot, ["--accept-suggested"], npmEnvironment(registry.registryUrl));
+
+      expect(release.status, release.output).toBe(1);
+      expect(flattenOutput(release.output)).toContain("Un paso anterior (por ejemplo, un check) modificó packages/core/index.js, que no son del release");
+      expect(runGit(["rev-parse", "HEAD"], repositoryRoot)).toBe(releasedSha);
+      expect(runGit(["rev-parse", "main"], remoteRoot)).toBe(releasedSha);
+      expect(registry.publications).toEqual([]);
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
     "does not publish when prepare modified a tracked file of the release commit",
     async () => {
       const { repositoryRoot } = createReleasedMonorepo();
