@@ -1,6 +1,6 @@
 /**
  * `prepublishOnly` guard of the Beez packages: they are published with npm by
- * `pnpm create-version`, which verifies the tarball against
+ * `create-version` (run through the project's package manager), which verifies the tarball against
  * `npm pack --dry-run`, so a `pnpm publish` (or yarn/bun) is blocked.
  *
  * The guard only blocks package managers it recognizes. Without a user agent,
@@ -16,6 +16,7 @@ import {
   GUARD_PUBLISH_EXIT_CODE,
   PACKAGE_MANAGER_USER_AGENT_VARIABLE,
 } from "./constants/guard-publish.js";
+import { describeProjectCommands } from "./package-manager.js";
 
 /**
  * @typedef {{ allowed: boolean, packageManager: string | null, message: string | null, exitCode: number }} PublishGuardDecision
@@ -39,12 +40,14 @@ export function findBlockedPublishPackageManager(userAgent) {
 /**
  * Builds the explanation printed when a publication is blocked.
  *
- * @param {string} packageManager - Blocked package manager name.
+ * @param {string} packageManager - Blocked package manager name (pnpm, yarn or bun), which is also
+ *   the one the project uses: the message names its own create-version command.
  * @returns {string} Message in Spanish with what to run instead.
  */
 export function buildBlockedPublishMessage(packageManager) {
+  const { createVersion } = describeProjectCommands(/** @type {import("./package-manager.js").PackageManagerName} */ (packageManager));
   return (
-    `beez-rp guard-publish: no publiques con ${packageManager}. Los paquetes Beez se publican con \`pnpm create-version\`, ` +
+    `beez-rp guard-publish: no publiques con ${packageManager}. Los paquetes Beez se publican con \`${createVersion}\`, ` +
     "que publica con npm y verifica el tarball contra `npm pack --dry-run`."
   );
 }

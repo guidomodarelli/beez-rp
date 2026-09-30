@@ -19,6 +19,7 @@ import path from "node:path";
 
 import { CHANGELOG_FILE } from "../constants/changelog.js";
 import { LOCAL_CHANGES_STASH_MESSAGE } from "../constants/create-version.js";
+import { DEFAULT_PROJECT_COMMANDS } from "../package-manager.js";
 import { ReleaseStepError } from "./errors.js";
 
 /**
@@ -50,19 +51,20 @@ function buildPathspec(keepChangelog) {
  * Sets the uncommitted changes aside in a new stash entry.
  *
  * @param {GitReader} reader - Git reader of the repository root.
- * @param {{ keepChangelog: boolean }} options - Whether `CHANGELOG.md` stays in the working tree (a new release commits it).
+ * @param {{ keepChangelog: boolean, createVersionCommand?: string }} options - Whether `CHANGELOG.md` stays in the
+ *   working tree (a new release commits it), and how the project runs create-version (for the hints).
  * @returns {Promise<SetAsideChanges>} Stash entry holding the changes.
  * @throws {ReleaseStepError} When Git cannot create the stash entry; nothing was changed then.
  */
-export async function setAsideLocalChanges(reader, { keepChangelog }) {
+export async function setAsideLocalChanges(reader, { keepChangelog, createVersionCommand = DEFAULT_PROJECT_COMMANDS.createVersion }) {
   if ((await reader.tryGit(["stash", "push", "--include-untracked", "--message", LOCAL_CHANGES_STASH_MESSAGE, "--", ...buildPathspec(keepChangelog)])) === null) {
-    throw new ReleaseStepError("No se pudieron apartar los cambios sin commitear (git stash push falló).", "No se tocó nada: revisá git status y volvé a correr pnpm create-version.");
+    throw new ReleaseStepError("No se pudieron apartar los cambios sin commitear (git stash push falló).", `No se tocó nada: revisá git status y volvé a correr ${createVersionCommand}.`);
   }
 
   const sha = await reader.tryGit(["rev-parse", "--verify", "--quiet", `${STASH_REFERENCE_PREFIX}{0}`]);
 
   if (!sha) {
-    throw new ReleaseStepError("Se apartaron los cambios pero no se encontró la entrada de git stash.", "Buscalos con git stash list y recuperalos con git stash pop --index antes de volver a correr pnpm create-version.");
+    throw new ReleaseStepError("Se apartaron los cambios pero no se encontró la entrada de git stash.", `Buscalos con git stash list y recuperalos con git stash pop --index antes de volver a correr ${createVersionCommand}.`);
   }
 
   return { sha, keepChangelog };

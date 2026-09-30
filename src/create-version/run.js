@@ -29,7 +29,6 @@ import {
   FAILURE_EXIT_CODE,
   GITHUB_REPOSITORY_PATTERN,
   MAIN_BRANCH,
-  MAIN_SYNCED_RESTART_MESSAGE,
   MAX_LISTED_COMMITS,
   MAX_LISTED_ITEMS,
   MIGRATION_STATUS,
@@ -51,6 +50,7 @@ import {
   SHORT_SHA_LENGTH,
   SUMMARY_VERSION_PLACEHOLDER,
   VERSION_PREFIX_PATTERN,
+  buildMainSyncedRestartMessage,
 } from "../constants/create-version.js";
 import {
   BOX_TONE,
@@ -88,7 +88,8 @@ import {
 } from "./npm.js";
 import { describeNpmPublishFailure, describeNpmTokenSource } from "./npm-auth.js";
 import { restoreLocalChanges, setAsideLocalChanges } from "./local-changes.js";
-import { RELEASE_USAGE, buildReleasePlan, listLocalChangesToSetAside, parseReleaseArguments } from "./plan.js";
+import { describeProjectCommands, detectPackageManager } from "../package-manager.js";
+import { buildReleasePlan, buildReleaseUsage, listLocalChangesToSetAside, parseReleaseArguments } from "./plan.js";
 import { createGitReader, listCommits, runCommandLine, runInherited } from "./process.js";
 import { collectReleaseState } from "./state.js";
 
@@ -109,6 +110,7 @@ import { collectReleaseState } from "./state.js";
  *   commitCount: number | null,
  *   packageName: string,
  *   registryUrl: string | null,
+ *   commands: import("../package-manager.js").ProjectCommands,
  * }} ReleaseContext
  */
 
@@ -425,7 +427,7 @@ function requireReleaseVersion(context) {
   const version = context.version ?? context.state.headVersion;
 
   if (!version) {
-    throw new ReleaseStepError("No se pudo leer la versión a publicar.", "Revisá package.json y volvé a correr pnpm create-version.");
+    throw new ReleaseStepError("No se pudo leer la versión a publicar.", `Revisá package.json y volvé a correr ${context.commands.createVersion}.`);
   }
 
   return version;
@@ -444,6 +446,7 @@ function describeReleaseCapabilities(config) {
     prepare: config.prepare !== null,
     publish: config.publish !== null,
     publishTitle: config.publish === NPM_PUBLISHER ? "Publicar en npm" : "Publicar el release",
+    commands: config.commands,
   };
 }
 
@@ -548,7 +551,7 @@ async function generateChangelogStep(context) {
           : "el bloque sigue vacío o con secciones no válidas";
     throw new ReleaseStepError(
       `No se pudo completar ${UNRELEASED_HEADING} del CHANGELOG: ${reason}.`,
-      `Completalo (con la IA o a mano) usando ${CHANGE_TYPES.map((type) => `### ${type}`).join(", ")} y volvé a correr pnpm create-version.`
+      `Completalo (con la IA o a mano) usando ${CHANGE_TYPES.map((type) => `### ${type}`).join(", ")} y volvé a correr ${context.commands.createVersion}.`
     );
   }
 
@@ -603,7 +606,7 @@ async function bumpVersionStep(context) {
   }
 
   if (!nextRelease) {
-    throw new ReleaseStepError("No se eligió ninguna versión.", "Volvé a correr pnpm create-version.");
+    throw new ReleaseStepError("No se eligió ninguna versión.", `Volvé a correr ${context.commands.createVersion}.`);
   }
 
   const changelogPath = path.join(context.repositoryRoot, CHANGELOG_FILE);
@@ -614,7 +617,7 @@ async function bumpVersionStep(context) {
   } catch (error) {
     throw new ReleaseStepError(
       `CHANGELOG.md no está listo: ${error instanceof Error ? error.message : String(error)}`,
-      `Completá ${UNRELEASED_HEADING} con ${CHANGE_TYPES.map((type) => `### ${type}`).join(", ")} y volvé a correr pnpm create-version.`,
+      `Completá ${UNRELEASED_HEADING} con ${CHANGE_TYPES.map((type) => `### ${type}`).join(", ")} y volvé a correr ${context.commands.createVersion}.`,
       { cause: error }
     );
   }
@@ -629,7 +632,7 @@ async function bumpVersionStep(context) {
     context,
     ["commit", "--quiet", "-m", nextRelease.version],
     "El commit de versión falló",
-    "Corregí el error, descartá el cambio con git checkout package.json CHANGELOG.md y volvé a correr pnpm create-version."
+    `Corregí el error, descartá el cambio con git checkout package.json CHANGELOG.md y volvé a correr ${context.commands.createVersion}.`
   );
   await runGitStep(context, ["tag", "-a", tag, "-m", nextRelease.version], `No se pudo crear el tag ${tag}`, `Si ya existe, revisalo con git show ${tag}.`);
 
@@ -649,7 +652,7 @@ async function prepareReleaseStep(context) {
   const version = requireReleaseVersion(context);
 
   if (Array.isArray(prepare)) {
-    await runConfiguredCommands(context, prepare, "El release quedó en local: corregí el error y volvé a correr pnpm create-version, que retoma desde acá.");
+    await runConfiguredCommands(context, prepare, `El release quedó en local: corregí el error y volvé a correr ${context.commands.createVersion}, que retoma desde acá.`);
   } else if (prepare) {
     await prepare(createHookContext(context.repositoryRoot, context.reader, version));
   }
@@ -674,7 +677,7 @@ async function pushReleaseStep(context) {
     context,
     ["push", "--atomic", RELEASE_REMOTE, MAIN_BRANCH, `refs/tags/${tag}`],
     `El push de ${MAIN_BRANCH} + ${tag} falló`,
-    `El release quedó en local: corregí el error y corré pnpm create-version, que retoma el push de ${tag}.`
+    `El release quedó en local: corregí el error y corré ${context.commands.createVersion}, que retoma el push de ${tag}.`
   );
 
   if (!(await context.reader.tryGit(["ls-remote", "--tags", RELEASE_REMOTE, tag]))) {
@@ -702,11 +705,11 @@ async function pushReleaseTagStep(context) {
     context,
     ["push", RELEASE_REMOTE, `refs/tags/${tag}`],
     `El push de ${tag} falló`,
-    `No se publicó nada: corregí el error y corré pnpm create-version desde ${tag} (HEAD desacoplado).`
+    `No se publicó nada: corregí el error y corré ${context.commands.createVersion} desde ${tag} (HEAD desacoplado).`
   );
 
   if (!(await context.reader.tryGit(["ls-remote", "--tags", RELEASE_REMOTE, `refs/tags/${tag}`]))) {
-    throw new ReleaseStepError(`${tag} no aparece en ${RELEASE_REMOTE} después del push.`, `Subilo con git push ${RELEASE_REMOTE} ${tag} y volvé a correr pnpm create-version desde el tag.`);
+    throw new ReleaseStepError(`${tag} no aparece en ${RELEASE_REMOTE} después del push.`, `Subilo con git push ${RELEASE_REMOTE} ${tag} y volvé a correr ${context.commands.createVersion} desde el tag.`);
   }
 
   context.version = version;
@@ -725,7 +728,7 @@ async function listTrackedChanges(context) {
   const output = await context.reader.tryGit(["status", "--porcelain", "--untracked-files=no"]);
 
   if (output === null) {
-    throw new ReleaseStepError("No se pudo leer el estado del working tree antes de publicar.", "No se publicó nada. Revisá git status y volvé a correr pnpm create-version.");
+    throw new ReleaseStepError("No se pudo leer el estado del working tree antes de publicar.", `No se publicó nada. Revisá git status y volvé a correr ${context.commands.createVersion}.`);
   }
 
   return output.split("\n").filter((line) => line.trim() !== "");
@@ -755,7 +758,7 @@ async function resolvePublishedArtifact(context, version, workingManifest) {
   if (trackedChanges.length > 0) {
     throw new ReleaseStepError(
       `El paso de preparación modificó archivos versionados: ${trackedChanges.slice(0, MAX_LISTED_ITEMS).join("; ")}.`,
-      "No se publicó nada. prepare puede generar archivos ignorados (dist/, releases/) pero no cambiar archivos versionados como package.json: revertí esos cambios y volvé a correr pnpm create-version."
+      `No se publicó nada. prepare puede generar archivos ignorados (dist/, releases/) pero no cambiar archivos versionados como package.json: revertí esos cambios y volvé a correr ${context.commands.createVersion}.`
     );
   }
 
@@ -774,7 +777,7 @@ async function resolvePublishedArtifact(context, version, workingManifest) {
   if (!prepared) {
     throw new ReleaseStepError(
       `No hay un artefacto preparado de ${version} que coincida con ${expandArtifactPattern(artifact, release)}.`,
-      "Revisá la salida del paso de preparación y volvé a correr pnpm create-version: retoma la preparación y la publicación."
+      `Revisá la salida del paso de preparación y volvé a correr ${context.commands.createVersion}: retoma la preparación y la publicación.`
     );
   }
 
@@ -789,14 +792,14 @@ async function resolvePublishedArtifact(context, version, workingManifest) {
   if (!npmPack.pack) {
     throw new ReleaseStepError(
       `No se pudo verificar ${prepared.path}: ${npmPack.problem}.`,
-      "No se publicó nada. Corré npm pack --dry-run --json --ignore-scripts en la raíz para ver el error y volvé a correr pnpm create-version."
+      `No se publicó nada. Corré npm pack --dry-run --json --ignore-scripts en la raíz para ver el error y volvé a correr ${context.commands.createVersion}.`
     );
   }
 
   if (npmPack.pack.version !== version) {
     throw new ReleaseStepError(
       `npm pack --dry-run describe ${npmPack.pack.name}@${npmPack.pack.version} y se está publicando ${version}.`,
-      "No se publicó nada. Revisá que HEAD sea el commit de release y volvé a correr pnpm create-version."
+      `No se publicó nada. Revisá que HEAD sea el commit de release y volvé a correr ${context.commands.createVersion}.`
     );
   }
 
@@ -805,7 +808,7 @@ async function resolvePublishedArtifact(context, version, workingManifest) {
   if (problems.length > 0) {
     throw new ReleaseStepError(
       `El artefacto ${prepared.path} no se puede publicar: ${problems.join("; ")}.`,
-      "No se publicó nada. Hacé que prepare empaquete con npm pack --ignore-scripts después de construir, borrá ese tarball y volvé a correr pnpm create-version."
+      `No se publicó nada. Hacé que prepare empaquete con npm pack --ignore-scripts después de construir, borrá ese tarball y volvé a correr ${context.commands.createVersion}.`
     );
   }
 
@@ -820,16 +823,17 @@ async function resolvePublishedArtifact(context, version, workingManifest) {
  *
  * @param {Record<string, unknown>} manifest - Working tree `package.json`.
  * @param {string} repositoryRoot - Repository root.
+ * @param {string} createVersionCommand - How the project runs create-version (for the hint).
  * @returns {Promise<string>} Registry URL, already checked to be a plain http(s) URL.
  * @throws {ReleaseStepError} When the registry is not a valid http(s) URL or npm cannot report it.
  */
-async function resolveReleaseRegistry(manifest, repositoryRoot) {
+async function resolveReleaseRegistry(manifest, repositoryRoot, createVersionCommand) {
   try {
     return await resolvePublishRegistry(manifest, repositoryRoot);
   } catch (error) {
     throw new ReleaseStepError(
       `No se puede publicar: ${error instanceof Error ? error.message : String(error)}.`,
-      "No se publicó nada. Corregí el registry (publishConfig.registry o publishConfig[\"@scope:registry\"] en package.json, o registry/@scope:registry en .npmrc) con una URL http(s) sin credenciales y volvé a correr pnpm create-version."
+      `No se publicó nada. Corregí el registry (publishConfig.registry o publishConfig["@scope:registry"] en package.json, o registry/@scope:registry en .npmrc) con una URL http(s) sin credenciales y volvé a correr ${createVersionCommand}.`
     );
   }
 }
@@ -849,7 +853,7 @@ async function publishReleaseStep(context) {
     const manifest = readWorkingManifest(context.repositoryRoot);
     const packageName = String(manifest.name);
     context.packageName = packageName;
-    const registryUrl = await resolveReleaseRegistry(manifest, context.repositoryRoot);
+    const registryUrl = await resolveReleaseRegistry(manifest, context.repositoryRoot, context.commands.createVersion);
     context.registryUrl = registryUrl;
     const authConfigLine = buildNpmAuthConfigLine(registryUrl);
     const artifactPath = await resolvePublishedArtifact(context, version, manifest);
@@ -861,14 +865,14 @@ async function publishReleaseStep(context) {
     if (result.missingToken) {
       throw new ReleaseStepError(
         `Falta ${NPM_TOKEN_VARIABLE} para publicar ${version}.`,
-        `Definilo en ${NPM_TOKEN_LOCATIONS} y corré pnpm create-version: retoma solo la publicación.`
+        `Definilo en ${NPM_TOKEN_LOCATIONS} y corré ${context.commands.createVersion}: retoma solo la publicación.`
       );
     }
 
     if (result.exitCode !== 0) {
       // npm inherited the terminal (2FA), so its output cannot be parsed: the credentials are checked again.
       const npmAuth = await checkNpmPublishAccess(packageName, context.repositoryRoot, registryUrl);
-      const failure = describeNpmPublishFailure(npmAuth, { exitCode: result.exitCode, version });
+      const failure = describeNpmPublishFailure(npmAuth, { exitCode: result.exitCode, version }, context.commands);
       throw new ReleaseStepError(failure.message, failure.hint);
     }
 
@@ -969,14 +973,14 @@ async function describeReleaseOnOrigin(context, remoteUrl) {
 
   // A detached release is published from its tag and never pushes `main`.
   if (!context.state.currentBranch) {
-    return `${tag} ya está en ${host} (tag); falta ${target}. Corré pnpm create-version desde ${tag} (HEAD desacoplado) para reintentar solo la publicación.`;
+    return `${tag} ya está en ${host} (tag); falta ${target}. Corré ${context.commands.createVersion} desde ${tag} (HEAD desacoplado) para reintentar solo la publicación.`;
   }
 
   if (context.pushed || (await isTagCommitOnRemoteMain(context.reader, tag))) {
-    return `${tag} ya está en ${host} (${MAIN_BRANCH} + tag); falta ${target}. Corré pnpm create-version para reintentar solo la publicación.`;
+    return `${tag} ya está en ${host} (${MAIN_BRANCH} + tag); falta ${target}. Corré ${context.commands.createVersion} para reintentar solo la publicación.`;
   }
 
-  return `${tag} ya está en ${host} solo como tag: ${MAIN_BRANCH} de ${RELEASE_REMOTE} todavía no tiene el commit del release; faltan subir ${MAIN_BRANCH} y ${target}. Corré pnpm create-version para retomar desde el push.`;
+  return `${tag} ya está en ${host} solo como tag: ${MAIN_BRANCH} de ${RELEASE_REMOTE} todavía no tiene el commit del release; faltan subir ${MAIN_BRANCH} y ${target}. Corré ${context.commands.createVersion} para retomar desde el push.`;
 }
 
 /**
@@ -1019,18 +1023,20 @@ function hasFailedNpmLookup(snapshot) {
  */
 export async function runCreateVersion({ repositoryRoot, argv }) {
   const startedAt = Date.now();
+  // Usage and argument errors are printed before the configuration loads.
+  const usage = buildReleaseUsage(describeProjectCommands(detectPackageManager(repositoryRoot)));
   let options;
 
   try {
     options = parseReleaseArguments(argv);
   } catch (error) {
     print(`${ICON.failure} ${paint("red", error instanceof Error ? error.message : String(error))}`);
-    print(RELEASE_USAGE);
+    print(usage);
     return FAILURE_EXIT_CODE;
   }
 
   if (options.help) {
-    print(RELEASE_USAGE);
+    print(usage);
     return 0;
   }
 
@@ -1089,7 +1095,7 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
 
     if (planIgnoringChanges.blockers.length === 0 && planIgnoringChanges.steps.length > 0) {
       if (!(await askToIgnoreLocalChanges(listLocalChangesToSetAside(state, planIgnoringChanges.mode)))) {
-        print(`${ICON.info} Release cancelado: no se tocó nada. Commiteá o guardá los cambios y volvé a correr pnpm create-version.`);
+        print(`${ICON.info} Release cancelado: no se tocó nada. Commiteá o guardá los cambios y volvé a correr ${config.commands.createVersion}.`);
         return 0;
       }
 
@@ -1127,7 +1133,7 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   }
 
   if (options.dryRun) {
-    print(`${ICON.info} ${paint("cyan", "--dry-run: no se cambió nada. Corré pnpm create-version para ejecutar el plan.")}`);
+    print(`${ICON.info} ${paint("cyan", `--dry-run: no se cambió nada. Corré ${config.commands.createVersion} para ejecutar el plan.`)}`);
     return 0;
   }
 
@@ -1139,13 +1145,26 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   }
 
   /** @type {ReleaseContext} */
-  const context = { repositoryRoot, config, state, options, reader, version: plan.pendingVersion, pushed: false, published: false, commitCount: null, packageName: state.packageName, registryUrl: null };
+  const context = {
+    repositoryRoot,
+    config,
+    state,
+    options,
+    reader,
+    version: plan.pendingVersion,
+    pushed: false,
+    published: false,
+    commitCount: null,
+    packageName: state.packageName,
+    registryUrl: null,
+    commands: config.commands,
+  };
   const changesToSetAside = options.ignoreLocalChanges ? listLocalChangesToSetAside(state, plan.mode) : [];
   let setAside = null;
 
   if (changesToSetAside.length > 0) {
     try {
-      setAside = await setAsideLocalChanges(reader, { keepChangelog: plan.mode === RELEASE_MODE.newRelease });
+      setAside = await setAsideLocalChanges(reader, { keepChangelog: plan.mode === RELEASE_MODE.newRelease, createVersionCommand: config.commands.createVersion });
     } catch (error) {
       const hint = error instanceof ReleaseStepError ? ` ${error.hint}` : "";
       print(`${ICON.failure} ${paint("red", `${error instanceof Error ? error.message : String(error)}${hint}`)}`);
@@ -1194,7 +1213,7 @@ async function runPlanSteps(context, plan, remoteUrl, startedAt) {
         print(
           renderBox({
             title: `${MAIN_BRANCH} actualizado`,
-            lines: [`${ICON.info} ${MAIN_SYNCED_RESTART_MESSAGE}`, "", paint("gray", "No se tocó la versión ni los tags.")],
+            lines: [`${ICON.info} ${buildMainSyncedRestartMessage(context.commands.createVersion)}`, "", paint("gray", "No se tocó la versión ni los tags.")],
             tone: BOX_TONE.info,
           })
         );
@@ -1206,7 +1225,7 @@ async function runPlanSteps(context, plan, remoteUrl, startedAt) {
         lines.push("", `${paint("bold", "Qué hacer:")} ${error.hint}`);
       }
       const releaseOnOrigin = await describeReleaseOnOrigin(context, remoteUrl);
-      lines.push("", releaseOnOrigin ? `${ICON.warning} ${paint("bold", releaseOnOrigin)}` : paint("gray", "pnpm create-version retoma desde el primer paso que falte."));
+      lines.push("", releaseOnOrigin ? `${ICON.warning} ${paint("bold", releaseOnOrigin)}` : paint("gray", `${context.commands.createVersion} retoma desde el primer paso que falte.`));
       print(renderBox({ title: `Falló el paso ${index + 1}: ${planStep.title}`, lines, tone: BOX_TONE.danger }));
       return FAILURE_EXIT_CODE;
     }

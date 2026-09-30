@@ -50,6 +50,10 @@
       "types": "./types/guard-publish.d.ts",
       "default": "./src/guard-publish.js"
     },
+    "./package-manager": {
+      "types": "./types/package-manager.d.ts",
+      "default": "./src/package-manager.js"
+    },
     "./create-version": {
       "types": "./types/create-version/index.d.ts",
       "default": "./src/create-version/index.js"

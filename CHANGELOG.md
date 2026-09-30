@@ -6,6 +6,10 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y e
 
 ## [Unreleased]
 
+### Added
+
+- Soporte de bun, npm y yarn además de pnpm: beez-rp detecta el package manager por el campo `packageManager` del `package.json` o, si falta, por el lockfile (sin ninguno asume pnpm, como hasta ahora). Los checks por defecto corren con ese package manager (`bun run ci`) y todos los mensajes indican su comando (`bun run create-version`, `npm run create-version`), incluido el de `guard-publish`. El nuevo módulo `beez-rp/package-manager` expone `detectPackageManager` y `describeProjectCommands`.
+
 ## [0.5.0] - 2026-09-27
 
 ### Added

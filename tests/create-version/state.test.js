@@ -58,6 +58,8 @@ function commandEnvironment(overrides = {}) {
   const temporaryHome = mkdtempSync(path.join(os.tmpdir(), "beez-rp-cli-home-"));
   temporaryDirectories.push(temporaryHome);
   const environment = Object.fromEntries(Object.entries(cleanEnvironment()).filter(([variableName]) => !ISOLATED_NPM_VARIABLE_PATTERN.test(variableName)));
+  // FORCE_COLOR wins over NO_COLOR, and the ANSI codes it adds split the messages the tests match.
+  delete environment.FORCE_COLOR;
   return { ...environment, HOME: temporaryHome, USERPROFILE: temporaryHome, NO_COLOR: "1", ...overrides };
 }
 

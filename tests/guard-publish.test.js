@@ -73,15 +73,15 @@ function runNpmPublishDryRun(packageRoot, environment) {
 
 describe("decidePublishGuard", () => {
   it.each([
-    ["pnpm", PNPM_USER_AGENT],
-    ["yarn", "yarn/4.9.2 npm/? node/v24.21.0 linux x64"],
-    ["bun", "bun/1.2.19 npm/? node/v24.3.0 darwin arm64"],
-  ])("blocks %s and explains how Beez packages are published", (packageManager, userAgent) => {
+    ["pnpm", PNPM_USER_AGENT, "pnpm create-version"],
+    ["yarn", "yarn/4.9.2 npm/? node/v24.21.0 linux x64", "yarn create-version"],
+    ["bun", "bun/1.2.19 npm/? node/v24.3.0 darwin arm64", "bun run create-version"],
+  ])("blocks %s and names its own create-version command", (packageManager, userAgent, createVersionCommand) => {
     const decision = decidePublishGuard(userAgent);
 
     expect(decision).toMatchObject({ allowed: false, packageManager, exitCode: GUARD_PUBLISH_EXIT_CODE.blocked });
     expect(decision.message).toContain(`no publiques con ${packageManager}`);
-    expect(decision.message).toContain("pnpm create-version");
+    expect(decision.message).toContain(`\`${createVersionCommand}\``);
   });
 
   it.each([

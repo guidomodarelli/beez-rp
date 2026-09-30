@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import { MIGRATION_STATUS, NPM_AUTH_STATUS, NPM_LOOKUP_STATUS, NPM_TOKEN_SOURCE, PULL_REQUEST_STATE, RELEASE_MODE, RELEASE_STEP } from "../../src/constants/create-version.js";
-import { buildReleasePlan, listLocalChangesToSetAside, parseReleaseArguments } from "../../src/create-version/plan.js";
+import { RELEASE_USAGE, buildReleasePlan, buildReleaseUsage, listLocalChangesToSetAside, parseReleaseArguments } from "../../src/create-version/plan.js";
+import { describeProjectCommands } from "../../src/package-manager.js";
 import { resolveRequestedVersion } from "../../src/versions.js";
 import { ALLOWED_NEXT_VERSIONS, CURRENT_STABLE_VERSION, REJECTED_VERSION_BUMP_CASES } from "../../src/testing.js";
 
@@ -489,5 +490,28 @@ describe("create-version plan from a detached release tag", () => {
 
     expect(plan.mode).toBe(RELEASE_MODE.blocked);
     expect(plan.blockers[0].title).toContain("inválido o venció");
+  });
+});
+
+describe("buildReleasePlan with the project's package manager", () => {
+  const BUN_COMMANDS = describeProjectCommands("bun");
+
+  it("should quote the project's create-version command in every hint", () => {
+    const plan = buildReleasePlan(createMainState({ workingTreeChanges: [" M src/index.ts"] }), { ...DEPLOYED_APP, commands: BUN_COMMANDS });
+    const hints = plan.blockers.flatMap((blocker) => blocker.details).join("\n");
+
+    expect(hints).toContain("bun run create-version --ignore-local-changes");
+    expect(hints).not.toContain("pnpm");
+  });
+
+  it("should name the project's ci command when nothing validates the release", () => {
+    const plan = buildReleasePlan(createMainState(), { ...DEPLOYED_APP, checksMissing: true, commands: BUN_COMMANDS });
+
+    expect(plan.blockers[0]?.details[0]).toContain("se corre bun run ci");
+  });
+
+  it("should keep the pnpm usage when no commands are given", () => {
+    expect(buildReleaseUsage()).toBe(RELEASE_USAGE);
+    expect(buildReleaseUsage(BUN_COMMANDS).split("\n")[0]).toBe("Uso: bun run create-version [opciones]");
   });
 });
