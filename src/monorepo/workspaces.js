@@ -24,6 +24,7 @@ import {
   WORKSPACES_PACKAGES,
 } from "../constants/monorepo.js";
 import { isPathInsideRoot } from "../create-version/config.js";
+import { isStableReleaseVersion } from "../versions.js";
 
 /**
  * @typedef {{
@@ -157,7 +158,7 @@ export function expandWorkspacePatterns(repositoryRoot, patterns) {
  * @param {string} repositoryRoot - Repository root.
  * @param {"workspaces" | readonly string[]} packages - `packages` of the configuration: the root workspaces, or explicit patterns.
  * @returns {WorkspacePackage[]} Packages with a `name` (private ones without it are skipped), sorted by directory.
- * @throws {Error} When a matched manifest is malformed or non-private without a `name`, no package is found or two packages share a name.
+ * @throws {Error} When a matched manifest is malformed, non-private without a `name` or without a stable `X.Y.Z` `version`, no package is found or two packages share a name.
  */
 export function discoverWorkspacePackages(repositoryRoot, packages) {
   const patterns = packages === WORKSPACES_PACKAGES ? readDeclaredWorkspaces(readManifest(path.join(repositoryRoot, PACKAGE_MANIFEST_FILE))) : packages;
@@ -168,6 +169,10 @@ export function discoverWorkspacePackages(repositoryRoot, packages) {
         return [];
       }
       throw new Error(`beez-rp create-version: ${directory}/${PACKAGE_MANIFEST_FILE} no tiene "name"; agregale un "name" para publicarlo, o "private": true (o excluí ese workspace) para omitirlo`);
+    }
+    if (manifest.private !== true && !isStableReleaseVersion(manifest.version)) {
+      const currentVersion = manifest.version === undefined ? "no tiene \"version\"" : `tiene "version": ${JSON.stringify(manifest.version)}`;
+      throw new Error(`beez-rp create-version: ${directory}/${PACKAGE_MANIFEST_FILE} ${currentVersion}; un paquete publicado necesita una versión estable X.Y.Z (por ejemplo "0.1.0"), o "private": true (o excluí ese workspace) para omitirlo`);
     }
     return [
       {
