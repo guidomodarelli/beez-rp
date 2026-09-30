@@ -318,7 +318,11 @@ export const HEAD_FILE_DIFFERENCE = Object.freeze({
   executableBitChanged: "executableBitChanged",
   outsideRepository: "outsideRepository",
   filtered: "filtered",
+  implicitPath: "implicitPath",
 });
+
+/** URL scheme of the modules Node loads from a file, the only ones the configuration module graph lists. */
+export const FILE_URL_SCHEME = "file:";
 
 /** Directory of installed dependencies: the configuration module graph never lists files inside it. */
 export const NODE_MODULES_DIRECTORY = "node_modules";
@@ -549,8 +553,11 @@ export const GIT_EXECUTABLE_FILE_MODE = "100755";
  */
 export const GIT_FILE_MODE_SETTING = "core.fileMode";
 
-/** Permission bits of a working-tree file that make it executable (owner, group or others). */
-export const EXECUTABLE_PERMISSION_BITS = 0o111;
+/**
+ * Owner execute permission bit (`S_IXUSR`) of a working-tree file: the only bit Git reads to record
+ * a file as executable (`100755`), so `0654` is still a plain file for Git.
+ */
+export const OWNER_EXECUTE_PERMISSION_BIT = 0o100;
 
 /**
  * First Node version with `module.registerHooks`, the synchronous module hook that lists the modules

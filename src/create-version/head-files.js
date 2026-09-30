@@ -12,19 +12,20 @@ import { lstatSync, readlinkSync } from "node:fs";
 import path from "node:path";
 
 import {
-  EXECUTABLE_PERMISSION_BITS,
   GIT_EXECUTABLE_FILE_MODE,
   GIT_FILE_MODE_SETTING,
   GIT_REGULAR_FILE_MODES,
   GIT_SYMBOLIC_LINK_MODE,
   HEAD_FILE_DIFFERENCE,
   LS_TREE_ENTRY_PATH_SEPARATOR,
+  OWNER_EXECUTE_PERMISSION_BIT,
 } from "../constants/create-version.js";
 import { GIT_LITERAL_PATHSPEC_PREFIX } from "../constants/version-files.js";
+import { readGitBlob } from "./process.js";
 
 /**
  * @typedef {import("./process.js").GitReader} GitReader
- * @typedef {"notCommitted" | "typeChanged" | "contentChanged" | "executableBitChanged" | "outsideRepository" | "filtered"} HeadFileDifferenceKind
+ * @typedef {"notCommitted" | "typeChanged" | "contentChanged" | "executableBitChanged" | "outsideRepository" | "filtered" | "implicitPath"} HeadFileDifferenceKind
  * @typedef {{ file: string, difference: HeadFileDifferenceKind }} HeadFileDifference
  *   `file` is relative to the repository root and separated with `/`, or absolute for
  *   `outsideRepository`.
@@ -55,15 +56,17 @@ async function readHeadEntries(reader, files) {
 }
 
 /**
- * Tells whether a working-tree symbolic link points where the committed one does.
+ * Tells whether a working-tree symbolic link points where the committed one does, comparing both
+ * targets byte for byte (a target may end in whitespace).
  *
- * @param {GitReader} reader - Git reader of the repository root.
+ * @param {string} repositoryRoot - Repository root.
  * @param {string} absolutePath - Link in the working tree.
  * @param {string} object - Blob of the committed link, which holds its target.
  * @returns {Promise<boolean>} `true` when both targets are the same.
  */
-async function hasCommittedLinkTarget(reader, absolutePath, object) {
-  return (await reader.tryGit(["cat-file", "blob", object])) === readlinkSync(absolutePath);
+async function hasCommittedLinkTarget(repositoryRoot, absolutePath, object) {
+  const committedTarget = await readGitBlob(repositoryRoot, object);
+  return committedTarget !== null && committedTarget.equals(readlinkSync(absolutePath, { encoding: "buffer" }));
 }
 
 /**
@@ -111,13 +114,14 @@ export async function listFilesDifferentFromHead(reader, repositoryRoot, files) 
     if (!headEntry) {
       differenceByFile.set(file, HEAD_FILE_DIFFERENCE.notCommitted);
     } else if (GIT_REGULAR_FILE_MODES.includes(headEntry.mode) && stats?.isFile()) {
-      const isExecutable = (stats.mode & EXECUTABLE_PERMISSION_BITS) !== 0;
+      // Git records a file as executable only from its owner execute bit.
+      const isExecutable = (stats.mode & OWNER_EXECUTE_PERMISSION_BIT) !== 0;
       if (comparesExecutableBit && isExecutable !== (headEntry.mode === GIT_EXECUTABLE_FILE_MODE)) {
         differenceByFile.set(file, HEAD_FILE_DIFFERENCE.executableBitChanged);
       }
       regularFiles.push({ file, object: headEntry.object });
     } else if (headEntry.mode === GIT_SYMBOLIC_LINK_MODE && stats?.isSymbolicLink()) {
-      if (!(await hasCommittedLinkTarget(reader, absolutePath, headEntry.object))) {
+      if (!(await hasCommittedLinkTarget(repositoryRoot, absolutePath, headEntry.object))) {
         differenceByFile.set(file, HEAD_FILE_DIFFERENCE.contentChanged);
       }
     } else {

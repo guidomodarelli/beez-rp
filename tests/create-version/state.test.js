@@ -1500,6 +1500,102 @@ describe("beez-rp create-version command", () => {
   );
 
   it(
+    "should not release beez-rp from its own checkout with --ignore-local-changes while a module that the command loaded before reading the configuration, two imports away from it, has an uncommitted edit",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      for (const directory of ["bin", "src"]) {
+        cpSync(path.join(BEEZ_RP_ROOT, directory), path.join(repositoryRoot, directory), { recursive: true });
+        writeFileSync(path.join(repositoryRoot, directory, "package.json"), `${JSON.stringify({ type: "module" })}\n`);
+      }
+      // src/constants/create-version.js imports src/constants/package-manager.js, and both load when the command starts.
+      pushConfiguration(repositoryRoot, [
+        'import { MAIN_BRANCH } from "./src/constants/create-version.js";',
+        "export default {",
+        "  changelog: { audience: `equipo de ${MAIN_BRANCH}` },",
+        "  checks: false,",
+        "};",
+      ]);
+      appendFileSync(path.join(repositoryRoot, "src", "constants", "package-manager.js"), "// local\n");
+
+      const result = spawnSync(process.execPath, [path.join(repositoryRoot, "bin", "beez-rp.js"), "create-version", "--bump", "minor", "--ignore-local-changes"], {
+        cwd: repositoryRoot,
+        encoding: "utf8",
+        env: commandEnvironment(),
+      });
+      const output = `${result.stdout}${result.stderr}`;
+
+      expect(result.status, output).toBe(0);
+      expect(flattenOutput(output)).toContain("La configuración tiene cambios sin commitear");
+      expect(flattenOutput(output)).toContain("src/constants/package-manager.js (su contenido es distinto del de HEAD)");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+      expect(runGit(["stash", "list"], repositoryRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should not release with --ignore-local-changes while a module the configuration reaches through a data: module has an uncommitted edit",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      const cliPath = path.join(repositoryRoot, "src", "cli.js");
+      const helperPath = path.join(repositoryRoot, "release", "version-files.js");
+      mkdirSync(path.dirname(cliPath));
+      mkdirSync(path.dirname(helperPath));
+      writeFileSync(cliPath, 'program.version("0.1.0"); // beez-rp-version\n');
+      writeFileSync(helperPath, 'export const versionFiles = ["src/cli.js"];\n');
+      pushConfiguration(repositoryRoot, [
+        'const helperUrl = new URL("./release/version-files.js", import.meta.url).href;',
+        "const { versionFiles } = await import(`data:text/javascript,${encodeURIComponent(`export * from ${JSON.stringify(helperUrl)};`)}`);",
+        "export default {",
+        '  changelog: { audience: "equipo" },',
+        "  checks: false,",
+        "  versionFiles,",
+        "};",
+      ]);
+      writeFileSync(helperPath, "export const versionFiles = [];\n");
+
+      const blocked = runCli(repositoryRoot, ["--bump", "minor", "--ignore-local-changes"]);
+
+      expect(blocked.status, blocked.output).toBe(0);
+      expect(flattenOutput(blocked.output)).toContain("La configuración tiene cambios sin commitear");
+      expect(flattenOutput(blocked.output)).toContain("release/version-files.js (su contenido es distinto del de HEAD)");
+      expect(runGit(["log", "-1", "--format=%s", "main"], repositoryRoot)).toBe("chore: configure releases");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+      expect(runGit(["stash", "list"], repositoryRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "should not release while the configuration requires a repository module without its full path, and name the path to complete",
+    () => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      const settingsPath = path.join(repositoryRoot, "release", "settings.json");
+      mkdirSync(path.dirname(settingsPath));
+      writeFileSync(settingsPath, '{ "audience": "equipo" }\n');
+      // Node picks settings.json here, but an ignored settings.js (or a link named so) would take precedence.
+      pushConfiguration(repositoryRoot, [
+        'import { createRequire } from "node:module";',
+        'const { audience } = createRequire(import.meta.url)("./release/settings");',
+        "export default {",
+        "  changelog: { audience },",
+        "  checks: false,",
+        "};",
+      ]);
+
+      const blocked = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(blocked.status, blocked.output).toBe(0);
+      expect(flattenOutput(blocked.output)).toContain("La configuración tiene cambios sin commitear");
+      expect(flattenOutput(blocked.output)).toContain("release/settings (se importa sin la ruta completa del archivo");
+      expect(flattenOutput(blocked.output)).not.toContain("release/settings.json (");
+      expect(runGit(["log", "-1", "--format=%s", "main"], repositoryRoot)).toBe("chore: configure releases");
+      expect(runGit(["tag", "--list"], remoteRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
+  it(
     "should not run a hook with --ignore-local-changes while a module it reads a value from through require has an uncommitted edit that keeps the hook source identical",
     () => {
       const { repositoryRoot } = createReleasedRepository();
@@ -2206,7 +2302,7 @@ describe("beez-rp create-version command", () => {
       const result = spawnSync(process.execPath, ["--input-type=module", "--eval", script], { cwd: repositories[1], encoding: "utf8", env: commandEnvironment() });
 
       expect(result.status, result.stderr).toBe(0);
-      const expectedGraph = { loaded: true, files: ["beez-rp.config.js", "release/checks.js"], externalFiles: [], startedExplicitly: false };
+      const expectedGraph = { loaded: true, files: ["beez-rp.config.js", "release/checks.js"], externalFiles: [], implicitPaths: [], startedExplicitly: false };
       expect(JSON.parse(result.stdout)).toEqual([expectedGraph, expectedGraph]);
     },
     GIT_FIXTURE_TEST_TIMEOUT_MS

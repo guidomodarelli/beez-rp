@@ -319,6 +319,8 @@ export async function inspectConfigModules(reader, repositoryRoot) {
 
   /** @type {HeadFileDifference[]} */
   const externalModules = configModules.externalFiles.map((file) => ({ file, difference: HEAD_FILE_DIFFERENCE.outsideRepository }));
+  /** @type {HeadFileDifference[]} */
+  const implicitModules = configModules.implicitPaths.map((file) => ({ file, difference: HEAD_FILE_DIFFERENCE.implicitPath }));
   // A filtered module is compared with HEAD through its clean filter, which can hide what Node ran.
   const filteredModules = await listFilteredFiles(reader, configModules.files);
   const unfilteredModules = configModules.files.filter((file) => !filteredModules.includes(file));
@@ -326,6 +328,7 @@ export async function inspectConfigModules(reader, repositoryRoot) {
     ...(await listFilesDifferentFromHead(reader, repositoryRoot, unfilteredModules)),
     ...filteredModules.map((file) => ({ file, difference: HEAD_FILE_DIFFERENCE.filtered })),
     ...externalModules,
+    ...implicitModules,
   ];
   return { configModules, uncommittedConfigModules };
 }

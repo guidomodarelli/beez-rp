@@ -54,6 +54,8 @@ const HEAD_FILE_DIFFERENCE_LABELS = Object.freeze({
   [HEAD_FILE_DIFFERENCE.executableBitChanged]: "su permiso de ejecución es distinto del de HEAD",
   [HEAD_FILE_DIFFERENCE.outsideRepository]: "está fuera del repositorio, por ejemplo detrás de un enlace simbólico, y HEAD no lo respalda",
   [HEAD_FILE_DIFFERENCE.filtered]: "tiene un atributo filter en .gitattributes, así que no se puede comprobar que lo que cargó Node sea lo commiteado",
+  [HEAD_FILE_DIFFERENCE.implicitPath]:
+    "se importa sin la ruta completa del archivo (sin extensión o como carpeta), así que no se puede comprobar qué archivo cargó Node: importalo con su ruta completa, con extensión (por ejemplo ./settings.js)",
 });
 
 /**

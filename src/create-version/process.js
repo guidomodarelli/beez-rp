@@ -76,6 +76,26 @@ export function runCommandLine(commandLine, cwd) {
 }
 
 /**
+ * Reads a Git blob byte for byte (unlike {@link runCaptured}, which trims the output), for content
+ * whose trailing whitespace matters, such as the target of a committed symbolic link.
+ *
+ * @param {string} repositoryRoot - Repository root.
+ * @param {string} object - Blob object name.
+ * @returns {Promise<Buffer | null>} Blob bytes, or `null` when Git cannot read it; never rejects.
+ */
+export function readGitBlob(repositoryRoot, object) {
+  return new Promise((resolve) => {
+    const child = spawn("git", ["cat-file", "blob", object], { cwd: repositoryRoot, stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
+    /** @type {Buffer[]} */
+    const chunks = [];
+
+    child.stdout.on("data", (chunk) => chunks.push(chunk));
+    child.on("error", () => resolve(null));
+    child.on("close", (status) => resolve(status === 0 ? Buffer.concat(chunks) : null));
+  });
+}
+
+/**
  * Creates a Git reader bound to a repository.
  *
  * @param {string} repositoryRoot - Repository root.
