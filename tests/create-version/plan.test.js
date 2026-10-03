@@ -90,7 +90,7 @@ describe("create-version arguments", () => {
 describe("create-version plan", () => {
   it("should bump and push a deployed app without optional steps", () => {
     expect(buildReleasePlan(createMainState(), DEPLOYED_APP).mode).toBe(RELEASE_MODE.newRelease);
-    expect(stepIds(createMainState())).toEqual([RELEASE_STEP.bumpVersion, RELEASE_STEP.pushRelease]);
+    expect(stepIds(createMainState())).toEqual([RELEASE_STEP.generateChangelog, RELEASE_STEP.bumpVersion, RELEASE_STEP.pushRelease]);
   });
 
   it("should run every configured step of an npm package in order", () => {
@@ -138,7 +138,7 @@ describe("create-version plan", () => {
 
   it("should apply pending migrations before the version and warn when they cannot be verified", () => {
     const pending = createMainState({ migrations: { status: MIGRATION_STATUS.pending, pending: ["0001_init"], target: "db.example.test", reason: null } });
-    expect(stepIds(pending)).toEqual([RELEASE_STEP.applyMigrations, RELEASE_STEP.bumpVersion, RELEASE_STEP.pushRelease]);
+    expect(stepIds(pending)).toEqual([RELEASE_STEP.applyMigrations, RELEASE_STEP.generateChangelog, RELEASE_STEP.bumpVersion, RELEASE_STEP.pushRelease]);
 
     const unknown = buildReleasePlan(createMainState({ migrations: { status: MIGRATION_STATUS.unknown, pending: [], target: null, reason: "sin red" } }), DEPLOYED_APP);
     expect(unknown.blockers).toEqual([]);
@@ -186,7 +186,7 @@ describe("create-version plan", () => {
   });
 
   it("should accept an uncommitted CHANGELOG.md but block other changes and foreign commits on main", () => {
-    expect(stepIds(createMainState({ workingTreeChanges: [" M CHANGELOG.md"] }))).toEqual([RELEASE_STEP.bumpVersion, RELEASE_STEP.pushRelease]);
+    expect(stepIds(createMainState({ workingTreeChanges: [" M CHANGELOG.md"] }))).toEqual([RELEASE_STEP.generateChangelog, RELEASE_STEP.bumpVersion, RELEASE_STEP.pushRelease]);
 
     const plan = buildReleasePlan(createMainState({ workingTreeChanges: [" M package.json"], main: { aheadCommits: [{ subject: "fix: local hack" }], behindCount: 0 } }), DEPLOYED_APP);
     expect(plan.mode).toBe(RELEASE_MODE.blocked);
@@ -203,7 +203,7 @@ describe("create-version plan", () => {
 
     const plan = buildReleasePlan(dirty, DEPLOYED_APP, { ignoreLocalChanges: true });
     expect(plan.mode).toBe(RELEASE_MODE.newRelease);
-    expect(plan.steps.map((planStep) => planStep.id)).toEqual([RELEASE_STEP.bumpVersion, RELEASE_STEP.pushRelease]);
+    expect(plan.steps.map((planStep) => planStep.id)).toEqual([RELEASE_STEP.generateChangelog, RELEASE_STEP.bumpVersion, RELEASE_STEP.pushRelease]);
     expect(plan.warnings).toEqual([expect.stringContaining("Se ignoran 2 cambio(s) sin commitear")]);
     expect(listLocalChangesToSetAside(dirty, plan.mode)).toEqual([" M docs/guide.md", "?? notes.txt"]);
   });
@@ -254,8 +254,8 @@ describe("create-version plan", () => {
     expect(buildReleasePlan(createMainState({ workingTreeChanges: [" M CHANGELOG.md"] }), DEPLOYED_APP, { ignoreLocalChanges: true }).warnings).toEqual([]);
   });
 
-  it("should block unknown [Unreleased] sections and an unreachable npm", () => {
-    expect(buildReleasePlan(createMainState({ changelog: { exists: true, entryCount: 1, unknownSections: ["Mejoras"] } }), DEPLOYED_APP).blockers[0].title).toContain("Mejoras");
+  it("should regenerate unknown [Unreleased] sections and block an unreachable npm", () => {
+    expect(buildReleasePlan(createMainState({ changelog: { exists: true, entryCount: 1, unknownSections: ["Mejoras"] } }), DEPLOYED_APP).blockers).toEqual([]);
     expect(buildReleasePlan(createMainState({ npm: { status: NPM_LOOKUP_STATUS.failed, publishedVersions: [], reason: "offline" } }), NPM_PACKAGE).blockers[0].title).toContain("npm");
   });
 

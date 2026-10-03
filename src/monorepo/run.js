@@ -13,14 +13,12 @@
  * @module monorepo/run
  */
 
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { readUnreleased, releaseUnreleased } from "../changelog.js";
-import { buildChangelogPrompt, runCodex } from "../changelog-ai.js";
-import { CHANGE_TYPES, CHANGELOG_FILE, UNRELEASED_HEADING } from "../constants/changelog.js";
-import { CODEX_NOT_FOUND_EXIT_CODE } from "../constants/changelog-ai.js";
+import { fillUnreleasedFromCommits, readUnreleased, releaseUnreleased } from "../changelog.js";
+import { UNRELEASED_HEADING } from "../constants/changelog.js";
 import {
   CREATE_VERSION_FLAG,
   FAILURE_EXIT_CODE,
@@ -40,7 +38,7 @@ import {
   SUMMARY_VERSION_PLACEHOLDER,
   buildMainSyncedRestartMessage,
 } from "../constants/create-version.js";
-import { AUDIENCE_PACKAGE_PLACEHOLDER, MONOREPO_RELEASE_STEP, SKIP_PACKAGE_CHOICE, SUMMARY_PACKAGE_PLACEHOLDER } from "../constants/monorepo.js";
+import { MONOREPO_RELEASE_STEP, SKIP_PACKAGE_CHOICE, SUMMARY_PACKAGE_PLACEHOLDER } from "../constants/monorepo.js";
 import { RELEASE_TYPE_ORDER } from "../constants/versions.js";
 import { findPnpmPackRewrites, findPreparedArtifact, expandArtifactPattern, isSafeArtifactPath, verifyPreparedArtifact, withArtifactOutsidePackageRoot } from "../create-version/artifact.js";
 import { describeReleaseTypes } from "../create-version/config.js";
@@ -62,6 +60,7 @@ import {
   commitReleaseFiles,
   prepareVersionFileUpdates,
   readReleaseFile,
+  readChangelogReleaseFile,
   renderCommitList,
   renderNpmAuthRow,
   rewriteManifestVersion,
@@ -134,11 +133,11 @@ function renderMonorepoDiagnosis(state, repositoryRoot) {
   ];
 
   for (const packageSnapshot of state.packages) {
-    const { unit, lastRelease, unreleasedCommits, npm, changelog, npmAuth } = packageSnapshot;
+    const { unit, lastRelease, unreleasedCommits, npm, npmAuth } = packageSnapshot;
     const released = lastRelease?.version ? paint("cyan", lastRelease.tag ?? lastRelease.version) : paint("gray", "sin releases");
     const pending = unreleasedCommits.length > 0 ? paint("yellow", `${unreleasedCommits.length} commit(s) sin publicar`) : "al día";
     const published = npm ? (npm.status === NPM_LOOKUP_STATUS.ok ? `npm ${npm.latestVersion ?? npm.publishedVersions.at(-1) ?? "—"}` : paint("red", "npm no respondió")) : null;
-    const changelogNote = unreleasedCommits.length > 0 && changelog.entryCount === 0 ? paint("gray", "CHANGELOG vacío: lo completa Codex") : null;
+    const changelogNote = unreleasedCommits.length > 0 ? paint("gray", "CHANGELOG: listado de commits al versionar") : null;
     rows.push(
       renderRow(
         unreleasedCommits.length > 0 ? ICON.warning : ICON.success,
@@ -212,27 +211,6 @@ async function assertTagCanBeCreated(context, tag) {
     throw new ReleaseStepError(
       `El tag ${tag} ya existe en local.`,
       `No se escribió nada. Revisalo con git show ${tag}; si sobra, borralo con git tag -d ${tag} y volvé a correr ${context.commands.createVersion}.`
-    );
-  }
-}
-
-/**
- * Checks that the `[Unreleased]` block of every chosen package uses only valid sections, so a package
- * left out of the release never blocks the others. Empty blocks are filled by Codex later.
- *
- * @param {MonorepoContext} context - Context, with the chosen packages.
- * @returns {void}
- * @throws {ReleaseStepError} When a chosen changelog uses unknown sections.
- */
-function assertChosenChangelogsAreValid(context) {
-  const invalid = context.chosen
-    .map(({ unit }) => ({ unit, unknownSections: readPackageUnreleased(path.join(context.repositoryRoot, unit.changelogPath)).unknownSections }))
-    .filter(({ unknownSections }) => unknownSections.length > 0);
-
-  if (invalid.length > 0) {
-    throw new ReleaseStepError(
-      `${invalid.map(({ unit, unknownSections }) => `${unit.changelogPath} ${UNRELEASED_HEADING} usa secciones no válidas: ${unknownSections.join(", ")}`).join("; ")}.`,
-      `No se escribió nada. Usá solo ${CHANGE_TYPES.map((type) => `### ${type}`).join(", ")} (o elegí "No publicar ahora" para ese paquete) y volvé a correr ${context.commands.createVersion}.`
     );
   }
 }
@@ -312,8 +290,6 @@ async function chooseVersionsStep(context) {
     throw new ReleaseCancelledError();
   }
 
-  assertChosenChangelogsAreValid(context);
-
   // Checked again before the commit; here it stops the release before migrations are applied.
   const versionFilesByPackage = await assertReleaseScope(context);
   for (const { unit, version } of context.chosen) {
@@ -323,50 +299,17 @@ async function chooseVersionsStep(context) {
 }
 
 /**
- * Reads the `[Unreleased]` block of a package changelog.
- *
- * @param {string} changelogPath - Absolute path.
- * @returns {ReturnType<typeof readUnreleased>} Unreleased state.
- */
-function readPackageUnreleased(changelogPath) {
-  return existsSync(changelogPath) ? readUnreleased(readFileSync(changelogPath, "utf8")) : { exists: false, entryCount: 0, unknownSections: [], body: "" };
-}
-
-/**
- * Asks Codex to fill the empty `[Unreleased]` block of every chosen package, from its own commits.
+ * Previews each chosen package's commit list; the version step writes the release files.
  *
  * @param {MonorepoContext} context - Context.
  * @returns {Promise<void>}
  */
 async function generateChangelogsStep(context) {
-  const { audience, language } = context.config.changelog;
-
   for (const { unit, snapshot } of context.chosen) {
-    const packageRoot = path.join(context.repositoryRoot, unit.directory);
-    const changelogPath = path.join(packageRoot, CHANGELOG_FILE);
-
-    if (readPackageUnreleased(changelogPath).entryCount > 0) {
-      continue;
-    }
-    if (!existsSync(changelogPath)) {
-      writeFileSync(changelogPath, `# Changelog\n\n${UNRELEASED_HEADING}\n`);
-    }
-
-    print(paint("gray", `Codex está escribiendo el CHANGELOG de ${unit.name}…`));
-    const packageAudience = audience.replaceAll(AUDIENCE_PACKAGE_PLACEHOLDER, unit.name);
-    const exitCode = await runCodex(packageRoot, buildChangelogPrompt(snapshot.unreleasedCommits, packageAudience, language));
-    const unreleased = readPackageUnreleased(changelogPath);
-
-    if (exitCode !== 0 || unreleased.entryCount === 0 || unreleased.unknownSections.length > 0) {
-      const reason =
-        exitCode === CODEX_NOT_FOUND_EXIT_CODE ? "no se encontró la CLI de Codex" : exitCode !== 0 ? `Codex terminó con código ${exitCode}` : "el bloque sigue vacío o con secciones no válidas";
-      throw new ReleaseStepError(
-        `No se pudo completar ${UNRELEASED_HEADING} de ${unit.changelogPath}: ${reason}.`,
-        `Completalo (con la IA o a mano) usando ${CHANGE_TYPES.map((type) => `### ${type}`).join(", ")} y volvé a correr ${context.commands.createVersion}.`
-      );
-    }
-
-    print(renderBox({ title: `${unit.changelogPath} · ${UNRELEASED_HEADING} (generado por Codex)`, lines: unreleased.body.split("\n"), tone: BOX_TONE.info }));
+    const changelogPath = path.join(context.repositoryRoot, unit.changelogPath);
+    const previous = existsSync(changelogPath) ? readFileSync(changelogPath, "utf8") : "";
+    const unreleased = readUnreleased(fillUnreleasedFromCommits(previous, snapshot.unreleasedCommits));
+    print(renderBox({ title: `${unit.changelogPath} · ${UNRELEASED_HEADING} (listado de commits)`, lines: unreleased.body.split("\n"), tone: BOX_TONE.info }));
   }
 }
 
@@ -498,16 +441,16 @@ async function bumpPackagesStep(context) {
   /** @type {import("../create-version/run.js").ReleaseFileUpdate[]} */
   const releaseFiles = [];
 
-  for (const { unit, version } of context.chosen) {
-    const changelog = readReleaseFile(context, unit.changelogPath, unit.changelogPath);
+  for (const { unit, version, snapshot } of context.chosen) {
+    const changelog = readChangelogReleaseFile(context, unit.changelogPath);
     let releasedChangelog;
 
     try {
-      releasedChangelog = releaseUnreleased(changelog.text, version, today);
+      releasedChangelog = releaseUnreleased(fillUnreleasedFromCommits(changelog.text, snapshot.unreleasedCommits), version, today);
     } catch (error) {
       throw new ReleaseStepError(
         `${unit.changelogPath} no está listo: ${error instanceof Error ? error.message : String(error)}`,
-        `Completá ${UNRELEASED_HEADING} con ${CHANGE_TYPES.map((type) => `### ${type}`).join(", ")} y volvé a correr ${context.commands.createVersion}.`,
+        `Revisá el CHANGELOG y los commits pendientes y volvé a correr ${context.commands.createVersion}.`,
         { cause: error }
       );
     }

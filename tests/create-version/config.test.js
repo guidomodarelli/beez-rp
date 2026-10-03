@@ -3,7 +3,6 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { buildChangelogPrompt } from "../../src/changelog-ai.js";
 import { describeReleaseTypes, loadCreateVersionConfig, resolveCreateVersionConfig } from "../../src/create-version/config.js";
 import { describeProjectCommands } from "../../src/package-manager.js";
 
@@ -90,11 +89,10 @@ describe("create-version config", () => {
   });
 
   it("should fill defaults and derive npm tracking from the npm publisher", () => {
-    const config = resolveCreateVersionConfig({ changelog: { audience: "quien usa la app" }, publish: "npm" });
+    const config = resolveCreateVersionConfig({ publish: "npm" });
 
     expect(config).toMatchObject({
       projectName: null,
-      changelog: { audience: "quien usa la app", language: "es" },
       registry: "npm",
       checks: null,
       prepare: null,
@@ -121,7 +119,7 @@ describe("create-version config", () => {
     expect(config.releaseTypeDescriptions.major).toBe("Breaking rules.");
     expect(config.releaseTypeDescriptions.patch).toBeTypeOf("string");
     expect(config.publish).toBe(publish);
-    expect(config.changelog.language).toBe("en");
+    expect(config).not.toHaveProperty("changelog");
     expect(config.artifact).toBeNull();
 
     const tarball = resolveCreateVersionConfig({ changelog: { audience: "x" }, publish: "npm", artifact: "releases/{version}-*/{name}-{version}.tgz" });
@@ -167,8 +165,6 @@ describe("create-version config", () => {
 
   it.each([
     [null, /default export/],
-    [{}, /changelog.audience/],
-    [{ changelog: { audience: "x", language: "fr" } }, /changelog.language/],
     [{ changelog: { audience: "x" }, publish: "yarn" }, /publish/],
     [{ changelog: { audience: "x" }, checks: "pnpm check" }, /checks/],
     [{ changelog: { audience: "x" }, checks: [] }, /checks.*false/],
@@ -191,7 +187,7 @@ describe("create-version config", () => {
     await expect(loadCreateVersionConfig(repositoryRoot)).rejects.toThrow(/beez-rp.config.mjs or beez-rp.config.js not found/);
 
     writeFileSync(path.join(repositoryRoot, "beez-rp.config.js"), 'export default { changelog: { audience: "equipo" }, checks: ["pnpm test"] };\n');
-    await expect(loadCreateVersionConfig(repositoryRoot)).resolves.toMatchObject({ checks: ["pnpm test"], changelog: { language: "es" } });
+    await expect(loadCreateVersionConfig(repositoryRoot)).resolves.toMatchObject({ checks: ["pnpm test"] });
 
     // A CommonJS project keeps its config as .mjs, which wins over .js.
     writeFileSync(path.join(repositoryRoot, "package.json"), '{ "type": "commonjs" }\n');
@@ -211,18 +207,5 @@ describe("create-version config", () => {
 
     writeFileSync(path.join(repositoryRoot, "package.json"), "{ not json");
     await expect(loadCreateVersionConfig(repositoryRoot)).rejects.toThrow(/could not read the scripts of .*package\.json/);
-  });
-});
-
-describe("changelog prompt language", () => {
-  const commits = [{ sha: "0123456789abcdef", subject: "feat: add preset" }];
-
-  it("should keep Spanish by default and write English ASCII instructions on request", () => {
-    expect(buildChangelogPrompt(commits, "quien usa la app")).toContain("en español");
-
-    const english = buildChangelogPrompt(commits, "plugin users", "en");
-    expect(english).toContain("in English and ASCII only, clear for plugin users");
-    expect(english).toContain("- 0123456 feat: add preset");
-    expect(english).toMatch(/^[\x20-\x7e\n]*$/u);
   });
 });

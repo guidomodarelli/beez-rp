@@ -2,7 +2,7 @@
  * `beez-rp/create-version`: shared release command of the Beez projects.
  *
  * Projects run it as `beez-rp create-version` and describe their differences
- * in `beez-rp.config.js` (changelog audience and language, checks, migrations,
+ * in `beez-rp.config.js` (checks, migrations,
  * preparation, publication). The pure planner and the state reader are
  * exported for project tests and custom tooling.
  *

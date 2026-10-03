@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -18,6 +18,7 @@ import {
   temporaryDirectories,
 } from "./support/cli-harness.js";
 import { startFixtureNpmRegistry } from "./support/fixture-npm-registry.js";
+import { readUnreleased, readLatestRelease } from "../../src/changelog.js";
 
 /** @type {{ close: () => Promise<void> }[]} */
 const openRegistries = [];
@@ -312,6 +313,36 @@ describe("beez-rp create-version command", () => {
     GIT_FIXTURE_TEST_TIMEOUT_MS
   );
 
+  it.each(["empty", "missing block", "missing file"])(
+    "should release every commit since the previous version when CHANGELOG has %s",
+    async (changelogState) => {
+      const { repositoryRoot, remoteRoot } = createReleasedRepository();
+      writeFileSync(path.join(repositoryRoot, "beez-rp.config.js"), "export default { checks: false };\n");
+      const changelogPath = path.join(repositoryRoot, "CHANGELOG.md");
+      if (changelogState === "missing file") {
+        rmSync(changelogPath);
+      } else {
+        writeFileSync(changelogPath, changelogState === "empty" ? "# Changelog\n\n## [Unreleased]\n" : "# Changelog\n");
+      }
+      runGit(["add", "-A"], repositoryRoot);
+      runGit(["commit", "--quiet", "-m", "chore: configure commit changelog"], repositoryRoot);
+      runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+      const state = await collect(repositoryRoot);
+
+      const release = runCli(repositoryRoot, ["--bump", "minor"]);
+
+      expect(release.status, release.output).toBe(0);
+      const changelog = runGit(["show", "main:CHANGELOG.md"], remoteRoot);
+      expect(readLatestRelease(changelog)).toEqual({ version: "0.2.0", entryCount: state.unreleasedCommits.length });
+      expect(readUnreleased(changelog).entryCount).toBe(0);
+      const entries = state.unreleasedCommits.map((commit) => `- ${commit.sha?.slice(0, 7)} ${commit.subject}`).join("\n");
+      expect(changelog.trimEnd().endsWith(entries)).toBe(true);
+      expect(changelog).not.toContain("- 0.1.0");
+      expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe("");
+    },
+    GIT_FIXTURE_TEST_TIMEOUT_MS
+  );
+
   it(
     "should release, tag, push and run the project hooks with the chosen version",
     () => {
@@ -342,7 +373,7 @@ describe("beez-rp create-version command", () => {
       expect(runGit(["log", "-1", "--format=%s", "main"], remoteRoot)).toBe("0.2.0");
       expect(runGit(["tag", "--list"], remoteRoot)).toBe("v0.2.0");
       expect(JSON.parse(runGit(["show", "main:package.json"], remoteRoot)).version).toBe("0.2.0");
-      expect(runGit(["show", "main:CHANGELOG.md"], remoteRoot)).toMatch(/## \[Unreleased\]\n\n## \[0\.2\.0\] - \d{4}-\d{2}-\d{2}\n\n### Added\n\n- Algo nuevo\./u);
+      expect(runGit(["show", "main:CHANGELOG.md"], remoteRoot)).toMatch(/## \[Unreleased\]\n\n## \[0\.2\.0\] - \d{4}-\d{2}-\d{2}\n\n- [a-f0-9]{7} .*/u);
 
       const again = runCli(repositoryRoot, ["--dry-run"]);
       expect(again.output).toContain("Todo al día");
@@ -466,7 +497,7 @@ describe("beez-rp create-version command", () => {
       expect(readFileSync(checkLog, "utf8")).toBe("false");
       expect(runGit(["tag", "--list"], remoteRoot)).toBe("v0.2.0");
       expect(runGit(["show", "--name-only", "--format=", "main"], remoteRoot).split("\n").toSorted()).toEqual(["CHANGELOG.md", "package.json"]);
-      expect(runGit(["show", "main:CHANGELOG.md"], remoteRoot)).toContain("- Algo más.");
+      expect(runGit(["show", "main:CHANGELOG.md"], remoteRoot)).toContain("feat: add gate");
       expect(runGit(["status", "--porcelain"], repositoryRoot).split("\n").toSorted()).toEqual(["?? notes.txt", "A  staged.txt"]);
       expect(runGit(["stash", "list"], repositoryRoot)).toBe("");
     },
@@ -740,19 +771,22 @@ describe("beez-rp create-version command", () => {
     GIT_FIXTURE_TEST_TIMEOUT_MS
   );
 
-  it(
-    "should stage versionFiles names literally and restore the release files and their staging when the release commit fails",
-    () => {
+  it.each([true, false])(
+    "should restore release files and staging after a rejected commit when the changelog existed: %j",
+    (changelogExists) => {
       const { repositoryRoot } = createReleasedRepository();
       // Names a shell or Git would interpret: spaces, `%VAR%`, `$var`, a glob and, where the file system allows it, pathspec magic.
       const versionFiles = ["docs/my version %PATH% $HOME.txt", "docs/v[1].txt", ...(process.platform === "win32" ? [] : [":version"])];
       mkdirSync(path.join(repositoryRoot, "docs"));
       for (const versionFile of versionFiles) writeFileSync(path.join(repositoryRoot, versionFile), "0.1.0 <!-- beez-rp-version -->\n");
+      if (!changelogExists) runGit(["rm", "CHANGELOG.md"], repositoryRoot);
       pushConfiguration(repositoryRoot, ["export default {", '  changelog: { audience: "equipo" },', "  checks: false,", `  versionFiles: ${JSON.stringify(versionFiles)},`, "};"]);
       const manifest = readFileSync(path.join(repositoryRoot, "package.json"), "utf8");
       const stagedChangelog = "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Algo nuevo.\n- Algo más.\n";
-      writeFileSync(path.join(repositoryRoot, "CHANGELOG.md"), stagedChangelog);
-      runGit(["add", "CHANGELOG.md"], repositoryRoot);
+      if (changelogExists) {
+        writeFileSync(path.join(repositoryRoot, "CHANGELOG.md"), stagedChangelog);
+        runGit(["add", "CHANGELOG.md"], repositoryRoot);
+      }
       const hookPath = path.join(repositoryRoot, ".git", "hooks", "pre-commit");
       // The hook records what was staged, then rejects the commit.
       writeFileSync(hookPath, "#!/bin/sh\ngit diff --cached --name-only > ../staged.log\nexit 1\n", { mode: 0o755 });
@@ -764,9 +798,11 @@ describe("beez-rp create-version command", () => {
       expect(flattenOutput(failed.output)).toContain("se restauraron package.json, CHANGELOG.md y versionFiles (contenido y staging)");
       expect(readFileSync(path.join(path.dirname(repositoryRoot), "staged.log"), "utf8").trim().split("\n").toSorted()).toEqual(["CHANGELOG.md", ...versionFiles, "package.json"].toSorted());
       expect(readFileSync(path.join(repositoryRoot, "package.json"), "utf8")).toBe(manifest);
-      expect(readFileSync(path.join(repositoryRoot, "CHANGELOG.md"), "utf8")).toBe(stagedChangelog);
+      const restoredChangelogPath = path.join(repositoryRoot, "CHANGELOG.md");
+      const restoredChangelog = existsSync(restoredChangelogPath) ? readFileSync(restoredChangelogPath, "utf8") : null;
+      expect(restoredChangelog).toBe(changelogExists ? stagedChangelog : null);
       for (const versionFile of versionFiles) expect(readFileSync(path.join(repositoryRoot, versionFile), "utf8")).toBe("0.1.0 <!-- beez-rp-version -->\n");
-      expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe("M  CHANGELOG.md");
+      expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe(changelogExists ? "M  CHANGELOG.md" : "");
       expect(runGit(["log", "-1", "--format=%s", "main"], repositoryRoot)).toBe("chore: configure releases");
       expect(runGit(["tag", "--list"], repositoryRoot)).toBe("");
     },
@@ -1082,7 +1118,7 @@ describe("beez-rp create-version command", () => {
 
       expect(preview.status, preview.output).toBe(0);
       expect(output).toContain(`npm auth ${OWNER_USER} (variable de entorno) · primera publicación`);
-      expect(output).toContain("4. Publicar en npm");
+      expect(output).toContain("Publicar en npm");
       expect(output).toContain("no muestra fixture-app (npm view y npm owner ls responden E404): se toma como primera publicación");
       expect(output).toContain("Si ya existe como paquete privado, el token (variable de entorno) no tiene acceso");
       expect(runGit(["tag", "--list"], remoteRoot)).toBe("");

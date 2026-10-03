@@ -7,7 +7,6 @@
 
 /** @type {import("./src/create-version/config.js").CreateVersionConfig} */
 export default {
-  changelog: { audience: "quien consume el paquete beez-rp" },
   releaseTypeDescriptions: {
     patch: "Solo arreglos o cambios internos; la API pública no cambia.",
     minor: "Funcionalidades nuevas compatibles; lo existente sigue funcionando igual.",

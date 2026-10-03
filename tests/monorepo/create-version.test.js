@@ -152,7 +152,7 @@ describe("create-version in monorepo mode", () => {
       expect(runGit(["tag", "--list", "--points-at", "main"], remoteRoot)).toBe("widget-v1.1.0");
       expect(JSON.parse(runGit(["show", "main:packages/widget/package.json"], remoteRoot)).version).toBe("1.1.0");
       expect(JSON.parse(runGit(["show", "main:packages/adapter/package.json"], remoteRoot)).version).toBe("0.3.0");
-      expect(runGit(["show", "main:packages/widget/CHANGELOG.md"], remoteRoot)).toMatch(/## \[Unreleased\]\n\n## \[1\.1\.0\] - \d{4}-\d{2}-\d{2}\n\n### Added\n\n- Respuesta nueva\./u);
+      expect(runGit(["show", "main:packages/widget/CHANGELOG.md"], remoteRoot)).toMatch(/## \[Unreleased\]\n\n## \[1\.1\.0\] - \d{4}-\d{2}-\d{2}\n\n- [a-f0-9]{7} feat\(core\):.*/u);
       expect(registry.publications).toEqual([{ packageName: "@acme/widget", version: "1.1.0", user: OWNER_USER }]);
       const releaseOutput = flattenOutput(release.output);
       expect(releaseOutput).toContain("Deploy de @acme/widget 1.1.0.");
@@ -278,7 +278,7 @@ describe("create-version in monorepo mode", () => {
   );
 
   it(
-    "warns about an invalid changelog in the dry run and stops before writing when that package is chosen",
+    "regenerates an invalid changelog from the package commits and releases successfully",
     async () => {
       const { repositoryRoot, remoteRoot } = createReleasedMonorepo();
       pushCoreFeature(repositoryRoot);
@@ -293,17 +293,19 @@ describe("create-version in monorepo mode", () => {
       expect(preview.status, preview.output).toBe(0);
       const previewOutput = flattenOutput(preview.output);
       expect(previewOutput).toContain("Elegir la versión de cada paquete con cambios (1) @acme/widget");
-      expect(previewOutput).toContain("packages/widget/CHANGELOG.md ## [Unreleased] usa secciones no válidas (Nope): si elegís publicar @acme/widget, el release se corta antes de tocar nada.");
+      expect(previewOutput).toContain("CHANGELOG desde los commits");
 
       const release = await runCliAsync(repositoryRoot, ["--bump", "minor"], npmEnvironment(registry.registryUrl));
 
-      expect(release.status, release.output).toBe(1);
-      expect(flattenOutput(release.output)).toContain("packages/widget/CHANGELOG.md ## [Unreleased] usa secciones no válidas: Nope.");
-      expect(runGit(["rev-parse", "HEAD"], repositoryRoot)).toBe(featureSha);
+      expect(release.status, release.output).toBe(0);
+      const changelog = runGit(["show", "HEAD:packages/widget/CHANGELOG.md"], repositoryRoot);
+      expect(changelog).toContain(`- ${featureSha.slice(0, 7)} docs(widget): use an unknown changelog section`);
+      expect(changelog).toContain("feat(core):");
+      expect(changelog).not.toContain("### Nope");
       expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe("");
-      expect(runGit(["tag", "--list", "widget-v1.1.0"], repositoryRoot)).toBe("");
-      expect(runGit(["rev-parse", "main"], remoteRoot)).toBe(featureSha);
-      expect(registry.publications).toEqual([]);
+      expect(runGit(["tag", "--list", "widget-v1.1.0"], repositoryRoot)).toBe("widget-v1.1.0");
+      expect(runGit(["rev-parse", "main"], remoteRoot)).toBe(runGit(["rev-parse", "HEAD"], repositoryRoot));
+      expect(registry.publications).toEqual([{ packageName: "@acme/widget", version: "1.1.0", user: OWNER_USER }]);
     },
     GIT_FIXTURE_TEST_TIMEOUT_MS
   );

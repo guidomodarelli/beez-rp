@@ -1,6 +1,6 @@
 /**
  * Loads and validates `beez-rp.config.js`, the per-project part of
- * `beez-rp create-version`: changelog audience and language, version
+ * `beez-rp create-version`: version
  * descriptions, registry, checks, migrations, preparation and publication.
  *
  * The configuration never needs to import `beez-rp`: hooks receive every
@@ -16,7 +16,6 @@ import { pathToFileURL } from "node:url";
 
 import {
   ARTIFACT_VERSION_PLACEHOLDER,
-  CHANGELOG_LANGUAGE,
   CREATE_VERSION_CONFIG_FILE,
   CREATE_VERSION_CONFIG_FILES,
   DEFAULT_CHECKS_SCRIPT,
@@ -57,7 +56,6 @@ import { isPreMajorShiftActive } from "../versions.js";
  * }} MigrationsAdapter
  * @typedef {{
  *   projectName?: string,
- *   changelog: { audience: string, language?: "es" | "en" },
  *   releaseTypeDescriptions?: Partial<Record<ReleaseType, string>>,
  *   preMajorShift?: boolean,
  *   registry?: "npm" | null,
@@ -87,7 +85,6 @@ import { isPreMajorShiftActive } from "../versions.js";
  *   (breaking → minor, features → patch).
  * @typedef {{
  *   projectName: string | null,
- *   changelog: { audience: string, language: "es" | "en" },
  *   releaseTypeDescriptions: Record<ReleaseType, string>,
  *   preMajorShift: boolean,
  *   registry: "npm" | null,
@@ -215,17 +212,6 @@ export function resolveCreateVersionConfig(rawConfig, { packageScripts = {}, com
   }
 
   const config = /** @type {Record<string, unknown>} */ (rawConfig);
-  const changelog = /** @type {Record<string, unknown> | undefined} */ (config.changelog);
-
-  if (!changelog || typeof changelog.audience !== "string" || changelog.audience.trim() === "") {
-    throw invalidField("changelog.audience", "a non-empty string describing who reads the changelog");
-  }
-
-  const language = changelog.language ?? CHANGELOG_LANGUAGE.spanish;
-  if (!(/** @type {readonly unknown[]} */ (Object.values(CHANGELOG_LANGUAGE))).includes(language)) {
-    throw invalidField("changelog.language", `one of ${Object.values(CHANGELOG_LANGUAGE).join(", ")}`);
-  }
-
   if (config.projectName !== undefined && (typeof config.projectName !== "string" || config.projectName.trim() === "")) {
     throw invalidField("projectName", "a non-empty string");
   }
@@ -319,7 +305,6 @@ export function resolveCreateVersionConfig(rawConfig, { packageScripts = {}, com
 
   return {
     projectName: /** @type {string | undefined} */ (config.projectName) ?? null,
-    changelog: { audience: changelog.audience, language: /** @type {"es" | "en"} */ (language) },
     releaseTypeDescriptions: { ...DEFAULT_RELEASE_TYPE_DESCRIPTIONS, .../** @type {Partial<Record<ReleaseType, string>>} */ (descriptions) },
     preMajorShift,
     registry: /** @type {"npm" | null} */ (registry),
@@ -374,7 +359,7 @@ export async function loadCreateVersionConfig(repositoryRoot) {
 
   if (!configPath) {
     throw new Error(
-      `beez-rp create-version: ${CREATE_VERSION_CONFIG_FILES.join(" or ")} not found in ${repositoryRoot}; create it with at least changelog.audience`
+      `beez-rp create-version: ${CREATE_VERSION_CONFIG_FILES.join(" or ")} not found in ${repositoryRoot}; create it with the release checks and publication settings`
     );
   }
 

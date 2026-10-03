@@ -4,7 +4,7 @@
  *
  * - a new release: the packages with commits under their paths are the
  *   candidates; the run asks the version of each one (or skips it) before
- *   applying migrations, fills empty changelogs, runs the checks, creates one release commit with a tag
+ *   applying migrations, generates commit changelogs, runs the checks, creates one release commit with a tag
  *   per package, prepares, pushes and publishes in dependency order;
  * - the resume of a local release commit that never reached `origin`, or of
  *   tagged releases on `origin/main` that npm does not have yet;
@@ -330,16 +330,6 @@ function planNewRelease(state, capabilities, commands, warnings) {
     return createPlan({ mode: RELEASE_MODE.upToDate, warnings });
   }
 
-  // Only the packages chosen later need valid changelogs (checked when the versions are chosen):
-  // an invalid one must not block releasing the others, so the plan only warns about it.
-  for (const packageSnapshot of candidates) {
-    if (packageSnapshot.changelog.unknownSections.length > 0) {
-      warnings.push(
-        `${packageSnapshot.unit.changelogPath} ${UNRELEASED_HEADING} usa secciones no válidas (${packageSnapshot.changelog.unknownSections.join(", ")}): si elegís publicar ${packageSnapshot.unit.name}, el release se corta antes de tocar nada.`
-      );
-    }
-  }
-
   if (capabilities.checksMissing) {
     return createPlan({ blockers: [missingChecksBlocker(commands)] });
   }
@@ -364,13 +354,11 @@ function planNewRelease(state, capabilities, commands, warnings) {
     warnings.push(`No se pudo verificar si hay migraciones pendientes: ${state.migrations.reason ?? "motivo desconocido"}.`);
   }
 
-  if (candidates.some((packageSnapshot) => packageSnapshot.changelog.entryCount === 0)) {
-    steps.push({
-      id: MONOREPO_RELEASE_STEP.generateChangelogs,
-      title: `Completar ${UNRELEASED_HEADING} de los CHANGELOG vacíos con Codex`,
-      detail: "Solo de los paquetes elegidos, desde los commits de cada uno. Si no puede, el release se corta.",
-    });
-  }
+  steps.push({
+    id: MONOREPO_RELEASE_STEP.generateChangelogs,
+    title: `Generar ${UNRELEASED_HEADING} de los CHANGELOG desde los commits`,
+    detail: "Solo de los paquetes elegidos, con una entrada por commit desde su versión anterior.",
+  });
 
   if (capabilities.checks) {
     steps.push({ id: RELEASE_STEP.runChecks, title: "Validar el proyecto", detail: "Corre los checks configurados antes de tocar las versiones." });

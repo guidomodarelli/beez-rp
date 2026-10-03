@@ -7,6 +7,12 @@
 /** Changelog file released together with `package.json`. */
 export const CHANGELOG_FILE = "CHANGELOG.md";
 
+/** Default title when creating a changelog document. */
+export const CHANGELOG_TITLE = "# Changelog";
+
+/** Length of commit hashes displayed in changelog entries. */
+export const COMMIT_SHORT_SHA_LENGTH = 7;
+
 /** Heading of the block that collects changes not yet released. */
 export const UNRELEASED_HEADING = "## [Unreleased]";
 

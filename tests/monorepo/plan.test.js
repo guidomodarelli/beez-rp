@@ -83,7 +83,7 @@ describe("buildMonorepoPlan", () => {
     expect(listPackagesToAuthenticate(plan)).toEqual(["@acme/widget"]);
   });
 
-  it("does not block the release of the other packages when a changed package has an invalid changelog, only warns", () => {
+  it("regenerates the changelogs of changed packages regardless of their old sections", () => {
     const state = monorepoState({
       packages: [
         packageSnapshot("widget", { unreleasedCommits: [{ sha: "c1", subject: "feat(widget): new option", body: "" }], changelog: { exists: true, entryCount: 1, unknownSections: ["Added"] } }),
@@ -97,10 +97,7 @@ describe("buildMonorepoPlan", () => {
     expect(plan.blockers).toEqual([]);
     expect(plan.candidates).toEqual(["@acme/widget", "@acme/cli"]);
     expect(stepIds(plan)[0]).toBe(MONOREPO_RELEASE_STEP.chooseVersions);
-    expect(plan.warnings).toEqual([
-      "packages/widget/CHANGELOG.md ## [Unreleased] usa secciones no válidas (Added): si elegís publicar @acme/widget, el release se corta antes de tocar nada.",
-      "packages/cli/CHANGELOG.md ## [Unreleased] usa secciones no válidas (Nope): si elegís publicar @acme/cli, el release se corta antes de tocar nada.",
-    ]);
+    expect(plan.warnings).toEqual([]);
   });
 
   it("is up to date when no package changed", () => {

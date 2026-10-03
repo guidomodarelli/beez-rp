@@ -17,13 +17,11 @@
  * @module create-version/run
  */
 
-import { existsSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-import { readUnreleased, releaseUnreleased } from "../changelog.js";
-import { buildChangelogPrompt, runCodex } from "../changelog-ai.js";
-import { CHANGE_TYPES, CHANGELOG_FILE, UNRELEASED_HEADING } from "../constants/changelog.js";
-import { CODEX_NOT_FOUND_EXIT_CODE } from "../constants/changelog-ai.js";
+import { fillUnreleasedFromCommits, readUnreleased, releaseUnreleased } from "../changelog.js";
+import { CHANGELOG_FILE, UNRELEASED_HEADING } from "../constants/changelog.js";
 import {
   CREATE_VERSION_FLAG,
   FAILURE_EXIT_CODE,
@@ -295,14 +293,7 @@ function renderDiagnosis(state, repositoryRoot) {
     rows.push(renderRow(icon, "Migraciones", value));
   }
 
-  const { changelog } = state;
-  rows.push(
-    changelog.unknownSections.length > 0
-      ? renderRow(ICON.failure, "CHANGELOG", paint("red", `secciones no válidas: ${changelog.unknownSections.join(", ")}`))
-      : changelog.entryCount === 0
-        ? renderRow(ICON.warning, "CHANGELOG", paint("yellow", "[Unreleased] vacío: lo completa Codex al versionar"))
-        : renderRow(ICON.success, "CHANGELOG", `${changelog.entryCount} entrada(s) en [Unreleased]`)
-  );
+  rows.push(renderRow(ICON.info, "CHANGELOG", "se genera desde los commits entre versiones"));
 
   const node = checkPinnedNodeVersion(repositoryRoot);
   if (node) {
@@ -405,17 +396,6 @@ export async function runConfiguredCommands(context, commandLines, hint) {
       throw new ReleaseStepError(`${commandLine} falló con código ${exitCode}.`, hint);
     }
   }
-}
-
-/**
- * Reads the `[Unreleased]` block of the working-tree CHANGELOG.md.
- *
- * @param {string} repositoryRoot - Repository root.
- * @returns {ReturnType<typeof readUnreleased>} Unreleased state.
- */
-function readWorkingUnreleased(repositoryRoot) {
-  const changelogPath = path.join(repositoryRoot, CHANGELOG_FILE);
-  return existsSync(changelogPath) ? readUnreleased(readFileSync(changelogPath, "utf8")) : { exists: false, entryCount: 0, unknownSections: [], body: "" };
 }
 
 /**
@@ -542,31 +522,16 @@ export async function applyMigrationsStep(context) {
 }
 
 /**
- * Asks Codex to fill an empty `[Unreleased]` block from the unreleased commits.
+ * Previews the commit list; the version step writes it with the release files.
  *
  * @param {ReleaseContext} context - Release context.
  * @returns {Promise<void>}
  */
 async function generateChangelogStep(context) {
-  const { audience, language } = context.config.changelog;
-  print(paint("gray", "Codex está escribiendo el CHANGELOG a partir de los commits sin publicar…"));
-  const exitCode = await runCodex(context.repositoryRoot, buildChangelogPrompt(/** @type {{ sha: string, subject: string }[]} */ (context.state.unreleasedCommits), audience, language));
-  const unreleased = readWorkingUnreleased(context.repositoryRoot);
-
-  if (exitCode !== 0 || unreleased.entryCount === 0 || unreleased.unknownSections.length > 0) {
-    const reason =
-      exitCode === CODEX_NOT_FOUND_EXIT_CODE
-        ? "no se encontró la CLI de Codex"
-        : exitCode !== 0
-          ? `Codex terminó con código ${exitCode}`
-          : "el bloque sigue vacío o con secciones no válidas";
-    throw new ReleaseStepError(
-      `No se pudo completar ${UNRELEASED_HEADING} del CHANGELOG: ${reason}.`,
-      `Completalo (con la IA o a mano) usando ${CHANGE_TYPES.map((type) => `### ${type}`).join(", ")} y volvé a correr ${context.commands.createVersion}.`
-    );
-  }
-
-  print(renderBox({ title: `CHANGELOG · ${UNRELEASED_HEADING} (generado por Codex)`, lines: unreleased.body.split("\n"), tone: BOX_TONE.info }));
+  const changelogPath = path.join(context.repositoryRoot, CHANGELOG_FILE);
+  const previous = existsSync(changelogPath) ? readFileSync(changelogPath, "utf8") : "";
+  const unreleased = readUnreleased(fillUnreleasedFromCommits(previous, /** @type {{ sha: string, subject: string }[]} */ (context.state.unreleasedCommits)));
+  print(renderBox({ title: `CHANGELOG · ${UNRELEASED_HEADING} (listado de commits)`, lines: unreleased.body.split("\n"), tone: BOX_TONE.info }));
 }
 
 /**
@@ -583,7 +548,8 @@ export async function runChecksStep(context) {
  * A file of the release commit: its bytes before the release, kept so a rollback writes them back
  * exactly, and the content the release writes.
  *
- * @typedef {{ filePath: string, originalBytes: Buffer, content: string }} ReleaseFileUpdate
+ * @typedef {{ filePath: string, originalBytes: Buffer | null, content: string }} ReleaseFileUpdate
+ *   `null` means the file was absent and must be removed on rollback.
  */
 
 /**
@@ -615,6 +581,20 @@ export function readReleaseFile(context, filePath, fileLabel) {
       { cause: error }
     );
   }
+}
+
+/**
+ * Reads a changelog for the release transaction, recording absence for rollback.
+ *
+ * @param {VersionFilesContext} context - Release context.
+ * @param {string} filePath - Changelog path relative to the repository root.
+ * @returns {{ originalBytes: Buffer | null, text: string }} Existing bytes or an empty new document.
+ * @throws {ReleaseStepError} When an existing changelog is not valid UTF-8.
+ */
+export function readChangelogReleaseFile(context, filePath) {
+  return existsSync(path.join(context.repositoryRoot, filePath))
+    ? readReleaseFile(context, filePath, filePath)
+    : { originalBytes: null, text: "" };
 }
 
 /**
@@ -786,6 +766,10 @@ async function rollBackRelease(context, fileUpdates, indexTree, failure) {
     .filter(({ filePath, originalBytes }) => {
       const absolutePath = path.join(context.repositoryRoot, filePath);
       try {
+        if (originalBytes === null) {
+          rmSync(absolutePath, { force: true });
+          return false;
+        }
         // Only files that changed: one that could not be written (read-only) already holds its bytes.
         if (!readFileSync(absolutePath).equals(originalBytes)) {
           writeFileSync(absolutePath, originalBytes);
@@ -955,15 +939,15 @@ async function bumpVersionStep(context) {
     throw new ReleaseStepError("No se eligió ninguna versión.", `Volvé a correr ${context.commands.createVersion}.`);
   }
 
-  const changelog = readReleaseFile(context, CHANGELOG_FILE, CHANGELOG_FILE);
+  const changelog = readChangelogReleaseFile(context, CHANGELOG_FILE);
   let releasedChangelog;
 
   try {
-    releasedChangelog = releaseUnreleased(changelog.text, nextRelease.version, new Date().toISOString().split("T")[0]);
+    releasedChangelog = releaseUnreleased(fillUnreleasedFromCommits(changelog.text, commits), nextRelease.version, new Date().toISOString().split("T")[0]);
   } catch (error) {
     throw new ReleaseStepError(
       `CHANGELOG.md no está listo: ${error instanceof Error ? error.message : String(error)}`,
-      `Completá ${UNRELEASED_HEADING} con ${CHANGE_TYPES.map((type) => `### ${type}`).join(", ")} y volvé a correr ${context.commands.createVersion}.`,
+      `Revisá el CHANGELOG y los commits pendientes y volvé a correr ${context.commands.createVersion}.`,
       { cause: error }
     );
   }
@@ -974,7 +958,7 @@ async function bumpVersionStep(context) {
     { filePath: CHANGELOG_FILE, originalBytes: changelog.originalBytes, content: releasedChangelog },
     ...(await prepareVersionFileUpdates(context, context.config.versionFiles, nextRelease.version)),
   ];
-  print(renderBox({ title: `CHANGELOG · ${UNRELEASED_HEADING} → [${nextRelease.version}]`, lines: readWorkingUnreleased(context.repositoryRoot).body.split("\n"), tone: BOX_TONE.info }));
+  print(renderBox({ title: `CHANGELOG · ${UNRELEASED_HEADING} → [${nextRelease.version}]`, lines: readUnreleased(fillUnreleasedFromCommits(changelog.text, commits)).body.split("\n"), tone: BOX_TONE.info }));
 
   await commitReleaseFiles(context, releaseFiles, nextRelease.version);
 
