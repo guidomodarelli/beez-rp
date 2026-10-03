@@ -37,7 +37,7 @@ function createMainState(overrides = {}) {
     unreleasedCommits: [{ subject: "feat: add gate" }],
     npm: null,
     migrations: null,
-    changelog: { exists: true, entryCount: 1, unknownSections: [] },
+    changelog: { exists: true, entryCount: 1, unknownSections: [], updated: true, reason: null },
     ...overrides,
   };
 }
@@ -90,17 +90,17 @@ describe("create-version arguments", () => {
 describe("create-version plan", () => {
   it("should bump and push a deployed app without optional steps", () => {
     expect(buildReleasePlan(createMainState(), DEPLOYED_APP).mode).toBe(RELEASE_MODE.newRelease);
-    expect(stepIds(createMainState())).toEqual([RELEASE_STEP.generateChangelog, RELEASE_STEP.bumpVersion, RELEASE_STEP.pushRelease]);
+    expect(stepIds(createMainState())).toEqual([RELEASE_STEP.verifyChangelog, RELEASE_STEP.bumpVersion, RELEASE_STEP.pushRelease]);
   });
 
   it("should run every configured step of an npm package in order", () => {
     const state = createMainState({
-      changelog: { exists: true, entryCount: 0, unknownSections: [] },
+      changelog: { exists: true, entryCount: 0, unknownSections: [], updated: true, reason: null },
       npm: { status: NPM_LOOKUP_STATUS.ok, publishedVersions: ["0.1.0"], reason: null },
     });
 
     expect(stepIds(state, NPM_PACKAGE)).toEqual([
-      RELEASE_STEP.generateChangelog,
+      RELEASE_STEP.verifyChangelog,
       RELEASE_STEP.runChecks,
       RELEASE_STEP.bumpVersion,
       RELEASE_STEP.prepareRelease,
@@ -112,7 +112,7 @@ describe("create-version plan", () => {
   it("should only sync main when it is behind origin, because the next run diagnoses the updated code", () => {
     const state = createMainState({
       main: { aheadCommits: [], behindCount: 2 },
-      changelog: { exists: true, entryCount: 0, unknownSections: [] },
+      changelog: { exists: true, entryCount: 0, unknownSections: [], updated: true, reason: null },
       migrations: { status: MIGRATION_STATUS.pending, pending: ["0001_init"], target: "db.example.test", reason: null },
     });
     const plan = buildReleasePlan(state, NPM_PACKAGE);
@@ -138,7 +138,7 @@ describe("create-version plan", () => {
 
   it("should apply pending migrations before the version and warn when they cannot be verified", () => {
     const pending = createMainState({ migrations: { status: MIGRATION_STATUS.pending, pending: ["0001_init"], target: "db.example.test", reason: null } });
-    expect(stepIds(pending)).toEqual([RELEASE_STEP.applyMigrations, RELEASE_STEP.generateChangelog, RELEASE_STEP.bumpVersion, RELEASE_STEP.pushRelease]);
+    expect(stepIds(pending)).toEqual([RELEASE_STEP.verifyChangelog, RELEASE_STEP.applyMigrations, RELEASE_STEP.bumpVersion, RELEASE_STEP.pushRelease]);
 
     const unknown = buildReleasePlan(createMainState({ migrations: { status: MIGRATION_STATUS.unknown, pending: [], target: null, reason: "sin red" } }), DEPLOYED_APP);
     expect(unknown.blockers).toEqual([]);
@@ -186,7 +186,7 @@ describe("create-version plan", () => {
   });
 
   it("should accept an uncommitted CHANGELOG.md but block other changes and foreign commits on main", () => {
-    expect(stepIds(createMainState({ workingTreeChanges: [" M CHANGELOG.md"] }))).toEqual([RELEASE_STEP.generateChangelog, RELEASE_STEP.bumpVersion, RELEASE_STEP.pushRelease]);
+    expect(stepIds(createMainState({ workingTreeChanges: [" M CHANGELOG.md"] }))).toEqual([RELEASE_STEP.verifyChangelog, RELEASE_STEP.bumpVersion, RELEASE_STEP.pushRelease]);
 
     const plan = buildReleasePlan(createMainState({ workingTreeChanges: [" M package.json"], main: { aheadCommits: [{ subject: "fix: local hack" }], behindCount: 0 } }), DEPLOYED_APP);
     expect(plan.mode).toBe(RELEASE_MODE.blocked);
@@ -203,7 +203,7 @@ describe("create-version plan", () => {
 
     const plan = buildReleasePlan(dirty, DEPLOYED_APP, { ignoreLocalChanges: true });
     expect(plan.mode).toBe(RELEASE_MODE.newRelease);
-    expect(plan.steps.map((planStep) => planStep.id)).toEqual([RELEASE_STEP.generateChangelog, RELEASE_STEP.bumpVersion, RELEASE_STEP.pushRelease]);
+    expect(plan.steps.map((planStep) => planStep.id)).toEqual([RELEASE_STEP.verifyChangelog, RELEASE_STEP.bumpVersion, RELEASE_STEP.pushRelease]);
     expect(plan.warnings).toEqual([expect.stringContaining("Se ignoran 2 cambio(s) sin commitear")]);
     expect(listLocalChangesToSetAside(dirty, plan.mode)).toEqual([" M docs/guide.md", "?? notes.txt"]);
   });
@@ -240,23 +240,41 @@ describe("create-version plan", () => {
     }
   });
 
-  it("should resume a release commit with --ignore-local-changes even when CHANGELOG.md is dirty, setting it aside too", () => {
+  it("should block resuming a release when CHANGELOG.md is dirty even with --ignore-local-changes", () => {
     const npm = { status: NPM_LOOKUP_STATUS.ok, publishedVersions: ["0.1.0"], reason: null };
     const state = createMainState({ headVersion: "0.2.0", headSubject: "0.2.0", npm, workingTreeChanges: [" M CHANGELOG.md"] });
     const plan = buildReleasePlan(state, NPM_PACKAGE, { ignoreLocalChanges: true });
 
-    expect(plan.mode).toBe(RELEASE_MODE.resume);
-    expect(plan.steps.map((planStep) => planStep.id)).toEqual([RELEASE_STEP.prepareRelease, RELEASE_STEP.publishRelease]);
-    expect(listLocalChangesToSetAside(state, plan.mode)).toEqual([" M CHANGELOG.md"]);
+    expect(plan.mode).toBe(RELEASE_MODE.blocked);
+    expect(plan.steps).toEqual([]);
+    expect(plan.blockers[0].title).toContain("CHANGELOG.md tiene cambios sin commitear");
   });
 
   it("should not warn about local changes when --ignore-local-changes has nothing to set aside", () => {
     expect(buildReleasePlan(createMainState({ workingTreeChanges: [" M CHANGELOG.md"] }), DEPLOYED_APP, { ignoreLocalChanges: true }).warnings).toEqual([]);
   });
 
-  it("should regenerate unknown [Unreleased] sections and block an unreachable npm", () => {
-    expect(buildReleasePlan(createMainState({ changelog: { exists: true, entryCount: 1, unknownSections: ["Mejoras"] } }), DEPLOYED_APP).blockers).toEqual([]);
+  it("should accept manual changelog sections and block an unreachable npm", () => {
+    expect(buildReleasePlan(createMainState({ changelog: { exists: true, entryCount: 1, unknownSections: ["Mejoras"], updated: true, reason: null } }), DEPLOYED_APP).blockers).toEqual([]);
     expect(buildReleasePlan(createMainState({ npm: { status: NPM_LOOKUP_STATUS.failed, publishedVersions: [], reason: "offline" } }), NPM_PACKAGE).blockers[0].title).toContain("npm");
+  });
+
+  it("should block before migrations when CHANGELOG.md has not changed since the last release", () => {
+    // Arrange
+    const state = createMainState({
+      changelog: { exists: true, entryCount: 3, unknownSections: [], updated: false, reason: null },
+      migrations: { status: MIGRATION_STATUS.pending, pending: ["0001_init"], target: "db.example.test", reason: null },
+    });
+
+    // Act
+    const plan = buildReleasePlan(state, NPM_PACKAGE, { ignoreLocalChanges: true, skipUnpublished: true });
+
+    // Assert
+    expect(plan.mode).toBe(RELEASE_MODE.blocked);
+    expect(plan.steps).toEqual([]);
+    expect(plan.blockers[0].title).toContain("CHANGELOG.md no fue actualizado");
+    expect(plan.blockers[0].code).toBe("changelog-update-required");
+    expect(plan.blockers[0].details.join(" ")).toContain("Actualizá CHANGELOG.md manualmente");
   });
 
   it("should block a detached HEAD and a feature branch with its next actions", () => {

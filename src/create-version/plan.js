@@ -5,7 +5,7 @@
  * and decides without touching Git, npm or databases what is still missing
  * to ship a release from `main`:
  *
- * - a new release: sync `main`, apply migrations, fill the changelog, run the
+ * - a new release: sync `main`, verify the manual changelog, apply migrations, run the
  *   checks, bump (commit `X.Y.Z` + tag `vX.Y.Z`), prepare, push and publish;
  * - the resume of a release commit that never reached `origin` or the registry,
  *   including the publication of a tagged release from a detached `HEAD`;
@@ -19,7 +19,7 @@
 
 import { parseArgs } from "node:util";
 
-import { CHANGELOG_FILE, UNRELEASED_HEADING } from "../constants/changelog.js";
+import { CHANGELOG_FILE, CHANGELOG_UPDATE_REQUIRED_CODE } from "../constants/changelog.js";
 import {
   CREATE_VERSION_CONFIG_FILES,
   CREATE_VERSION_FLAG,
@@ -72,7 +72,7 @@ import { describeNpmAuthProblem, describeNpmFirstPublicationWarning } from "./np
  *   npm: NpmLookup | null,
  *   npmAuth?: NpmAuthCheck | null,
  *   migrations: MigrationCheck | null,
- *   changelog: { exists: boolean, entryCount: number, unknownSections: string[] },
+ *   changelog: { exists: boolean, entryCount: number, unknownSections: string[], updated: boolean, reason: string | null },
  * }} ReleaseState
  * @typedef {import("../package-manager.js").ProjectCommands} ProjectCommands
  * @typedef {{ checks: boolean, checksMissing?: boolean, prepare: boolean, publish: boolean, publishTitle: string, commands?: ProjectCommands }} ReleaseCapabilities
@@ -80,11 +80,11 @@ import { describeNpmAuthProblem, describeNpmFirstPublicationWarning } from "./np
  *   them with `checks: false`: a new release is blocked. `commands` are the project's package
  *   manager commands quoted by every hint (pnpm when omitted).
  * @typedef {{ id: string, title: string, detail?: string }} ReleasePlanStep
- * @typedef {{ title: string, details: string[] }} ReleaseBlocker
+ * @typedef {{ code?: "changelog-update-required", title: string, details: string[] }} ReleaseBlocker
  * @typedef {{ mode: string, steps: ReleasePlanStep[], blockers: ReleaseBlocker[], warnings: string[], pendingVersion: string | null }} ReleasePlan
  * @typedef {{ bump: "patch" | "minor" | "major" | null, setVersion: string | null, dryRun: boolean, skipUnpublished: boolean, ignoreLocalChanges: boolean, acceptSuggested: boolean, help: boolean }} ReleaseOptions
  *   `acceptSuggested` takes the release type the commits suggest instead of asking.
- * @typedef {{ version: string, latestPublished: string | null, resumable: boolean }} UnpublishedRelease
+ * @typedef {{ version: string, latestPublished: string | null, resumable: boolean, registryLabel?: string }} UnpublishedRelease
  * @typedef {{ skipUnpublished?: boolean, ignoreLocalChanges?: boolean }} PlanOptions
  *   `skipUnpublished` plans a new release even when the last release is missing from npm.
  *   `ignoreLocalChanges` plans the release despite uncommitted changes, which the run sets aside.
@@ -255,7 +255,7 @@ function findBlockers(state, ignoreLocalChanges, commands) {
         title: "HEAD está desacoplado (detached)",
         details: [
           `Hacé git switch ${MAIN_BRANCH} y volvé a correr ${commands.createVersion}.`,
-          "Desacoplado solo se puede publicar un release que falta en npm: HEAD tiene que ser el commit X.Y.Z de su tag vX.Y.Z.",
+          `Desacoplado solo se puede publicar un release que falta en ${state.npm?.registryLabel ?? "npm"}: HEAD tiene que ser el commit X.Y.Z de su tag vX.Y.Z.`,
         ],
       },
     ];
@@ -290,8 +290,8 @@ function findBlockers(state, ignoreLocalChanges, commands) {
   if (state.npm && state.npm.status !== NPM_LOOKUP_STATUS.ok) {
     blockers.push(
       describeRejectedNpmCredential(state.npmAuth, commands) ?? {
-        title: "No se pudo consultar npm",
-        details: [`${state.npm.reason ?? "npm no respondió"}.`, `Revisá la conexión y volvé a correr ${commands.createVersion}.`],
+        title: `No se pudo consultar ${state.npm.registryLabel ?? "npm"}`,
+        details: [`${state.npm.reason ?? "El registry no respondió"}.`, `Revisá la conexión y volvé a correr ${commands.createVersion}.`],
       }
     );
   }
@@ -583,7 +583,7 @@ function findDetachedReleaseBlockers(version, state, commands) {
   if (!state.remoteReleaseTagSha && !state.headOnRemoteMain) {
     blockers.push({
       title: `${tag} no está en origin (o no se pudo consultar origin)`,
-      details: ["Desacoplado solo se publica un release cuyo commit ya está en origin: publicarlo dejaría en npm una versión sin su commit en origin.", returnToMain],
+      details: [`Desacoplado solo se publica un release cuyo commit ya está en origin: publicarlo dejaría en ${state.npm?.registryLabel ?? "npm"} una versión sin su commit en origin.`, returnToMain],
     });
   } else if (state.remoteReleaseTagSha && state.remoteReleaseTagSha !== state.headSha) {
     blockers.push({
@@ -595,8 +595,8 @@ function findDetachedReleaseBlockers(version, state, commands) {
   const highestStable = findHighestStableVersion(state.npm?.publishedVersions ?? []);
   const latestDistTag = state.npm?.latestVersion ?? null;
   const higherPublished = [
-    { publishedVersion: highestStable, description: "la versión más alta publicada en npm" },
-    { publishedVersion: latestDistTag, description: `la versión del dist-tag ${NPM_DIST_TAG} en npm` },
+    { publishedVersion: highestStable, description: `la versión más alta publicada en ${state.npm?.registryLabel ?? "npm"}` },
+    { publishedVersion: latestDistTag, description: `la versión del dist-tag ${state.npm?.tag ?? NPM_DIST_TAG} en ${state.npm?.registryLabel ?? "npm"}` },
   ].find(({ publishedVersion }) => publishedVersion && !isStableVersionAbove(version, publishedVersion));
 
   if (higherPublished) {
@@ -629,7 +629,7 @@ function planDetachedResume(version, capabilities, state) {
     return {
       mode: RELEASE_MODE.blocked,
       steps: [],
-      blockers: [{ title: `${tag} no está en npm, pero este proyecto no configura publish`, details: ["Agregá publish en beez-rp.config.js o publicalo a mano."] }],
+      blockers: [{ title: `${tag} no está en ${state.npm?.registryLabel ?? "npm"}, pero este proyecto no configura publish`, details: ["Agregá publish en beez-rp.config.js o publicalo a mano."] }],
       warnings: [],
       pendingVersion: null,
     };
@@ -687,7 +687,7 @@ function findUnpublishedLastRelease(state) {
   }
 
   const resumable = Boolean(lastRelease?.tagged) && lastRelease?.version === releaseVersion && lastRelease?.subject?.trim() === releaseVersion;
-  return { version: releaseVersion, latestPublished, resumable };
+  return { version: releaseVersion, latestPublished, resumable, registryLabel: npm.registryLabel };
 }
 
 /**
@@ -697,9 +697,9 @@ function findUnpublishedLastRelease(state) {
  * @param {ProjectCommands} commands - Project commands quoted by the hints.
  * @returns {ReleaseBlocker} Blocker.
  */
-function unpublishedReleaseBlocker({ version, latestPublished, resumable }, commands) {
+function unpublishedReleaseBlocker({ version, latestPublished, resumable, registryLabel = "npm" }, commands) {
   const tag = toReleaseTag(version);
-  const published = latestPublished ? `npm llega hasta ${latestPublished}` : "npm no tiene ninguna versión publicada";
+  const published = latestPublished ? `${registryLabel} llega hasta ${latestPublished}` : `${registryLabel} no tiene ninguna versión publicada`;
   const howToPublish = resumable
     ? [
         `Para publicarla: git switch --detach ${tag} y ${commands.createVersion}, que retoma solo la preparación y la publicación desde el tag (sin tocar ${MAIN_BRANCH}).`,
@@ -708,7 +708,7 @@ function unpublishedReleaseBlocker({ version, latestPublished, resumable }, comm
     : [`Su commit no es un commit ${version} con el tag ${tag}, así que create-version no puede retomarlo: publicala a mano desde ese commit.`];
 
   return {
-    title: `La versión ${version} (último release, tag ${tag}) no está en npm`,
+    title: `La versión ${version} (último release, tag ${tag}) no está en ${registryLabel}`,
     details: [`${published}; un release nuevo la saltearía.`, ...howToPublish, `Para saltearla a propósito: ${commands.createVersion} --skip-unpublished.`],
   };
 }
@@ -719,8 +719,8 @@ function unpublishedReleaseBlocker({ version, latestPublished, resumable }, comm
  * @param {UnpublishedRelease} unpublished - Skipped release.
  * @returns {string} Warning.
  */
-function skippedReleaseWarning({ version }) {
-  return `Se saltea ${version} (tag ${toReleaseTag(version)}), que no está en npm: el release nuevo sale sin publicarla (--skip-unpublished).`;
+function skippedReleaseWarning({ version, registryLabel = "npm" }) {
+  return `Se saltea ${version} (tag ${toReleaseTag(version)}), que no está en ${registryLabel}: el release nuevo sale sin publicarla (--skip-unpublished).`;
 }
 
 /**
@@ -766,7 +766,7 @@ function applyNpmAuth(plan, npmAuth, commands) {
   }
 
   if (npmAuth.status === NPM_AUTH_STATUS.unknown) {
-    return { ...plan, warnings: [...plan.warnings, `No se pudieron verificar las credenciales de npm: ${npmAuth.reason ?? "motivo desconocido"}. Se intenta publicar igual.`] };
+    return { ...plan, warnings: [...plan.warnings, `No se pudieron verificar las credenciales de ${npmAuth.registryLabel ?? "npm"}: ${npmAuth.reason ?? "motivo desconocido"}. Se intenta publicar igual.`] };
   }
 
   const firstPublicationWarning = describeNpmFirstPublicationWarning(npmAuth);
@@ -825,14 +825,14 @@ function planRelease(state, capabilities, { skipUnpublished = false, ignoreLocal
 
   if (detachedVersion) {
     const detachedPlan = requireCommittedConfig(planDetachedResume(detachedVersion, capabilities, state), state, commands);
-    return ignoreLocalChanges ? detachedPlan : requireCleanChangelog(detachedPlan, state, commands);
+    return requireCleanChangelog(detachedPlan, state, commands);
   }
 
   const resume = planResume(state, capabilities);
 
   if (resume) {
     const resumePlan = requireCommittedConfig(checkUnpublishedBeforeResume(resume, state, skipUnpublished, commands), state, commands);
-    return ignoreLocalChanges ? resumePlan : requireCleanChangelog(resumePlan, state, commands);
+    return requireCleanChangelog(resumePlan, state, commands);
   }
 
   if (state.main.aheadCommits.length > 0) {
@@ -869,6 +869,26 @@ function planRelease(state, capabilities, { skipUnpublished = false, ignoreLocal
     return { mode: RELEASE_MODE.blocked, steps: [], blockers: [missingChecksBlocker(commands)], warnings: [], pendingVersion: null };
   }
 
+  if (state.changelog.updated !== true) {
+    return {
+      mode: RELEASE_MODE.blocked,
+      steps: [],
+      blockers: [{
+        code: CHANGELOG_UPDATE_REQUIRED_CODE,
+        title: state.changelog.reason ?? `${CHANGELOG_FILE} no fue actualizado desde el último release`,
+        details: [`Actualizá ${CHANGELOG_FILE} manualmente y volvé a correr ${commands.createVersion}; beez-rp no lo modifica.`],
+      }],
+      warnings,
+      pendingVersion: null,
+    };
+  }
+
+  steps.push({
+    id: RELEASE_STEP.verifyChangelog,
+    title: "Verificar la actualización manual del CHANGELOG",
+    detail: "Debe haber cambiado desde el último release; su contenido se conserva sin reescribirlo.",
+  });
+
   if (state.migrations?.status === MIGRATION_STATUS.pending) {
     steps.push({
       id: RELEASE_STEP.applyMigrations,
@@ -879,12 +899,6 @@ function planRelease(state, capabilities, { skipUnpublished = false, ignoreLocal
     warnings.push(`No se pudo verificar si hay migraciones pendientes: ${state.migrations.reason ?? "motivo desconocido"}.`);
   }
 
-  steps.push({
-    id: RELEASE_STEP.generateChangelog,
-    title: `Generar ${UNRELEASED_HEADING} del CHANGELOG desde los commits`,
-    detail: "Una entrada por commit desde la versión anterior, con su hash y título original.",
-  });
-
   if (capabilities.checks) {
     steps.push({ id: RELEASE_STEP.runChecks, title: "Validar el proyecto", detail: "Corre los checks configurados antes de tocar la versión." });
   }
@@ -892,7 +906,7 @@ function planRelease(state, capabilities, { skipUnpublished = false, ignoreLocal
   steps.push({
     id: RELEASE_STEP.bumpVersion,
     title: "Elegir la nueva versión y crear commit + tag",
-    detail: `${UNRELEASED_HEADING} pasa a esa versión con la fecha de hoy y se commitea junto con package.json.`,
+    detail: "Actualiza package.json e incluye el CHANGELOG manual sin modificar su contenido.",
   });
 
   if (capabilities.prepare) {

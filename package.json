@@ -1,7 +1,7 @@
 {
   "name": "beez-rp",
   "version": "0.6.1",
-  "description": "Dependency-free release process shared by the Beez projects: stable version rules, Vercel build gate, commit-based changelog and terminal UI.",
+  "description": "Dependency-free release process shared by the Beez projects: stable version rules, Vercel build gate, manual changelog checks and terminal UI.",
   "license": "MIT",
   "author": "Guido Modarelli",
   "repository": {

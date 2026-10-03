@@ -14,3 +14,4 @@ export * from "./monorepo.js";
 export * from "./terminal-ui.js";
 export * from "./versions.js";
 export * from "./create-version.js";
+export * from "./registry.js";

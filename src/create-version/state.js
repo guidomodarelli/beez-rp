@@ -29,11 +29,12 @@ import {
   PULL_REQUEST_JSON_FIELDS,
   RELEASE_REMOTE,
   REMOTE_MAIN_REF,
-  VERSION_FIELD_CHANGE_PATTERN,
 } from "../constants/create-version.js";
 import { toReleaseTag } from "../versions.js";
+import { readChangelogUpdateState } from "./changelog.js";
+import { checkRegistryAccess, lookupRegistryVersions } from "./registry.js";
 import { checkNpmPublishAccess, lookupPublishedVersions, resolvePublishRegistry } from "./npm.js";
-import { createGitReader, listCommits, readPackageVersionAt, runCaptured } from "./process.js";
+import { createGitReader, findVersionChangeCommit, listCommits, readPackageVersionAt, runCaptured } from "./process.js";
 
 /**
  * @typedef {import("./process.js").GitReader} GitReader
@@ -97,7 +98,7 @@ async function readRemoteReleaseTagCommit(reader, tag) {
  *   `vX.Y.Z` tag points at it, or `null` without history.
  */
 export async function findLastRelease(reader, revision) {
-  const sha = await reader.tryGit(["log", "-1", "--format=%H", `-G${VERSION_FIELD_CHANGE_PATTERN}`, revision, "--", PACKAGE_MANIFEST_FILE]);
+  const sha = await findVersionChangeCommit(reader, revision);
 
   if (!sha) {
     return null;
@@ -330,6 +331,7 @@ export async function readRepositorySnapshot({ repositoryRoot, reader, onProgres
  *   checkNpmAuth?: ((snapshot: ReleaseSnapshot) => boolean) | null,
  *   checkNpmAccess?: typeof checkNpmPublishAccess,
  *   lookupPullRequestFor?: typeof lookupPullRequest,
+ *   registrySelection?: import("./registry.js").RegistrySelection,
  * }} options - Repository, adapters and progress callback. `checkNpmAuth` receives the snapshot
  *   without credentials and decides whether the npm credentials are checked (when the plan would publish to npm).
  * @returns {Promise<ReleaseSnapshot>} Snapshot accepted by `buildReleasePlan`.
@@ -343,6 +345,7 @@ export async function collectReleaseState({
   checkNpmAuth = null,
   checkNpmAccess = checkNpmPublishAccess,
   lookupPullRequestFor = lookupPullRequest,
+  registrySelection,
 }) {
   const reader = createGitReader(repositoryRoot);
   const repository = await readRepositorySnapshot({ repositoryRoot, reader, onProgress, lookupPullRequestFor });
@@ -367,7 +370,7 @@ export async function collectReleaseState({
 
   if (trackNpm) {
     onProgress("Consultando npm");
-    npm = await lookupNpmOnPublishRegistry(lookupNpm, manifest, repositoryRoot);
+    npm = registrySelection ? await lookupRegistryVersions(registrySelection, manifest, repositoryRoot, repositoryRoot, lookupNpm) : await lookupNpmOnPublishRegistry(lookupNpm, manifest, repositoryRoot);
   }
 
   if (checkMigrations) {
@@ -396,12 +399,15 @@ export async function collectReleaseState({
     npm,
     npmAuth: null,
     migrations,
-    changelog: readChangelogState(repositoryRoot),
+    changelog: {
+      ...readChangelogState(repositoryRoot),
+      ...(await readChangelogUpdateState(reader, repositoryRoot, CHANGELOG_FILE, lastRelease?.sha ?? null)),
+    },
   };
 
   if (checkNpmAuth?.(snapshot)) {
     onProgress("Verificando las credenciales de npm");
-    snapshot.npmAuth = confirmFirstPublication(await checkNpmAuthOnPublishRegistry(checkNpmAccess, manifest, repositoryRoot), npm);
+    snapshot.npmAuth = confirmFirstPublication(registrySelection ? await checkRegistryAccess(registrySelection, manifest, repositoryRoot, repositoryRoot, checkNpmAccess) : await checkNpmAuthOnPublishRegistry(checkNpmAccess, manifest, repositoryRoot), npm);
   }
 
   return snapshot;

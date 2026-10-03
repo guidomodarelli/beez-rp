@@ -44,3 +44,5 @@ export { DEFAULT_CAPABILITIES, RELEASE_USAGE, buildReleasePlan, describeFeatureB
 export { createGitReader, listCommits, parseCommitLog, readPackageManifestAt, readPackageVersionAt, runCaptured, runCommandLine, runInherited } from "./process.js";
 export { createHookContext, runCreateVersion } from "./run.js";
 export { collectReleaseState, findLastRelease, readChangelogState } from "./state.js";
+export { isRegistryProvider, resolvePublicationOptions } from "./registry-config.js";
+export { checkRegistryAccess, lookupRegistryVersions, resolveRegistry, selectProjectRegistry } from "./registry.js";

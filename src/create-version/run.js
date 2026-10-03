@@ -20,8 +20,7 @@
 import { existsSync, lstatSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-import { fillUnreleasedFromCommits, readUnreleased, releaseUnreleased } from "../changelog.js";
-import { CHANGELOG_FILE, UNRELEASED_HEADING } from "../constants/changelog.js";
+import { CHANGELOG_FILE, CHANGELOG_UPDATE_REQUIRED_CODE } from "../constants/changelog.js";
 import {
   CREATE_VERSION_FLAG,
   FAILURE_EXIT_CODE,
@@ -32,8 +31,6 @@ import {
   MIGRATION_STATUS,
   NPM_AUTH_STATUS,
   NPM_LOOKUP_STATUS,
-  NPM_PUBLISHER,
-  NPM_TOKEN_LOCATIONS,
   NPM_TOKEN_VARIABLE,
   NPM_WRITE_ACCESS_UNVERIFIED_NOTE,
   PACKAGE_MANIFEST_FILE,
@@ -76,15 +73,11 @@ import {
   withArtifactOutsidePackageRoot,
 } from "./artifact.js";
 import { describeReleaseTypes, loadCreateVersionConfig } from "./config.js";
+import { assertPreservedFilesUnchanged, verifyChangelogUpdate } from "./changelog.js";
 import { ReleaseStepError } from "./errors.js";
 import {
-  buildNpmAuthConfigLine,
-  checkNpmPublishAccess,
   describePublishedRelease,
-  lookupPublishedVersions,
-  publishToNpm,
   readNpmPackIntegrity,
-  resolvePublishRegistry,
 } from "./npm.js";
 import { describeNpmPublishFailure, describeNpmTokenSource } from "./npm-auth.js";
 import { restoreLocalChanges, setAsideLocalChanges } from "./local-changes.js";
@@ -92,6 +85,10 @@ import { describeProjectCommands, detectPackageManager } from "../package-manage
 import { buildReleasePlan, buildReleaseUsage, listLocalChangesToSetAside, parseReleaseArguments } from "./plan.js";
 import { createGitReader, listCommits, runCommandLine, runInherited } from "./process.js";
 import { collectReleaseState } from "./state.js";
+import { isRegistryProvider } from "./registry-config.js";
+import { checkRegistryAccess, lookupRegistryVersions, publishRegistryRelease, resolveRegistry, selectProjectRegistry } from "./registry.js";
+import { prepareJsrVersionUpdates, readJsrManifest } from "./jsr.js";
+import { JSR_REGISTRY_PROVIDER, REGISTRY_LABELS } from "../constants/registry.js";
 
 /**
  * @typedef {import("./config.js").ResolvedCreateVersionConfig} ResolvedCreateVersionConfig
@@ -110,7 +107,9 @@ import { collectReleaseState } from "./state.js";
  *   commitCount: number | null,
  *   packageName: string,
  *   registryUrl: string | null,
+ *   registryLabel: string | null,
  *   commands: import("../package-manager.js").ProjectCommands,
+ *   changelogFiles: import("./changelog.js").PreservedReleaseFile[],
  * }} ReleaseContext
  * @typedef {{
  *   repositoryRoot: string,
@@ -264,8 +263,8 @@ function renderDiagnosis(state, repositoryRoot) {
     rows.push(
       renderRow(
         state.npm.status === NPM_LOOKUP_STATUS.ok ? ICON.success : ICON.failure,
-        "npm",
-        state.npm.status === NPM_LOOKUP_STATUS.ok ? `latest ${paint("cyan", latestPublished ?? "ninguna todavía")}` : paint("red", "no respondió")
+        state.npm.registryLabel ?? "npm",
+        state.npm.status === NPM_LOOKUP_STATUS.ok ? `${state.npm.tag ?? "latest"} ${paint("cyan", latestPublished ?? "ninguna todavía")}` : paint("red", "no respondió")
       )
     );
   }
@@ -293,7 +292,11 @@ function renderDiagnosis(state, repositoryRoot) {
     rows.push(renderRow(icon, "Migraciones", value));
   }
 
-  rows.push(renderRow(ICON.info, "CHANGELOG", "se genera desde los commits entre versiones"));
+  if (state.unreleasedCommits.length > 0) {
+    rows.push(renderRow(state.changelog.updated ? ICON.success : ICON.warning, "CHANGELOG", state.changelog.updated ? "actualizado manualmente; se conserva sin cambios" : state.changelog.reason ?? "sin actualización manual desde el último release"));
+  } else {
+    rows.push(renderRow(ICON.info, "CHANGELOG", "sin actualización requerida"));
+  }
 
   const node = checkPinnedNodeVersion(repositoryRoot);
   if (node) {
@@ -314,22 +317,25 @@ function renderDiagnosis(state, repositoryRoot) {
  */
 export function renderNpmAuthRow(npmAuth) {
   const source = describeNpmTokenSource(npmAuth);
+  const label = `${npmAuth.registryLabel ?? "npm"} auth`;
 
   switch (npmAuth.status) {
     case NPM_AUTH_STATUS.ok:
       return npmAuth.firstPublication
-        ? renderRow(ICON.success, "npm auth", `${npmAuth.user} (${source})${paint("gray", " · primera publicación")}`)
-        : renderRow(ICON.success, "npm auth", `${npmAuth.user} (${source}), dueño de ${npmAuth.packageName}${paint("gray", `; ${NPM_WRITE_ACCESS_UNVERIFIED_NOTE}`)}`);
+        ? renderRow(ICON.success, label, `${npmAuth.user} (${source})${paint("gray", " · primera publicación")}`)
+        : renderRow(ICON.success, label, `${npmAuth.user} (${source}), dueño de ${npmAuth.packageName}${paint("gray", `; ${NPM_WRITE_ACCESS_UNVERIFIED_NOTE}`)}`);
     case NPM_AUTH_STATUS.missingToken:
-      return renderRow(ICON.failure, "npm auth", paint("red", `falta ${NPM_TOKEN_VARIABLE}`));
+      return renderRow(ICON.failure, label, paint("red", `falta ${npmAuth.tokenVariable ?? NPM_TOKEN_VARIABLE}`));
     case NPM_AUTH_STATUS.invalidToken:
-      return renderRow(ICON.failure, "npm auth", paint("red", `token inválido o vencido (${source})`));
+      return renderRow(ICON.failure, label, paint("red", `token inválido o vencido (${source})`));
     case NPM_AUTH_STATUS.notOwner:
-      return renderRow(ICON.failure, "npm auth", paint("red", `${npmAuth.user} no puede publicar ${npmAuth.packageName} (${source})`));
+      return renderRow(ICON.failure, label, paint("red", `${npmAuth.user} no puede publicar ${npmAuth.packageName} (${source})`));
     case NPM_AUTH_STATUS.projectCredentials:
-      return renderRow(ICON.failure, "npm auth", paint("red", `el ${PROJECT_NPM_CONFIG_FILE} del proyecto define credenciales que pisan ${NPM_TOKEN_VARIABLE}`));
+      return renderRow(ICON.failure, label, paint("red", `el ${PROJECT_NPM_CONFIG_FILE} del proyecto define credenciales que pisan ${npmAuth.tokenVariable ?? NPM_TOKEN_VARIABLE}`));
+    case NPM_AUTH_STATUS.unsupportedAuth:
+      return renderRow(ICON.failure, label, paint("red", npmAuth.reason ?? "autenticación no disponible"));
     default:
-      return renderRow(ICON.warning, "npm auth", paint("yellow", `no se pudo verificar (${source})`));
+      return renderRow(ICON.warning, label, paint("yellow", `no verificable (${source}): ${npmAuth.reason ?? "permiso de escritura no verificable"}`));
   }
 }
 
@@ -428,15 +434,16 @@ function requireReleaseVersion(context) {
  * Steps a configuration adds to the release plan.
  *
  * @param {ResolvedCreateVersionConfig} config - Resolved configuration.
+ * @param {string} [registryLabel] - Provider discovered from the resolved endpoint.
  * @returns {import("./plan.js").ReleaseCapabilities} Capabilities for `buildReleasePlan`.
  */
-export function describeReleaseCapabilities(config) {
+export function describeReleaseCapabilities(config, registryLabel) {
   return {
     checks: (config.checks?.length ?? 0) > 0,
     checksMissing: config.checks === null,
     prepare: config.prepare !== null,
     publish: config.publish !== null,
-    publishTitle: config.publish === NPM_PUBLISHER ? "Publicar en npm" : "Publicar el release",
+    publishTitle: isRegistryProvider(config.publish) ? `Publicar en ${registryLabel ?? REGISTRY_LABELS[config.publish]}` : "Publicar el release",
     commands: config.commands,
   };
 }
@@ -522,16 +529,18 @@ export async function applyMigrationsStep(context) {
 }
 
 /**
- * Previews the commit list; the version step writes it with the release files.
+ * Verifies the manual changelog before migrations or checks, preserving its exact bytes.
  *
  * @param {ReleaseContext} context - Release context.
  * @returns {Promise<void>}
  */
-async function generateChangelogStep(context) {
-  const changelogPath = path.join(context.repositoryRoot, CHANGELOG_FILE);
-  const previous = existsSync(changelogPath) ? readFileSync(changelogPath, "utf8") : "";
-  const unreleased = readUnreleased(fillUnreleasedFromCommits(previous, /** @type {{ sha: string, subject: string }[]} */ (context.state.unreleasedCommits)));
-  print(renderBox({ title: `CHANGELOG · ${UNRELEASED_HEADING} (listado de commits)`, lines: unreleased.body.split("\n"), tone: BOX_TONE.info }));
+async function verifyChangelogStep(context) {
+  context.changelogFiles = [await verifyChangelogUpdate(context, CHANGELOG_FILE, context.state.lastRelease?.sha ?? null)];
+  if (context.config.publish === JSR_REGISTRY_PROVIDER && context.state.headVersion) {
+    const candidate = listNextVersions(context.state.headVersion)[0].version;
+    await prepareJsrVersionUpdates(context, context.repositoryRoot, context.config.publication, candidate);
+  }
+  print(`${ICON.success} ${CHANGELOG_FILE} actualizado manualmente; se conserva sin reescribirlo.`);
 }
 
 /**
@@ -581,20 +590,6 @@ export function readReleaseFile(context, filePath, fileLabel) {
       { cause: error }
     );
   }
-}
-
-/**
- * Reads a changelog for the release transaction, recording absence for rollback.
- *
- * @param {VersionFilesContext} context - Release context.
- * @param {string} filePath - Changelog path relative to the repository root.
- * @returns {{ originalBytes: Buffer | null, text: string }} Existing bytes or an empty new document.
- * @throws {ReleaseStepError} When an existing changelog is not valid UTF-8.
- */
-export function readChangelogReleaseFile(context, filePath) {
-  return existsSync(path.join(context.repositoryRoot, filePath))
-    ? readReleaseFile(context, filePath, filePath)
-    : { originalBytes: null, text: "" };
 }
 
 /**
@@ -757,10 +752,11 @@ export async function prepareVersionFileUpdates(context, versionFiles, version) 
  * @param {ReleaseFileUpdate[]} fileUpdates - Files of the release commit.
  * @param {string | null} indexTree - Tree of the index before staging, or `null` when Git could not write it.
  * @param {ReleaseStepError} failure - What failed.
+ * @param {readonly import("./changelog.js").PreservedReleaseFile[]} preservedFiles - Files staged without rewriting their content.
  * @returns {Promise<ReleaseStepError>} Failure to throw, whose hint says what was restored.
  */
-async function rollBackRelease(context, fileUpdates, indexTree, failure) {
-  const releasePathspecs = fileUpdates.map(({ filePath }) => toLiteralPathspec(filePath));
+async function rollBackRelease(context, fileUpdates, indexTree, failure, preservedFiles) {
+  const releasePathspecs = [...fileUpdates, ...preservedFiles].map(({ filePath }) => toLiteralPathspec(filePath));
   const indexRestored = indexTree !== null && (await context.reader.tryGit(["reset", "--quiet", indexTree, "--", ...releasePathspecs])) !== null;
   const unrestoredPaths = fileUpdates
     .filter(({ filePath, originalBytes }) => {
@@ -782,8 +778,8 @@ async function rollBackRelease(context, fileUpdates, indexTree, failure) {
     .map(({ filePath }) => filePath);
   const restoreNote =
     indexRestored && unrestoredPaths.length === 0
-      ? "se restauraron package.json, CHANGELOG.md y versionFiles (contenido y staging), así que no se tocó la versión"
-      : `no se pudo restaurar todo: revisá git status y devolvé ${unrestoredPaths.length > 0 ? unrestoredPaths.join(", ") : "package.json, CHANGELOG.md y versionFiles"} a su estado anterior antes de reintentar`;
+      ? "se restauraron package.json y versionFiles (contenido y staging), y el staging del CHANGELOG; su contenido no se reescribió, así que no se tocó la versión"
+      : `no se pudo restaurar todo: revisá git status y devolvé ${unrestoredPaths.length > 0 ? unrestoredPaths.join(", ") : "los archivos de versión y el staging del release"} a su estado anterior antes de reintentar; el contenido del CHANGELOG no se reescribió`;
 
   return new ReleaseStepError(failure.message, `${failure.hint} Después volvé a correr ${context.commands.createVersion}; ${restoreNote}.`, { cause: failure });
 }
@@ -844,17 +840,19 @@ export async function assertReleaseFilesMatchHead(context, filePaths) {
 }
 
 /**
- * Writes the release files, stages them literally and creates the release commit, checking that it
+ * Writes version files, stages them and preserved files literally, and creates the release commit, checking that it
  * holds exactly the prepared tree. Any failure (or a hook that changes the commit) rolls the files and
  * their staging back and undoes the commit, so no tag is created.
  *
  * @param {StepContext} context - Release context.
  * @param {ReleaseFileUpdate[]} releaseFiles - Files of the release commit, with their bytes before the release.
  * @param {string} subject - Subject of the release commit.
+ * @param {readonly import("./changelog.js").PreservedReleaseFile[]} [preservedFiles] - Manually maintained files to stage without rewriting or restoring their bytes.
  * @returns {Promise<void>}
  * @throws {ReleaseStepError} When writing, staging or committing fails, or the commit differs from the prepared tree.
  */
-export async function commitReleaseFiles(context, releaseFiles, subject) {
+export async function commitReleaseFiles(context, releaseFiles, subject, preservedFiles = []) {
+  assertPreservedFilesUnchanged(context, preservedFiles);
   // The index before staging, so a rollback puts it back exactly (a CHANGELOG.md the user staged stays staged).
   const indexTree = await context.reader.tryGit(["write-tree"]);
   let preparedTree = "";
@@ -869,7 +867,7 @@ export async function commitReleaseFiles(context, releaseFiles, subject) {
         });
       }
     }
-    await runGitStep(context, ["add", "--", ...releaseFiles.map(({ filePath }) => toLiteralPathspec(filePath))], "No se pudo stagear package.json, CHANGELOG.md y versionFiles", "Revisá git status.");
+    await runGitStep(context, ["add", "--", ...[...releaseFiles, ...preservedFiles].map(({ filePath }) => toLiteralPathspec(filePath))], "No se pudo stagear package.json, CHANGELOG.md y versionFiles", "Revisá git status.");
     // What the commit must hold: a hook that changes or stages anything else makes it differ.
     preparedTree = await context.reader.git(["write-tree"]);
     await runGitStep(context, ["commit", "--quiet", "-m", subject], "El commit de versión falló", "Corregí el error (por ejemplo, un hook pre-commit que lo rechaza).");
@@ -878,30 +876,42 @@ export async function commitReleaseFiles(context, releaseFiles, subject) {
       error instanceof ReleaseStepError
         ? error
         : new ReleaseStepError(`No se pudo preparar el commit de versión ${subject} (${error instanceof Error ? error.message : String(error)}).`, "Revisá git status.", { cause: error });
-    throw await rollBackRelease(context, releaseFiles, indexTree, failure);
+    throw await rollBackRelease(context, releaseFiles, indexTree, failure, preservedFiles);
   }
 
+  /** @type {ReleaseStepError | null} */
+  let failure = null;
   if ((await context.reader.git(["rev-parse", "HEAD^{tree}"])) !== preparedTree) {
     const unpreparedPaths = await context.reader.git(["diff", "--name-only", preparedTree, "HEAD"]);
-    const failure = new ReleaseStepError(
+    failure = new ReleaseStepError(
       `El commit de versión ${subject} incluía cambios que beez-rp no preparó: ${unpreparedPaths.split("\n").slice(0, MAX_LISTED_ITEMS).join(", ")} (por ejemplo, de un hook). Se deshizo el commit y no se creó el tag.`,
       "Revisá el hook y esos cambios."
     );
+  } else {
+    try {
+      assertPreservedFilesUnchanged(context, preservedFiles);
+    } catch (error) {
+      if (!(error instanceof ReleaseStepError)) throw error;
+      failure = error;
+    }
+  }
+  if (failure) {
     if ((await context.reader.tryGit(["reset", "--soft", "--quiet", "HEAD^"])) === null) {
       throw new ReleaseStepError(failure.message, `No se pudo deshacer el commit: corré git reset --soft HEAD^, revisá git status y volvé a correr ${context.commands.createVersion}.`);
     }
-    throw await rollBackRelease(context, releaseFiles, indexTree, failure);
+    throw await rollBackRelease(context, releaseFiles, indexTree, failure, preservedFiles);
   }
 }
 
 /**
- * Chooses the next version (flags or prompt), releases the CHANGELOG
- * `[Unreleased]` block and creates the release commit and annotated tag.
+ * Chooses the next version (flags or prompt), preserves the manual CHANGELOG and creates
+ * the release commit and annotated tag.
  *
  * @param {ReleaseContext} context - Release context.
  * @returns {Promise<void>}
  */
 async function bumpVersionStep(context) {
+  assertPreservedFilesUnchanged(context, context.changelogFiles);
   await assertReleaseFilesMatchHead(context, [PACKAGE_MANIFEST_FILE, ...context.config.versionFiles]);
   // Re-read the manifest: syncing main may have brought a newer version.
   const manifest = readReleaseFile(context, PACKAGE_MANIFEST_FILE, PACKAGE_MANIFEST_FILE);
@@ -939,28 +949,13 @@ async function bumpVersionStep(context) {
     throw new ReleaseStepError("No se eligió ninguna versión.", `Volvé a correr ${context.commands.createVersion}.`);
   }
 
-  const changelog = readChangelogReleaseFile(context, CHANGELOG_FILE);
-  let releasedChangelog;
-
-  try {
-    releasedChangelog = releaseUnreleased(fillUnreleasedFromCommits(changelog.text, commits), nextRelease.version, new Date().toISOString().split("T")[0]);
-  } catch (error) {
-    throw new ReleaseStepError(
-      `CHANGELOG.md no está listo: ${error instanceof Error ? error.message : String(error)}`,
-      `Revisá el CHANGELOG y los commits pendientes y volvé a correr ${context.commands.createVersion}.`,
-      { cause: error }
-    );
-  }
-
   /** @type {ReleaseFileUpdate[]} */
   const releaseFiles = [
     { filePath: PACKAGE_MANIFEST_FILE, originalBytes: manifest.originalBytes, content: rewriteManifestVersion(context, PACKAGE_MANIFEST_FILE, manifest.text, nextRelease.version) },
-    { filePath: CHANGELOG_FILE, originalBytes: changelog.originalBytes, content: releasedChangelog },
     ...(await prepareVersionFileUpdates(context, context.config.versionFiles, nextRelease.version)),
+    ...(context.config.publish === JSR_REGISTRY_PROVIDER ? await prepareJsrVersionUpdates(context, context.repositoryRoot, context.config.publication, nextRelease.version) : []),
   ];
-  print(renderBox({ title: `CHANGELOG · ${UNRELEASED_HEADING} → [${nextRelease.version}]`, lines: readUnreleased(fillUnreleasedFromCommits(changelog.text, commits)).body.split("\n"), tone: BOX_TONE.info }));
-
-  await commitReleaseFiles(context, releaseFiles, nextRelease.version);
+  await commitReleaseFiles(context, releaseFiles, nextRelease.version, context.changelogFiles);
 
   const tag = toReleaseTag(nextRelease.version);
   await runGitStep(context, ["tag", "-a", tag, "-m", nextRelease.version], `No se pudo crear el tag ${tag}`, `Si ya existe, revisalo con git show ${tag}.`);
@@ -1147,28 +1142,6 @@ async function resolvePublishedArtifact(context, version, workingManifest) {
 }
 
 /**
- * Resolves the registry the release is published to: `publishConfig["@scope:registry"]` for a
- * scoped package, else `publishConfig.registry`, else the registry npm's config resolves in the
- * repository (project `.npmrc`, environment, global config).
- *
- * @param {Record<string, unknown>} manifest - Working tree `package.json`.
- * @param {string} repositoryRoot - Repository root.
- * @param {string} createVersionCommand - How the project runs create-version (for the hint).
- * @returns {Promise<string>} Registry URL, already checked to be a plain http(s) URL.
- * @throws {ReleaseStepError} When the registry is not a valid http(s) URL or npm cannot report it.
- */
-async function resolveReleaseRegistry(manifest, repositoryRoot, createVersionCommand) {
-  try {
-    return await resolvePublishRegistry(manifest, repositoryRoot);
-  } catch (error) {
-    throw new ReleaseStepError(
-      `No se puede publicar: ${error instanceof Error ? error.message : String(error)}.`,
-      `No se publicó nada. Corregí el registry (publishConfig.registry o publishConfig["@scope:registry"] en package.json, o registry/@scope:registry en .npmrc) con una URL http(s) sin credenciales y volvé a correr ${createVersionCommand}.`
-    );
-  }
-}
-
-/**
  * Publishes the release with npm or the project hook.
  *
  * @param {ReleaseContext} context - Release context.
@@ -1178,40 +1151,53 @@ async function publishReleaseStep(context) {
   const version = requireReleaseVersion(context);
   const { publish } = context.config;
 
-  if (publish === NPM_PUBLISHER) {
+  if (isRegistryProvider(publish)) {
     // Syncing main may have renamed the package after the diagnosis: publish under the current name.
     const manifest = readWorkingManifest(context.repositoryRoot);
     const packageName = String(manifest.name);
     context.packageName = packageName;
-    const registryUrl = await resolveReleaseRegistry(manifest, context.repositoryRoot, context.commands.createVersion);
+    const selection = selectProjectRegistry(context.config);
+    let registry;
+    try {
+      registry = await resolveRegistry(selection, manifest, context.repositoryRoot);
+    } catch (error) {
+      throw new ReleaseStepError(`No se puede resolver el destino de publicación: ${error instanceof Error ? error.message : "configuración inválida"}.`, `Corregí publication.registryUrl, el proveedor o el manifest y volvé a correr ${context.commands.createVersion}; no se publicó nada.`, { cause: error });
+    }
+    const registryUrl = registry.registryUrl;
     context.registryUrl = registryUrl;
-    const authConfigLine = buildNpmAuthConfigLine(registryUrl);
-    const artifactPath = await resolvePublishedArtifact(context, version, manifest);
+    context.registryLabel = registry.label;
+    const artifactPath = registry.provider === JSR_REGISTRY_PROVIDER ? (await assertNoTrackedChanges(context), null) : await resolvePublishedArtifact(context, version, manifest);
     if (artifactPath) {
       print(paint("gray", `Publicando ${artifactPath}; npm puede pedir la confirmación 2FA en el navegador o un código.`));
     }
-    const result = await publishToNpm(context.repositoryRoot, { authConfigLine, artifactPath });
+    const result = await publishRegistryRelease(selection, manifest, context.repositoryRoot, context.repositoryRoot, version, artifactPath);
 
     if (result.missingToken) {
       throw new ReleaseStepError(
-        `Falta ${NPM_TOKEN_VARIABLE} para publicar ${version}.`,
-        `Definilo en ${NPM_TOKEN_LOCATIONS} y corré ${context.commands.createVersion}: retoma solo la publicación.`
+        `Falta ${registry.options.tokenEnv} para publicar ${version} en ${registry.label}.`,
+        `Definilo en el entorno, .env del repo o ~/.config/beez-rp/.env y corré ${context.commands.createVersion}: retoma solo la publicación.`
       );
     }
 
-    if (result.exitCode !== 0) {
+    if (!result.confirmed) {
       // npm inherited the terminal (2FA), so its output cannot be parsed: the credentials are checked again.
-      const npmAuth = await checkNpmPublishAccess(packageName, context.repositoryRoot, registryUrl);
-      const failure = describeNpmPublishFailure(npmAuth, { exitCode: result.exitCode, version }, context.commands);
+      const npmAuth = await checkRegistryAccess(selection, manifest, context.repositoryRoot);
+      const failure = registry.provider === RELEASE_REGISTRY.npm ? describeNpmPublishFailure(npmAuth, { exitCode: result.exitCode, version }, context.commands) : {
+        message: result.exitCode === 0
+          ? `El cliente de ${registry.label} terminó con código 0, pero no se confirmó ${registry.packageName}@${version} en la metadata.`
+          : `La publicación en ${registry.label} terminó con código ${result.exitCode} y no se confirmó ${registry.packageName}@${version}.`,
+        hint: `Consultá ${registry.registryUrl} antes de reintentar; ${context.commands.createVersion} retoma la publicación. ${npmAuth.reason ?? "Revisá las credenciales y el permiso de escritura."}`,
+      };
       throw new ReleaseStepError(failure.message, failure.hint);
     }
 
     // npm view ignores publishConfig, so the registry the release went to is queried explicitly.
-    const npm = await lookupPublishedVersions(packageName, context.repositoryRoot, registryUrl);
+    const npm = await lookupRegistryVersions(selection, manifest, context.repositoryRoot);
     if (!npm.publishedVersions.includes(version)) {
-      print(`${ICON.warning} ${paint("yellow", `npm todavía no muestra ${version}; puede tardar unos segundos en propagarse.`)}`);
+      print(`${ICON.warning} ${paint("yellow", `${registry.label} todavía no muestra ${version}; puede tardar unos segundos en propagarse.`)}`);
     }
-  } else if (publish) {
+    context.packageName = registry.packageName;
+  } else if (typeof publish === "function") {
     await publish(createHookContext(context.repositoryRoot, context.reader, version));
   }
 
@@ -1227,7 +1213,7 @@ async function publishReleaseStep(context) {
 const STEP_EXECUTORS = {
   [RELEASE_STEP.syncMain]: syncMainStep,
   [RELEASE_STEP.applyMigrations]: applyMigrationsStep,
-  [RELEASE_STEP.generateChangelog]: generateChangelogStep,
+  [RELEASE_STEP.verifyChangelog]: verifyChangelogStep,
   [RELEASE_STEP.runChecks]: runChecksStep,
   [RELEASE_STEP.bumpVersion]: bumpVersionStep,
   [RELEASE_STEP.prepareRelease]: prepareReleaseStep,
@@ -1258,7 +1244,7 @@ function renderReleaseSummary(context, remoteUrl, startedAt) {
   }
 
   if (context.published && context.registryUrl) {
-    lines.push(`${ICON.success} ${paint("bold", "npm")}       ${describePublishedRelease({ registryUrl: context.registryUrl, packageName: context.packageName, version })}`);
+    lines.push(`${ICON.success} ${paint("bold", context.registryLabel ?? "Registro")}       ${describePublishedRelease({ registryUrl: context.registryUrl, packageName: context.packageName, version })}`);
   }
 
   const githubRepository = GITHUB_REPOSITORY_PATTERN.exec(remoteUrl)?.[1];
@@ -1299,7 +1285,7 @@ async function describeReleaseOnOrigin(context, remoteUrl) {
   }
 
   const host = GITHUB_REPOSITORY_PATTERN.test(remoteUrl) ? "GitHub" : RELEASE_REMOTE;
-  const target = context.config.publish === NPM_PUBLISHER ? "publicar en npm" : "publicar el release";
+  const target = isRegistryProvider(context.config.publish) ? `publicar en ${context.registryLabel ?? context.state.npm?.registryLabel ?? REGISTRY_LABELS[context.config.publish]}` : "publicar el release";
 
   // A detached release is published from its tag and never pushes `main`.
   if (!context.state.currentBranch) {
@@ -1388,7 +1374,7 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   const reader = createGitReader(repositoryRoot);
   const remoteUrl = (await reader.tryGit(["remote", "get-url", RELEASE_REMOTE])) ?? "";
   const { migrations } = config;
-  const capabilities = describeReleaseCapabilities(config);
+  let capabilities = describeReleaseCapabilities(config);
   const planOptions = { skipUnpublished: options.skipUnpublished, ignoreLocalChanges: options.ignoreLocalChanges };
   const spinner = startSpinner("Diagnosticando el repositorio");
   let state;
@@ -1396,12 +1382,13 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   try {
     state = await collectReleaseState({
       repositoryRoot,
-      trackNpm: config.registry === RELEASE_REGISTRY.npm,
+      trackNpm: config.registry !== null,
+      registrySelection: selectProjectRegistry(config),
       checkMigrations: migrations ? () => migrations.check(createHookContext(repositoryRoot, reader, null)) : null,
       // The credentials are checked when the plan would publish to npm, and also when the npm lookup
       // failed: an authenticated `npm view` rejected with E401/E403 means the token, not the connection, is wrong.
       checkNpmAuth: (snapshot) =>
-        config.publish === NPM_PUBLISHER &&
+        isRegistryProvider(config.publish) &&
         // Planned as if local changes were ignored: the run may still offer to ignore them, and
         // that plan must not publish with unchecked credentials.
         (hasFailedNpmLookup(snapshot) ||
@@ -1416,8 +1403,9 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   }
 
   const latestPublished = state.npm?.publishedVersions.at(-1);
+  capabilities = describeReleaseCapabilities(config, state.npm?.registryLabel);
   const publishedLabel = state.npm
-    ? latestPublished ? `v${latestPublished} en npm` : null
+    ? latestPublished ? `v${latestPublished} en ${state.npm.registryLabel ?? "npm"}` : null
     : state.releasedVersion ? `v${state.releasedVersion} ${config.publishedLabel}` : null;
   print(renderBanner({ projectName: config.projectName ?? state.packageName, publishedLabel }));
   print(renderDiagnosis(state, repositoryRoot));
@@ -1452,9 +1440,9 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
 
   print(renderPlan(plan));
 
-  // A blocker is an expected outcome already explained in the box, not a command failure.
+  // A missing manual changelog update must fail CI; other diagnostic blockers retain their exit behavior.
   if (plan.blockers.length > 0) {
-    return 0;
+    return plan.blockers.some((blocker) => blocker.code === CHANGELOG_UPDATE_REQUIRED_CODE) ? FAILURE_EXIT_CODE : 0;
   }
 
   if (plan.mode === RELEASE_MODE.newRelease && state.headVersion) {
@@ -1472,6 +1460,9 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   if (plan.mode === RELEASE_MODE.resume && plan.pendingVersion) {
     try {
       await verifyReleasedVersionFiles({ repositoryRoot, config, reader, commands: config.commands }, plan.pendingVersion);
+      if (config.publish === JSR_REGISTRY_PROVIDER && readJsrManifest(repositoryRoot, config.publication.configFile).manifest.version !== plan.pendingVersion) {
+        throw new ReleaseStepError("El manifest JSR no coincide con la versión del release pendiente.", "Corregilo dentro del commit de release antes de subir o publicar; no se reescribió ningún archivo.");
+      }
     } catch (error) {
       const hint = error instanceof ReleaseStepError ? ` ${error.hint}` : "";
       print(`${ICON.failure} ${paint("red", `${error instanceof Error ? error.message : String(error)}${hint}`)}`);
@@ -1504,7 +1495,9 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
     commitCount: null,
     packageName: state.packageName,
     registryUrl: null,
+    registryLabel: state.npm?.registryLabel ?? null,
     commands: config.commands,
+    changelogFiles: [],
   };
   const changesToSetAside = options.ignoreLocalChanges ? listLocalChangesToSetAside(state, plan.mode) : [];
   let setAside = null;

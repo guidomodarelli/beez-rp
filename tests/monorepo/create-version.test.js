@@ -113,6 +113,72 @@ async function startRegistry({ rejectPublications = false, packages = {} } = {})
 const npmEnvironment = (registryUrl) => ({ NPM_TOKEN: OWNER_TOKEN, npm_config_registry: registryUrl, "npm_config_@acme:registry": registryUrl });
 
 describe("create-version in monorepo mode", () => {
+  it.each([
+    { flags: ["--bump", "minor"] },
+    { flags: ["--dry-run", "--bump", "minor"] },
+    { flags: ["--dry-run", "--accept-suggested"] },
+  ])("should stop before writing package versions when a selected changelog is unchanged ($flags)", async ({ flags }) => {
+    // Arrange
+    const { repositoryRoot, remoteRoot } = createReleasedMonorepo();
+    const changelogPath = path.join(repositoryRoot, "packages/widget/CHANGELOG.md");
+    const previousNotes = readFileSync(changelogPath);
+    pushCoreFeature(repositoryRoot);
+    writeFileSync(path.join(repositoryRoot, "beez-rp.config.js"), 'export default { packages: "workspaces", checks: false };\n');
+    commitAll(repositoryRoot, "chore: configure manual release checks");
+    runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+    writeFileSync(changelogPath, previousNotes);
+    const head = runGit(["rev-parse", "HEAD"], repositoryRoot);
+    const status = runGit(["status", "--porcelain"], repositoryRoot);
+
+    // Act
+    const release = await runCliAsync(repositoryRoot, flags);
+
+    // Assert
+    expect(release.status, release.output).toBe(1);
+    expect(flattenOutput(release.output)).toContain("packages/widget/CHANGELOG.md no fue actualizado desde el último release");
+    expect(readFileSync(changelogPath)).toEqual(previousNotes);
+    expect(JSON.parse(readFileSync(path.join(repositoryRoot, "packages/widget/package.json"), "utf8")).version).toBe("1.0.0");
+    expect(runGit(["rev-parse", "HEAD"], repositoryRoot)).toBe(head);
+    expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe(status);
+    expect(runGit(["rev-parse", "main"], remoteRoot)).toBe(head);
+    expect(runGit(["tag", "--list", "widget-v1.1.0"], remoteRoot)).toBe("");
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+
+  it.each([
+    { flags: ["--dry-run"], updated: false, expectedMessage: "si elegís publicar @acme/widget, el release se corta" },
+    { flags: ["--dry-run", "--bump", "minor"], updated: true, expectedMessage: "Verificar la actualización manual de los CHANGELOG elegidos" },
+    { flags: ["--dry-run", "--accept-suggested"], updated: true, expectedMessage: "Verificar la actualización manual de los CHANGELOG elegidos" },
+  ])("should preserve preview success when the changelog update is optional or satisfied ($flags, updated=$updated)", async ({ flags, updated, expectedMessage }) => {
+    // Arrange
+    const { repositoryRoot, remoteRoot } = createReleasedMonorepo();
+    const changelogPath = path.join(repositoryRoot, "packages/widget/CHANGELOG.md");
+    const releasedNotes = readFileSync(changelogPath);
+    pushCoreFeature(repositoryRoot);
+    writeFileSync(path.join(repositoryRoot, "beez-rp.config.js"), 'export default { packages: "workspaces", checks: false };\n');
+    commitAll(repositoryRoot, "chore: configure manual release checks");
+    runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+    if (!updated) {
+      writeFileSync(changelogPath, releasedNotes);
+    }
+    const previousNotes = readFileSync(changelogPath);
+    const head = runGit(["rev-parse", "HEAD"], repositoryRoot);
+    const status = runGit(["status", "--porcelain"], repositoryRoot);
+
+    // Act
+    const preview = await runCliAsync(repositoryRoot, flags);
+
+    // Assert
+    expect(preview.status, preview.output).toBe(0);
+    expect(flattenOutput(preview.output)).toContain("--dry-run: no se cambió nada");
+    expect(flattenOutput(preview.output)).toContain(expectedMessage);
+    expect(readFileSync(changelogPath)).toEqual(previousNotes);
+    expect(JSON.parse(readFileSync(path.join(repositoryRoot, "packages/widget/package.json"), "utf8")).version).toBe("1.0.0");
+    expect(runGit(["rev-parse", "HEAD"], repositoryRoot)).toBe(head);
+    expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe(status);
+    expect(runGit(["rev-parse", "main"], remoteRoot)).toBe(head);
+    expect(runGit(["tag", "--list", "widget-v1.1.0"], remoteRoot)).toBe("");
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+
   it(
     "releases a package added at the 0.0.0 placeholder with the unshifted suggestion, since it was never released",
     async () => {
@@ -152,7 +218,7 @@ describe("create-version in monorepo mode", () => {
       expect(runGit(["tag", "--list", "--points-at", "main"], remoteRoot)).toBe("widget-v1.1.0");
       expect(JSON.parse(runGit(["show", "main:packages/widget/package.json"], remoteRoot)).version).toBe("1.1.0");
       expect(JSON.parse(runGit(["show", "main:packages/adapter/package.json"], remoteRoot)).version).toBe("0.3.0");
-      expect(runGit(["show", "main:packages/widget/CHANGELOG.md"], remoteRoot)).toMatch(/## \[Unreleased\]\n\n## \[1\.1\.0\] - \d{4}-\d{2}-\d{2}\n\n- [a-f0-9]{7} feat\(core\):.*/u);
+      expect(runGit(["show", "main:packages/widget/CHANGELOG.md"], remoteRoot)).toBe("# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Respuesta nueva.");
       expect(registry.publications).toEqual([{ packageName: "@acme/widget", version: "1.1.0", user: OWNER_USER }]);
       const releaseOutput = flattenOutput(release.output);
       expect(releaseOutput).toContain("Deploy de @acme/widget 1.1.0.");
@@ -278,14 +344,13 @@ describe("create-version in monorepo mode", () => {
   );
 
   it(
-    "regenerates an invalid changelog from the package commits and releases successfully",
+    "should preserve custom changelog sections when a package is released",
     async () => {
       const { repositoryRoot, remoteRoot } = createReleasedMonorepo();
       pushCoreFeature(repositoryRoot);
       writeFileSync(path.join(repositoryRoot, "packages/widget/CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n### Nope\n\n- Respuesta nueva.\n");
       commitAll(repositoryRoot, "docs(widget): use an unknown changelog section");
       runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
-      const featureSha = runGit(["rev-parse", "HEAD"], repositoryRoot);
       const registry = await startRegistry();
 
       const preview = await runCliAsync(repositoryRoot, ["--dry-run"], npmEnvironment(registry.registryUrl));
@@ -293,15 +358,13 @@ describe("create-version in monorepo mode", () => {
       expect(preview.status, preview.output).toBe(0);
       const previewOutput = flattenOutput(preview.output);
       expect(previewOutput).toContain("Elegir la versión de cada paquete con cambios (1) @acme/widget");
-      expect(previewOutput).toContain("CHANGELOG desde los commits");
+      expect(previewOutput).toContain("Verificar la actualización manual de los CHANGELOG elegidos");
 
       const release = await runCliAsync(repositoryRoot, ["--bump", "minor"], npmEnvironment(registry.registryUrl));
 
       expect(release.status, release.output).toBe(0);
       const changelog = runGit(["show", "HEAD:packages/widget/CHANGELOG.md"], repositoryRoot);
-      expect(changelog).toContain(`- ${featureSha.slice(0, 7)} docs(widget): use an unknown changelog section`);
-      expect(changelog).toContain("feat(core):");
-      expect(changelog).not.toContain("### Nope");
+      expect(changelog).toBe("# Changelog\n\n## [Unreleased]\n\n### Nope\n\n- Respuesta nueva.");
       expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe("");
       expect(runGit(["tag", "--list", "widget-v1.1.0"], repositoryRoot)).toBe("widget-v1.1.0");
       expect(runGit(["rev-parse", "main"], remoteRoot)).toBe(runGit(["rev-parse", "HEAD"], repositoryRoot));
@@ -722,7 +785,7 @@ describe("create-version in monorepo mode", () => {
       const release = await runCliAsync(repositoryRoot, ["--accept-suggested"], npmEnvironment(registry.registryUrl));
 
       expect(release.status, release.output).toBe(1);
-      expect(flattenOutput(release.output)).toContain("packages/widget/CHANGELOG.md (versionFiles) es el package.json o el CHANGELOG.md de @acme/widget: el commit de release ya lo escribe.");
+      expect(flattenOutput(release.output)).toContain("packages/widget/CHANGELOG.md (versionFiles) es el package.json o el CHANGELOG.md de @acme/widget: el commit de release los incluye y no reescribe el CHANGELOG.");
       expect(runGit(["rev-parse", "HEAD"], repositoryRoot)).toBe(featureSha);
       expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe("");
       expect(runGit(["tag", "--list", "widget-v1.1.0"], repositoryRoot)).toBe("");
