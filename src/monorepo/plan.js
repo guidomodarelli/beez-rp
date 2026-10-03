@@ -14,6 +14,7 @@
  * @module monorepo/plan
  */
 
+import { CHANGELOG_UPDATE_REQUIRED_CODE } from "../constants/changelog.js";
 import {
   CREATE_VERSION_FLAG,
   MAIN_BRANCH,
@@ -304,9 +305,10 @@ function describeSkippedPublication(name, version, tag, registryLabel = "npm") {
  * @param {ReleaseCapabilities} capabilities - Project capabilities.
  * @param {ProjectCommands} commands - Project commands quoted by the hints.
  * @param {string[]} warnings - Warnings gathered so far.
+ * @param {boolean} selectAllPackages - Whether the flags select every candidate without allowing skips.
  * @returns {MonorepoPlan} Plan.
  */
-function planNewRelease(state, capabilities, commands, warnings) {
+function planNewRelease(state, capabilities, commands, warnings, selectAllPackages) {
   const candidates = state.packages.filter((packageSnapshot) => packageSnapshot.unreleasedCommits.length > 0);
   const candidateNames = candidates.map((packageSnapshot) => packageSnapshot.unit.name);
 
@@ -334,6 +336,18 @@ function planNewRelease(state, capabilities, commands, warnings) {
     return createPlan({ blockers: [missingChecksBlocker(commands)] });
   }
 
+  const unchangedChangelogs = candidates.filter(({ changelog }) => changelog.updated !== true);
+  if (selectAllPackages && unchangedChangelogs.length > 0) {
+    return createPlan({
+      blockers: unchangedChangelogs.map(({ changelog, unit }) => ({
+        code: CHANGELOG_UPDATE_REQUIRED_CODE,
+        title: changelog.reason ?? `${unit.changelogPath} no fue actualizado desde el último release`,
+        details: [`Actualizá ${unit.changelogPath} manualmente y volvé a correr ${commands.createVersion}; beez-rp no lo modifica.`],
+      })),
+      warnings,
+    });
+  }
+
   // The versions are chosen first: skipping every package must not leave migrations applied.
   /** @type {ReleasePlanStep[]} */
   const steps = [
@@ -349,10 +363,8 @@ function planNewRelease(state, capabilities, commands, warnings) {
     },
   ];
 
-  for (const { changelog, unit } of candidates) {
-    if (changelog.updated !== true) {
-      warnings.push(`${changelog.reason ?? `${unit.changelogPath} no fue actualizado desde el último release`}; si elegís publicar ${unit.name}, el release se corta. Actualizalo manualmente.`);
-    }
+  for (const { changelog, unit } of unchangedChangelogs) {
+    warnings.push(`${changelog.reason ?? `${unit.changelogPath} no fue actualizado desde el último release`}; si elegís publicar ${unit.name}, el release se corta. Actualizalo manualmente.`);
   }
 
   if (state.migrations?.status === MIGRATION_STATUS.pending) {
@@ -444,11 +456,12 @@ export function listPackagesToAuthenticate(plan) {
  *
  * @param {MonorepoSnapshot} state - Snapshot gathered by `collectMonorepoState`.
  * @param {ReleaseCapabilities} capabilities - Steps the project configured.
- * @param {{ tagFormat: string, ignoreLocalChanges?: boolean, skipUnpublished?: boolean }} options - Tag format and
- *   command-line options; `skipUnpublished` plans a new release even when tagged releases are missing from npm.
+ * @param {{ tagFormat: string, ignoreLocalChanges?: boolean, skipUnpublished?: boolean, selectAllPackages?: boolean }} options -
+ *   Tag format and command-line options. `skipUnpublished` allows a new release despite missing publications;
+ *   `selectAllPackages` requires updated changelogs for every candidate because the flags do not allow skips.
  * @returns {MonorepoPlan} Ordered plan.
  */
-export function buildMonorepoPlan(state, capabilities, { tagFormat, ignoreLocalChanges = false, skipUnpublished = false }) {
+export function buildMonorepoPlan(state, capabilities, { tagFormat, ignoreLocalChanges = false, skipUnpublished = false, selectAllPackages = false }) {
   const commands = capabilities.commands ?? DEFAULT_PROJECT_COMMANDS;
   const blockers = findBlockers(state, ignoreLocalChanges, commands);
 
@@ -459,7 +472,7 @@ export function buildMonorepoPlan(state, capabilities, { tagFormat, ignoreLocalC
   const localResume = planLocalResume(state, capabilities, tagFormat);
   const pending = localResume ? { plan: null, warnings: [] } : planPendingPublications(state, capabilities);
   const skipped = skipUnpublished && pending.plan ? pending.plan.pendingReleases.map(({ name, version, tag }) => describeSkippedPublication(name, version, tag, state.packages.find(({ unit }) => unit.name === name)?.npm?.registryLabel)) : [];
-  const plan = localResume ?? (skipUnpublished ? null : pending.plan) ?? planNewRelease(state, capabilities, commands, [...pending.warnings, ...skipped]);
+  const plan = localResume ?? (skipUnpublished ? null : pending.plan) ?? planNewRelease(state, capabilities, commands, [...pending.warnings, ...skipped], selectAllPackages);
   const withAuth = applyNpmAuth(plan, state, commands);
   // As in single-package mode: the configuration and the workspace manifests were already read from the
   // working tree, so code and data changes cannot be set aside.

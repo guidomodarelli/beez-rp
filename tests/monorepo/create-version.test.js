@@ -113,7 +113,11 @@ async function startRegistry({ rejectPublications = false, packages = {} } = {})
 const npmEnvironment = (registryUrl) => ({ NPM_TOKEN: OWNER_TOKEN, npm_config_registry: registryUrl, "npm_config_@acme:registry": registryUrl });
 
 describe("create-version in monorepo mode", () => {
-  it("should stop before writing package versions when a selected changelog is unchanged", async () => {
+  it.each([
+    { flags: ["--bump", "minor"] },
+    { flags: ["--dry-run", "--bump", "minor"] },
+    { flags: ["--dry-run", "--accept-suggested"] },
+  ])("should stop before writing package versions when a selected changelog is unchanged ($flags)", async ({ flags }) => {
     // Arrange
     const { repositoryRoot, remoteRoot } = createReleasedMonorepo();
     const changelogPath = path.join(repositoryRoot, "packages/widget/CHANGELOG.md");
@@ -127,11 +131,46 @@ describe("create-version in monorepo mode", () => {
     const status = runGit(["status", "--porcelain"], repositoryRoot);
 
     // Act
-    const release = await runCliAsync(repositoryRoot, ["--bump", "minor"]);
+    const release = await runCliAsync(repositoryRoot, flags);
 
     // Assert
     expect(release.status, release.output).toBe(1);
     expect(flattenOutput(release.output)).toContain("packages/widget/CHANGELOG.md no fue actualizado desde el último release");
+    expect(readFileSync(changelogPath)).toEqual(previousNotes);
+    expect(JSON.parse(readFileSync(path.join(repositoryRoot, "packages/widget/package.json"), "utf8")).version).toBe("1.0.0");
+    expect(runGit(["rev-parse", "HEAD"], repositoryRoot)).toBe(head);
+    expect(runGit(["status", "--porcelain"], repositoryRoot)).toBe(status);
+    expect(runGit(["rev-parse", "main"], remoteRoot)).toBe(head);
+    expect(runGit(["tag", "--list", "widget-v1.1.0"], remoteRoot)).toBe("");
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+
+  it.each([
+    { flags: ["--dry-run"], updated: false, expectedMessage: "si elegís publicar @acme/widget, el release se corta" },
+    { flags: ["--dry-run", "--bump", "minor"], updated: true, expectedMessage: "Verificar la actualización manual de los CHANGELOG elegidos" },
+    { flags: ["--dry-run", "--accept-suggested"], updated: true, expectedMessage: "Verificar la actualización manual de los CHANGELOG elegidos" },
+  ])("should preserve preview success when the changelog update is optional or satisfied ($flags, updated=$updated)", async ({ flags, updated, expectedMessage }) => {
+    // Arrange
+    const { repositoryRoot, remoteRoot } = createReleasedMonorepo();
+    const changelogPath = path.join(repositoryRoot, "packages/widget/CHANGELOG.md");
+    const releasedNotes = readFileSync(changelogPath);
+    pushCoreFeature(repositoryRoot);
+    writeFileSync(path.join(repositoryRoot, "beez-rp.config.js"), 'export default { packages: "workspaces", checks: false };\n');
+    commitAll(repositoryRoot, "chore: configure manual release checks");
+    runGit(["push", "--quiet", "origin", "main"], repositoryRoot);
+    if (!updated) {
+      writeFileSync(changelogPath, releasedNotes);
+    }
+    const previousNotes = readFileSync(changelogPath);
+    const head = runGit(["rev-parse", "HEAD"], repositoryRoot);
+    const status = runGit(["status", "--porcelain"], repositoryRoot);
+
+    // Act
+    const preview = await runCliAsync(repositoryRoot, flags);
+
+    // Assert
+    expect(preview.status, preview.output).toBe(0);
+    expect(flattenOutput(preview.output)).toContain("--dry-run: no se cambió nada");
+    expect(flattenOutput(preview.output)).toContain(expectedMessage);
     expect(readFileSync(changelogPath)).toEqual(previousNotes);
     expect(JSON.parse(readFileSync(path.join(repositoryRoot, "packages/widget/package.json"), "utf8")).version).toBe("1.0.0");
     expect(runGit(["rev-parse", "HEAD"], repositoryRoot)).toBe(head);

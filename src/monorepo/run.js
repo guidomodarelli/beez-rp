@@ -17,6 +17,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { CHANGELOG_UPDATE_REQUIRED_CODE } from "../constants/changelog.js";
 import {
   CREATE_VERSION_FLAG,
   FAILURE_EXIT_CODE,
@@ -831,6 +832,8 @@ export async function runMonorepoCreateVersion({ repositoryRoot, config, options
     return FAILURE_EXIT_CODE;
   }
 
+  const selectAllPackages = Boolean(options.bump || options.acceptSuggested);
+
   let units;
   try {
     units = resolveReleaseUnits(discoverWorkspacePackages(repositoryRoot, /** @type {"workspaces" | string[]} */ (config.packages)));
@@ -860,7 +863,7 @@ export async function runMonorepoCreateVersion({ repositoryRoot, config, options
       registrySelection: selectProjectRegistry(config),
       checkMigrations: migrations ? () => migrations.check(createHookContext(repositoryRoot, reader, null)) : null,
       checkNpmAuthFor: (snapshot) =>
-        isRegistryProvider(config.publish) ? listPackagesToAuthenticate(buildMonorepoPlan(snapshot, capabilities, { tagFormat, ignoreLocalChanges: true, skipUnpublished: options.skipUnpublished })) : [],
+        isRegistryProvider(config.publish) ? listPackagesToAuthenticate(buildMonorepoPlan(snapshot, capabilities, { tagFormat, ignoreLocalChanges: true, skipUnpublished: options.skipUnpublished, selectAllPackages })) : [],
       onProgress: (label) => spinner.update(label),
     });
     spinner.succeed("Diagnóstico completo");
@@ -881,10 +884,10 @@ export async function runMonorepoCreateVersion({ repositoryRoot, config, options
   capabilities = describeReleaseCapabilities(config, state.packages.find((packageSnapshot) => packageSnapshot.npm?.registryLabel)?.npm?.registryLabel);
   print(renderMonorepoDiagnosis(state, repositoryRoot));
 
-  let plan = buildMonorepoPlan(state, capabilities, { tagFormat, ignoreLocalChanges: options.ignoreLocalChanges, skipUnpublished: options.skipUnpublished });
+  let plan = buildMonorepoPlan(state, capabilities, { tagFormat, ignoreLocalChanges: options.ignoreLocalChanges, skipUnpublished: options.skipUnpublished, selectAllPackages });
 
   if (plan.blockers.length > 0 && !options.ignoreLocalChanges && !options.dryRun && process.stdin.isTTY) {
-    const planIgnoringChanges = buildMonorepoPlan(state, capabilities, { tagFormat, ignoreLocalChanges: true, skipUnpublished: options.skipUnpublished });
+    const planIgnoringChanges = buildMonorepoPlan(state, capabilities, { tagFormat, ignoreLocalChanges: true, skipUnpublished: options.skipUnpublished, selectAllPackages });
     if (planIgnoringChanges.blockers.length === 0 && planIgnoringChanges.steps.length > 0) {
       if (!(await askToIgnoreLocalChanges(listMonorepoChangesToSetAside(state, planIgnoringChanges.mode)))) {
         print(`${ICON.info} Release cancelado: no se tocó nada. Commiteá o guardá los cambios y volvé a correr ${commands.createVersion}.`);
@@ -903,7 +906,7 @@ export async function runMonorepoCreateVersion({ repositoryRoot, config, options
   print(renderPlan(plan));
 
   if (plan.blockers.length > 0) {
-    return 0;
+    return plan.blockers.some((blocker) => blocker.code === CHANGELOG_UPDATE_REQUIRED_CODE) ? FAILURE_EXIT_CODE : 0;
   }
 
   if (options.dryRun) {

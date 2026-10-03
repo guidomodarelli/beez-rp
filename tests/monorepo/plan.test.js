@@ -115,6 +115,48 @@ describe("buildMonorepoPlan", () => {
     expect(stepIds(plan).slice(0, 3)).toEqual([MONOREPO_RELEASE_STEP.chooseVersions, MONOREPO_RELEASE_STEP.verifyChangelogs, RELEASE_STEP.applyMigrations]);
   });
 
+  it("should block unchanged changelogs when every candidate is selected automatically", () => {
+    // Arrange
+    const state = monorepoState({
+      packages: [
+        packageSnapshot("widget", { unreleasedCommits: [{ sha: "c1", subject: "feat(widget): new option", body: "" }] }),
+        packageSnapshot("cli", { unreleasedCommits: [{ sha: "c2", subject: "fix(cli): typo", body: "" }], changelog: { exists: true, entryCount: 1, unknownSections: [], updated: false, reason: null } }),
+      ],
+      migrations: { status: MIGRATION_STATUS.pending, pending: ["0001_init"], target: "db.example.test", reason: null },
+    });
+
+    // Act
+    const plan = buildMonorepoPlan(state, NPM_PACKAGE, { tagFormat: TAG_FORMAT, selectAllPackages: true });
+
+    // Assert
+    expect(plan.mode).toBe(RELEASE_MODE.blocked);
+    expect(plan.steps).toEqual([]);
+    expect(plan.blockers).toEqual([{
+      code: "changelog-update-required",
+      title: "packages/cli/CHANGELOG.md no fue actualizado desde el último release",
+      details: [expect.stringContaining("Actualizá packages/cli/CHANGELOG.md manualmente")],
+    }]);
+  });
+
+  it("should ignore unchanged changelogs of non-candidates when selecting packages automatically", () => {
+    // Arrange
+    const state = monorepoState({
+      packages: [
+        packageSnapshot("widget", { unreleasedCommits: [{ sha: "c1", subject: "feat(widget): new option", body: "" }] }),
+        packageSnapshot("cli", { changelog: { exists: true, entryCount: 1, unknownSections: [], updated: false, reason: null } }),
+      ],
+    });
+
+    // Act
+    const plan = buildMonorepoPlan(state, NPM_PACKAGE, { tagFormat: TAG_FORMAT, selectAllPackages: true });
+
+    // Assert
+    expect(plan.mode).toBe(RELEASE_MODE.newRelease);
+    expect(plan.candidates).toEqual(["@acme/widget"]);
+    expect(plan.blockers).toEqual([]);
+    expect(plan.warnings).toEqual([]);
+  });
+
   it("is up to date when no package changed", () => {
     const plan = buildMonorepoPlan(monorepoState({ packages: [packageSnapshot("widget"), packageSnapshot("cli")] }), NPM_PACKAGE, { tagFormat: TAG_FORMAT });
 
