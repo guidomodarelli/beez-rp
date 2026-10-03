@@ -17,3 +17,20 @@ export class ReleaseStepError extends Error {
     this.hint = hint;
   }
 }
+
+/** Reports a CI boundary failure while retaining the release identity for a safe retry.
+ * @extends ReleaseStepError
+ */
+export class CiReleaseError extends ReleaseStepError {
+  /**
+   * @param {"ci-preflight-failed" | "ci-run-lookup-failed" | "ci-dispatch-unconfirmed"} code - Stable failure category.
+   * @param {string} message - Safe Spanish diagnostic.
+   * @param {string} hint - Recovery action preserving the existing release.
+   * @param {{ cause?: unknown }} [options] - Original dependency failure.
+   */
+  constructor(code, message, hint, options) {
+    super(message, hint, options);
+    this.name = "CiReleaseError";
+    this.code = code;
+  }
+}

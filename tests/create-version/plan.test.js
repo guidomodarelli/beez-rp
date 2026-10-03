@@ -77,7 +77,7 @@ describe("create-version arguments", () => {
   );
 
   it("should parse spaced and inline flags and reject invalid combinations", () => {
-    expect(parseReleaseArguments(["--bump", "minor", "--dry-run", "--"])).toEqual({ bump: "minor", setVersion: null, dryRun: true, skipUnpublished: false, ignoreLocalChanges: false, acceptSuggested: false, help: false });
+    expect(parseReleaseArguments(["--bump", "minor", "--dry-run", "--"])).toEqual({ bump: "minor", setVersion: null, dryRun: true, skipUnpublished: false, ignoreLocalChanges: false, acceptSuggested: false, help: false, execution: null, setupCi: false, ciRelease: null, retryCi: null });
     expect(parseReleaseArguments(["--skip-unpublished"]).skipUnpublished).toBe(true);
     expect(parseReleaseArguments(["--ignore-local-changes"]).ignoreLocalChanges).toBe(true);
     expect(parseReleaseArguments(["-h"]).help).toBe(true);

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -124,6 +124,19 @@ describe("build decision", () => {
 });
 
 describe("beez-rp ignore-build", () => {
+  it("should defer only the exact CI release while keeping ordinary local build decisions", () => {
+    // Arrange
+    const root = createRepositoryWithVersions(["1.2.3", "1.2.4"]);
+    mkdirSync(path.join(root, ".beez-rp"));
+    // Act and Assert
+    writeFileSync(path.join(root, ".beez-rp/release.json"), JSON.stringify({ version: "1.2.4", execution: "ci" }));
+    expect(runCli(root).lines.at(-1)).toBe("SKIP");
+    writeFileSync(path.join(root, ".beez-rp/release.json"), JSON.stringify({ version: "1.2.4", execution: "local" }));
+    expect(runCli(root).lines.at(-1)).toBe("BUILD");
+    writeFileSync(path.join(root, ".beez-rp/release.json"), JSON.stringify({ version: "1.2.3", execution: "ci" }));
+    expect(runCli(root).lines.at(-1)).toBe("BUILD");
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+
   it(
     "should print BUILD as the last line when the commit bumps to the next version",
     () => {

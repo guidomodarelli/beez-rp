@@ -1,0 +1,51 @@
+name: Release
+run-name: "beez-rp release ${{ inputs.tag }} ${{ inputs.sha }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Versión creada desde local"
+        required: true
+        type: string
+      tag:
+        description: "Tag exacto del release"
+        required: true
+        type: string
+      sha:
+        description: "Commit exacto del tag"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+__RELEASE_PERMISSIONS__
+
+concurrency:
+  group: "beez-rp-release"
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      HUSKY: '0'
+__RELEASE_ENVIRONMENT__
+    steps:
+      - name: Checkout del release
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: true
+__NODE_SETUP__
+__DENO_SETUP__
+__PACKAGE_SETUP__
+__DEPLOYMENT_SETUP__
+      - name: Checks y publicación del release
+        env:
+          BEEZ_RP_RELEASE_VERSION: ${{ inputs.version }}
+          BEEZ_RP_RELEASE_SHA: ${{ inputs.sha }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: __RELEASE_COMMAND__
+__DEPLOYMENT_STEP__
