@@ -33,6 +33,9 @@ export const CI_RELEASE_ENVIRONMENT = Object.freeze({ version: "BEEZ_RP_RELEASE_
 /** Environment signals that prevent a CI worker from dispatching another workflow. */
 export const CI_RUNTIME_ENVIRONMENT = Object.freeze(["CI", "GITHUB_ACTIONS", "GITLAB_CI"]);
 
+/** Normalized (trimmed, lowercase) CI signal values that explicitly mean "not a CI runtime"; any other non-empty value enables it. */
+export const CI_RUNTIME_DISABLED_VALUES = Object.freeze(["", "0", "false", "no", "off"]);
+
 /** Relative template path from the CI setup module. */
 export const CI_RELEASE_TEMPLATE_FILE = "./templates/release.yml";
 

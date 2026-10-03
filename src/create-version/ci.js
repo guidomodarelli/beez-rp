@@ -6,7 +6,7 @@
 import { existsSync, lstatSync } from "node:fs";
 import path from "node:path";
 import {
-  CI_COMMIT_SHA_PATTERN, CI_RELEASE_ENVIRONMENT, CI_RUNTIME_ENVIRONMENT, CI_SETUP_CHOICE,
+  CI_COMMIT_SHA_PATTERN, CI_RELEASE_ENVIRONMENT, CI_RUNTIME_DISABLED_VALUES, CI_RUNTIME_ENVIRONMENT, CI_SETUP_CHOICE,
   CI_WORKFLOW_DIRECTORY, DEFAULT_CI_WORKFLOW, DISPATCH_CI_RELEASE_STEP, RELEASE_EXECUTION,
   CI_MIGRATION_ENVIRONMENT_PATTERN, CI_RELEASE_METADATA_FILE, CI_VERCEL_CONFIG_FILE, CI_VERCEL_DEPLOYMENT,
 } from "../constants/ci-release.js";
@@ -20,13 +20,25 @@ import { assertSafeCiPath } from "./ci-setup.js";
 import { isRegistryProvider } from "./registry-config.js";
 
 /**
+ * Detects a CI runtime from its conventional environment signals, accepting values such as `1`,
+ * `TRUE` or `yes` and treating only unset, empty or explicit false forms (`0`, `false`, `no`, `off`) as disabled.
+ * @returns {boolean} True when any CI signal is enabled.
+ */
+function isCiRuntime() {
+  return CI_RUNTIME_ENVIRONMENT.some((name) => {
+    const value = process.env[name];
+    return value !== undefined && !CI_RUNTIME_DISABLED_VALUES.includes(value.trim().toLowerCase());
+  });
+}
+
+/**
  * Selects the execution location without ever dispatching again inside a CI runtime.
  * @param {import("./config.js").ResolvedCreateVersionConfig} config - Project configuration.
  * @param {import("./plan.js").ReleaseOptions} options - CLI overrides.
  * @returns {Promise<{ execution: "local" | "ci", setup: boolean } | null>} Selection, or null when canceled.
  */
 export async function chooseReleaseExecution(config, options) {
-  if (options.ciRelease || CI_RUNTIME_ENVIRONMENT.some((name) => process.env[name] === "true")) {
+  if (options.ciRelease || isCiRuntime()) {
     if (options.execution === RELEASE_EXECUTION.ci || options.setupCi || options.retryCi) throw new ReleaseStepError("Un proceso de CI no puede disparar otro release en CI.", "Usá --ci-release con el tag recibido o --local.");
     return { execution: RELEASE_EXECUTION.local, setup: false };
   }

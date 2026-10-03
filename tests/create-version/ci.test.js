@@ -184,6 +184,23 @@ describe("release location and configuration", () => {
     await expect(chooseReleaseExecution(config, parseReleaseArguments(["--ci"]))).rejects.toThrow(/no puede disparar otro release/);
   });
 
+  it.each(["1", "TRUE", " True ", "yes", "github"])("should never dispatch another release from a CI runtime whose CI signal is %j", async (ciValue) => {
+    // Arrange
+    const config = resolveCreateVersionConfig({ ci: { workflow: "release.yml" } });
+    vi.stubEnv("CI", ciValue);
+    // Act and Assert
+    expect(await chooseReleaseExecution(config, parseReleaseArguments([]))).toEqual({ execution: "local", setup: false });
+    await expect(chooseReleaseExecution(config, parseReleaseArguments(["--ci"]))).rejects.toThrow(/no puede disparar otro release/);
+  });
+
+  it.each(["", "0", "FALSE", " no ", "Off"])("should keep dispatching to the configured workflow when the CI signal is the explicit false form %j", async (ciValue) => {
+    // Arrange
+    const config = resolveCreateVersionConfig({ ci: { workflow: "release.yml" } });
+    vi.stubEnv("CI", ciValue);
+    // Act and Assert
+    expect(await chooseReleaseExecution(config, parseReleaseArguments([]))).toEqual({ execution: "ci", setup: false });
+  });
+
   it("should reject conflicting CLI operations and unsafe CI settings", () => {
     // Arrange and Act and Assert
     for (const flags of [["--ci", "--local"], ["--local", "--setup-ci"], ["--ci-release", "v1.2.4", "--bump", "patch"], ["--retry-ci", "v1.2.4", "--ci-release", "v1.2.4"]]) expect(() => parseReleaseArguments(flags)).toThrow(/no se combin/);
