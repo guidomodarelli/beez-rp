@@ -15,7 +15,7 @@ import { CiReleaseError } from "../../src/create-version/errors.js";
 import * as githubWorkflow from "../../src/create-version/github-workflow.js";
 import { parseReleaseArguments } from "../../src/create-version/plan.js";
 import { runCreateVersion } from "../../src/create-version/run.js";
-import { describeCiEnvironment, renderCiReleaseWorkflow } from "../../src/create-version/ci-setup.js";
+import { describeCiEnvironment, prepareCiSetupFiles, renderCiReleaseWorkflow } from "../../src/create-version/ci-setup.js";
 import { GIT_FIXTURE_TEST_TIMEOUT_MS, cleanupTemporaryDirectories, commandEnvironment, createTemporaryDirectory, flattenOutput, runCliAsync, runGit } from "./support/cli-harness.js";
 import { startFixtureNpmRegistry } from "./support/fixture-npm-registry.js";
 
@@ -60,6 +60,31 @@ function createCiProject({ configured = true, failChecks = false, updateChangelo
 }
 
 /**
+ * Reads the environment names bound at job level and per step from a generated workflow.
+ * Only the indentation layout produced by the release template is understood.
+ * @param {string} workflow - Generated GitHub Actions YAML.
+ * @returns {{ jobEnvironment: string[], stepEnvironments: Map<string, string[]> }} Bound names by scope.
+ */
+function readWorkflowEnvironmentScopes(workflow) {
+  const jobEnvironment = [];
+  const stepEnvironments = new Map();
+  let scope = null;
+  let currentStep = null;
+  for (const line of workflow.split("\n")) {
+    const stepName = /^ {6}- name: (.+)$/u.exec(line)?.[1];
+    if (stepName) { currentStep = stepName; stepEnvironments.set(stepName, []); scope = null; continue; }
+    if (line === "    env:") { scope = "job"; continue; }
+    if (line === "        env:" && currentStep) { scope = "step"; continue; }
+    const jobBinding = /^ {6}([A-Z][A-Z0-9_]*):/u.exec(line)?.[1];
+    const stepBinding = /^ {10}([A-Z][A-Z0-9_]*):/u.exec(line)?.[1];
+    if (scope === "job" && jobBinding) jobEnvironment.push(jobBinding);
+    else if (scope === "step" && stepBinding && currentStep) stepEnvironments.get(currentStep)?.push(stepBinding);
+    else scope = null;
+  }
+  return { jobEnvironment, stepEnvironments };
+}
+
+/**
  * Isolates the project's GitHub boundary; Git, configuration, checks and hooks remain real.
  * @returns {import("../../src/create-version/github-workflow.js").GithubWorkflowClient} Controlled external client.
  */
@@ -89,10 +114,30 @@ describe("release location and configuration", () => {
     // Arrange
     const config = resolveCreateVersionConfig({ ci: { workflow: "release.yml", secrets: ["GITHUB_TOKEN", "API_TOKEN"] } });
     // Act and Assert
-    expect(describeCiEnvironment(config)).toEqual({ secrets: ["API_TOKEN"], variables: [], githubToken: true, githubTokenWrite: false });
-    expect(describeCiEnvironment(resolveCreateVersionConfig({ publish: "npm", ci: { workflow: "release.yml", secrets: ["GITHUB_TOKEN"] } }))).toEqual({ secrets: ["NPM_TOKEN"], variables: [], githubToken: true, githubTokenWrite: false });
-    expect(describeCiEnvironment(resolveCreateVersionConfig({ publish: "npm", publication: { registryUrl: "https://npm.pkg.github.com", tokenEnv: "GITHUB_TOKEN" }, ci: { workflow: "release.yml", secrets: ["GITHUB_TOKEN"] } }))).toEqual({ secrets: [], variables: [], githubToken: true, githubTokenWrite: true });
+    expect(describeCiEnvironment(config)).toEqual({ secrets: ["API_TOKEN"], variables: [], githubToken: true, githubTokenWrite: false, deploymentSecrets: [] });
+    expect(describeCiEnvironment(resolveCreateVersionConfig({ publish: "npm", ci: { workflow: "release.yml", secrets: ["GITHUB_TOKEN"] } }))).toEqual({ secrets: ["NPM_TOKEN"], variables: [], githubToken: true, githubTokenWrite: false, deploymentSecrets: [] });
+    expect(describeCiEnvironment(resolveCreateVersionConfig({ publish: "npm", publication: { registryUrl: "https://npm.pkg.github.com", tokenEnv: "GITHUB_TOKEN" }, ci: { workflow: "release.yml", secrets: ["GITHUB_TOKEN"] } }))).toEqual({ secrets: [], variables: [], githubToken: true, githubTokenWrite: true, deploymentSecrets: [] });
     expect(() => describeCiEnvironment(resolveCreateVersionConfig({ publish: "github", ci: { workflow: "release.yml", variables: ["GITHUB_TOKEN"] } }))).toThrow(/GITHUB_TOKEN/);
+  });
+
+  it("should bind Vercel credentials only to the Vercel steps while preflight still requires them", () => {
+    // Arrange
+    const root = createTemporaryDirectory("beez-rp-ci-vercel-scope-");
+    writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "fixture-vercel-app", version: "1.0.0", packageManager: "npm@11.11.1" }));
+    const config = resolveCreateVersionConfig({ checks: ["node checks.mjs"], ci: { workflow: "release.yml", deployment: "vercel", secrets: ["DATABASE_URL"] } });
+    const vercelSecrets = ["VERCEL_TOKEN", "VERCEL_ORG_ID", "VERCEL_PROJECT_ID"];
+    // Act
+    const environment = describeCiEnvironment(config);
+    const { jobEnvironment, stepEnvironments } = readWorkflowEnvironmentScopes(renderCiReleaseWorkflow(root, config));
+    // Assert
+    expect(environment.secrets).toEqual(["DATABASE_URL", ...vercelSecrets]);
+    expect(jobEnvironment).toContain("DATABASE_URL");
+    for (const name of vercelSecrets) expect(jobEnvironment).not.toContain(name);
+    const stepsWithVercelCredentials = [...stepEnvironments].filter(([, names]) => vercelSecrets.some((name) => names.includes(name)));
+    expect(stepsWithVercelCredentials.length).toBe(3);
+    for (const [, names] of stepsWithVercelCredentials) expect(names).toEqual(expect.arrayContaining(vercelSecrets));
+    const unscopedSteps = [...stepEnvironments.keys()].filter((name) => !stepsWithVercelCredentials.some(([stepName]) => stepName === name));
+    expect(unscopedSteps).toEqual(expect.arrayContaining(["Instalar dependencias", "Checks y publicación del release"]));
   });
 
   it.each(["--ci-release", "--retry-ci"])("should reject invalid tags at the CLI boundary when using %s", (flag) => {
@@ -205,6 +250,34 @@ describe("local CI preparation with real Git", () => {
     expect(localGate.status, localGate.stderr).toBe(1);
     expect(JSON.parse(runGit(["show", "main:.beez-rp/release.json"], remote))).toEqual({ version: "1.2.4", execution: "ci" });
     expect(github.preflight).toHaveBeenCalledWith("release.yml", ["VERCEL_TOKEN", "VERCEL_ORG_ID", "VERCEL_PROJECT_ID"], []);
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+
+  it.each([".env", ".vercel/project.json"])("should reject Vercel setup without creating a release when the worker would overwrite tracked %s", async (trackedPath) => {
+    // Arrange
+    const { root, remote } = createCiProject({ configured: false });
+    writeFileSync(path.join(root, "vercel.json"), JSON.stringify({ ignoreCommand: "node -e \"process.exit(1)\"" }));
+    writeFileSync(path.join(root, "beez-rp.config.mjs"), "export default { checks: ['node checks.mjs'] };\n");
+    mkdirSync(path.dirname(path.join(root, trackedPath)), { recursive: true });
+    writeFileSync(path.join(root, trackedPath), "PUBLIC_FLAG=committed\n");
+    runGit(["add", "vercel.json", "beez-rp.config.mjs", trackedPath], root);
+    runGit(["commit", "--quiet", "-m", "chore: configure deployment"], root);
+    runGit(["push", "--quiet", "origin", "main"], root);
+    const originalSha = runGit(["rev-parse", "HEAD"], root);
+    const github = isolateGithub();
+    const config = resolveCreateVersionConfig({ checks: ["node checks.mjs"], ci: { workflow: "release.yml", deployment: "vercel" } });
+    // Act
+    const status = await runCreateVersion({ repositoryRoot: root, argv: ["--setup-ci", "--bump", "patch"] });
+    const directSetup = prepareCiSetupFiles(root, config);
+    // Assert
+    await expect(directSetup).rejects.toThrow(trackedPath);
+    await expect(directSetup).rejects.toMatchObject({ hint: expect.stringContaining("git rm -r --cached") });
+    expect(status).toBe(1);
+    expect(runGit(["rev-parse", "HEAD"], root)).toBe(originalSha);
+    expect(runGit(["rev-parse", "main"], remote)).toBe(originalSha);
+    expect(runGit(["status", "--porcelain"], root)).toBe("");
+    expect(existsSync(path.join(root, ".github/workflows/release.yml"))).toBe(false);
+    expect(github.preflight).not.toHaveBeenCalled();
+    expect(github.dispatch).not.toHaveBeenCalled();
   }, GIT_FIXTURE_TEST_TIMEOUT_MS);
 
   it("should push the chosen bump and exact tag without running project hooks when CI is selected", async () => {

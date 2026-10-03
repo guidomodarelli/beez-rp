@@ -90,6 +90,9 @@ export const CI_VERCEL_CLI_VERSION = "62.2.0";
 /** Repository secrets required to deploy prebuilt output to Vercel. */
 export const CI_VERCEL_SECRETS = Object.freeze(["VERCEL_TOKEN", "VERCEL_ORG_ID", "VERCEL_PROJECT_ID"]);
 
+/** Paths the generated Vercel worker writes after checkout; they must stay untracked to keep the release tree clean. */
+export const CI_VERCEL_WORKER_WRITTEN_PATHS = Object.freeze([".env", ".vercel"]);
+
 /** Environment names explicitly mentioned by a project's migration target hint. */
 export const CI_MIGRATION_ENVIRONMENT_PATTERN = /\b[A-Z][A-Z0-9_]*(?:URL|TOKEN|KEY|SECRET|PASSWORD)\b/gu;
 

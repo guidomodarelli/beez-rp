@@ -10,7 +10,7 @@ import {
   CI_CONFIG_EXPORT, CI_DEFAULT_PNPM_VERSION, CI_DEFAULT_YARN_VERSION, CI_PACKAGE_MANAGER_VERSION_PATTERN, CI_RELEASE_TEMPLATE_FILE,
   CI_TEMPLATE_PLACEHOLDER, CI_WORKFLOW_DIRECTORY, DEFAULT_CI_WORKFLOW,
   CI_RELEASE_METADATA_FILE, CI_VERCEL_CLI_VERSION, CI_VERCEL_DEPLOYMENT, CI_VERCEL_SECRETS,
-  CI_VERCEL_CONFIG_FILE, CI_VERCEL_GATE_FILE, CI_VERCEL_GATE_TEMPLATE, CI_VERCEL_IGNORE_PLACEHOLDER,
+  CI_VERCEL_CONFIG_FILE, CI_VERCEL_GATE_FILE, CI_VERCEL_GATE_TEMPLATE, CI_VERCEL_IGNORE_PLACEHOLDER, CI_VERCEL_WORKER_WRITTEN_PATHS,
   CI_DENO_JSR_CLIENT, CI_DENO_VERSION,
 } from "../constants/ci-release.js";
 import { CREATE_VERSION_CONFIG_FILES, PACKAGE_MANIFEST_FILE, PINNED_NODE_VERSION_FILE } from "../constants/create-version.js";
@@ -27,7 +27,9 @@ import { GIT_LITERAL_PATHSPEC_PREFIX } from "../constants/version-files.js";
 /**
  * Builds the worker's environment from explicit bindings and the selected registry credential.
  * @param {ResolvedCreateVersionConfig} config - Project configuration.
- * @returns {{ secrets: string[], variables: string[], githubToken: boolean, githubTokenWrite: boolean }} Required worker bindings and package permission.
+ * Deployment credentials added for the Vercel steps are listed in `secrets` (so preflight requires them)
+ * and also in `deploymentSecrets`, which keeps them out of the job-level environment.
+ * @returns {{ secrets: string[], variables: string[], githubToken: boolean, githubTokenWrite: boolean, deploymentSecrets: string[] }} Required worker bindings, step-scoped deployment credentials and package permission.
  */
 export function describeCiEnvironment(config) {
   const declaredSecrets = config.ci?.secrets ?? [];
@@ -39,9 +41,10 @@ export function describeCiEnvironment(config) {
   if (config.publish && typeof config.publish !== "function" && config.publication.authentication === TOKEN_AUTHENTICATION && !publisherUsesGithubToken && !secrets.includes(config.publication.tokenEnv)) {
     secrets.push(config.publication.tokenEnv);
   }
-  if (config.ci?.deployment === CI_VERCEL_DEPLOYMENT) for (const name of CI_VERCEL_SECRETS) if (!secrets.includes(name)) secrets.push(name);
+  const deploymentSecrets = config.ci?.deployment === CI_VERCEL_DEPLOYMENT ? CI_VERCEL_SECRETS.filter((name) => !secrets.includes(name)) : [];
+  secrets.push(...deploymentSecrets);
   if (secrets.some((name) => variables.includes(name))) throw new ReleaseStepError("Una credencial de publicación también figura en ci.variables.", "Guardala solo como secret; no se creó ningún archivo.");
-  return { secrets, variables, githubToken, githubTokenWrite: publisherUsesGithubToken };
+  return { secrets, variables, githubToken, githubTokenWrite: publisherUsesGithubToken, deploymentSecrets };
 }
 
 /**
@@ -70,7 +73,7 @@ export function renderCiReleaseWorkflow(repositoryRoot, config) {
   }
   const environment = describeCiEnvironment(config);
   const bindings = [
-    ...environment.secrets.map((name) => `      ${name}: \${{ secrets.${name} }}`),
+    ...environment.secrets.filter((name) => !environment.deploymentSecrets.includes(name)).map((name) => `      ${name}: \${{ secrets.${name} }}`),
     ...environment.variables.map((name) => `      ${name}: \${{ vars.${name} }}`),
     ...(environment.githubToken ? ["      GITHUB_TOKEN: ${{ github.token }}"] : []),
   ];
@@ -127,6 +130,7 @@ export async function prepareCiSetupFiles(repositoryRoot, config, writeConfigura
   ];
   if (config.ci?.deployment === CI_VERCEL_DEPLOYMENT) {
     for (const fileName of [".gitignore", CI_VERCEL_CONFIG_FILE, CI_VERCEL_GATE_FILE]) assertSafeCiPath(repositoryRoot, fileName);
+    await assertVercelWorkerPathsUntracked(repositoryRoot);
     const ignored = path.join(repositoryRoot, ".gitignore");
     const originalIgnoredBytes = existsSync(ignored) ? readFileSync(ignored) : null;
     updates.push({ filePath: ".gitignore", originalBytes: originalIgnoredBytes, content: `${originalIgnoredBytes?.toString("utf8").trimEnd() ?? ""}\n.vercel/\n.env\n` });
@@ -147,6 +151,21 @@ export async function prepareCiSetupFiles(repositoryRoot, config, writeConfigura
     if (tracked.status !== 0 || clean.status !== 0) throw new ReleaseStepError(`La configuración automática de CI necesita ${update.filePath} commiteado y limpio.`, "Commiteá esos ajustes o guardalos con git stash antes de configurar CI; --ignore-local-changes no los incluirá en el release.");
   }
   return updates;
+}
+
+/**
+ * Rejects Vercel setup when the worker would overwrite tracked files after checkout: ignoring them
+ * afterwards does not untrack them, so `--ci-release` would find a dirty tree on every run of the tag.
+ * @param {string} repositoryRoot - Checkout about to receive the Vercel workflow.
+ * @returns {Promise<void>}
+ * @throws {ReleaseStepError} When a path written by `vercel pull` in the worker is tracked by Git.
+ */
+async function assertVercelWorkerPathsUntracked(repositoryRoot) {
+  const literalPaths = CI_VERCEL_WORKER_WRITTEN_PATHS.map((filePath) => `${GIT_LITERAL_PATHSPEC_PREFIX}${filePath}`);
+  const listed = await runCaptured("git", ["ls-files", "-z", "--", ...literalPaths], { cwd: repositoryRoot });
+  if (listed.status !== 0) throw new ReleaseStepError(`No se pudo comprobar si ${CI_VERCEL_WORKER_WRITTEN_PATHS.join(" o ")} están versionados (git ls-files terminó con status ${listed.status}).`, "Revisá el repositorio Git antes de configurar CI; no se cambió ningún archivo.");
+  const trackedPaths = listed.stdout.split("\0").filter(Boolean);
+  if (trackedPaths.length > 0) throw new ReleaseStepError(`El worker de Vercel sobrescribe archivos versionados (${trackedPaths.join(", ")}); el release en CI quedaría con cambios locales y se bloquearía.`, `Quitalos del índice con git rm -r --cached -- ${trackedPaths.join(" ")} (la copia local se conserva), commiteá y volvé a configurar CI; no se cambió ningún archivo.`);
 }
 
 /**
