@@ -149,6 +149,25 @@ describe("release location and configuration", () => {
     expect(unscopedSteps).toEqual(expect.arrayContaining(["Instalar dependencias", "Checks y publicación del release"]));
   });
 
+  it("should keep explicitly declared Vercel credentials step-scoped and deduplicated", () => {
+    // Arrange
+    const root = createTemporaryDirectory("beez-rp-ci-vercel-declared-");
+    writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "fixture-vercel-app", version: "1.0.0", packageManager: "npm@11.11.1" }));
+    const config = resolveCreateVersionConfig({ checks: ["node checks.mjs"], ci: { workflow: "release.yml", deployment: "vercel", secrets: ["VERCEL_TOKEN", "DATABASE_URL", "VERCEL_PROJECT_ID"] } });
+    const vercelSecrets = ["VERCEL_TOKEN", "VERCEL_ORG_ID", "VERCEL_PROJECT_ID"];
+    // Act
+    const environment = describeCiEnvironment(config);
+    const { jobEnvironment, stepEnvironments } = readWorkflowEnvironmentScopes(renderCiReleaseWorkflow(root, config));
+    // Assert
+    expect(environment.secrets).toEqual(["VERCEL_TOKEN", "DATABASE_URL", "VERCEL_PROJECT_ID", "VERCEL_ORG_ID"]);
+    expect(environment.deploymentSecrets).toEqual(vercelSecrets);
+    expect(jobEnvironment).toContain("DATABASE_URL");
+    for (const name of vercelSecrets) expect(jobEnvironment).not.toContain(name);
+    const stepsWithVercelCredentials = [...stepEnvironments].filter(([, names]) => vercelSecrets.some((name) => names.includes(name)));
+    expect(stepsWithVercelCredentials.length).toBe(3);
+    for (const [, names] of stepsWithVercelCredentials) expect(names).toEqual(vercelSecrets);
+  });
+
   it.each(["--ci-release", "--retry-ci"])("should reject invalid tags at the CLI boundary when using %s", (flag) => {
     // Arrange and Act and Assert
     for (const value of ["", " ", "1.2.4", "v1.2.4-beta.1", "v1.2.4\n"]) expect(() => parseReleaseArguments([flag, value])).toThrow(/tag estable vX\.Y\.Z/);

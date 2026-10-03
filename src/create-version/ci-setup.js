@@ -27,8 +27,8 @@ import { GIT_LITERAL_PATHSPEC_PREFIX } from "../constants/version-files.js";
 /**
  * Builds the worker's environment from explicit bindings and the selected registry credential.
  * @param {ResolvedCreateVersionConfig} config - Project configuration.
- * Deployment credentials added for the Vercel steps are listed in `secrets` (so preflight requires them)
- * and also in `deploymentSecrets`, which keeps them out of the job-level environment.
+ * Every Vercel credential is listed once in `secrets` (so preflight requires it) and always in
+ * `deploymentSecrets`, even when also declared in `ci.secrets`, which keeps it out of the job-level environment.
  * @returns {{ secrets: string[], variables: string[], githubToken: boolean, githubTokenWrite: boolean, deploymentSecrets: string[] }} Required worker bindings, step-scoped deployment credentials and package permission.
  */
 export function describeCiEnvironment(config) {
@@ -41,8 +41,8 @@ export function describeCiEnvironment(config) {
   if (config.publish && typeof config.publish !== "function" && config.publication.authentication === TOKEN_AUTHENTICATION && !publisherUsesGithubToken && !secrets.includes(config.publication.tokenEnv)) {
     secrets.push(config.publication.tokenEnv);
   }
-  const deploymentSecrets = config.ci?.deployment === CI_VERCEL_DEPLOYMENT ? CI_VERCEL_SECRETS.filter((name) => !secrets.includes(name)) : [];
-  secrets.push(...deploymentSecrets);
+  const deploymentSecrets = config.ci?.deployment === CI_VERCEL_DEPLOYMENT ? [...CI_VERCEL_SECRETS] : [];
+  secrets.push(...deploymentSecrets.filter((name) => !secrets.includes(name)));
   if (secrets.some((name) => variables.includes(name))) throw new ReleaseStepError("Una credencial de publicación también figura en ci.variables.", "Guardala solo como secret; no se creó ningún archivo.");
   return { secrets, variables, githubToken, githubTokenWrite: publisherUsesGithubToken, deploymentSecrets };
 }
