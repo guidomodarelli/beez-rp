@@ -51,6 +51,19 @@ export const CI_GITHUB_TOKEN_VARIABLES = Object.freeze(["GH_TOKEN", "GITHUB_TOKE
 /** Maximum workflow runs considered when reconciling an uncertain dispatch. */
 export const CI_RUN_LOOKUP_LIMIT = 100;
 
+/**
+ * REST resources (under `repos/{owner}/{repo}/actions/`) listing organization bindings that GitHub
+ * exposes to one repository, keyed by `gh` binding kind. Unlike `gh secret list --org`, they honor
+ * each binding's repository visibility, so they match what `${{ secrets.* }}`/`${{ vars.* }}` resolve.
+ */
+export const CI_ORGANIZATION_BINDING_RESOURCE = Object.freeze({
+  secret: Object.freeze({ path: "organization-secrets", collection: "secrets" }),
+  variable: Object.freeze({ path: "organization-variables", collection: "variables" }),
+});
+
+/** Page size requested when listing organization bindings shared with a repository. */
+export const CI_ORGANIZATION_BINDING_PAGE_SIZE = 100;
+
 /** Git override that delegates hooks to the worker during local CI preparation. */
 export const CI_GIT_HOOKS_OPTION = "core.hooksPath=/dev/null";
 

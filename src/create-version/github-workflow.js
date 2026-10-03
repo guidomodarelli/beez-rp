@@ -4,7 +4,8 @@
  */
 
 import {
-  CI_DIAGNOSTIC_LIMIT, CI_DISPATCH_STATUS, CI_FAILURE_CODE, CI_GITHUB_TOKEN_VARIABLES, CI_RUN_LOOKUP_LIMIT,
+  CI_DIAGNOSTIC_LIMIT, CI_DISPATCH_STATUS, CI_FAILURE_CODE, CI_GITHUB_TOKEN_VARIABLES, CI_ORGANIZATION_BINDING_PAGE_SIZE,
+  CI_ORGANIZATION_BINDING_RESOURCE, CI_RUN_LOOKUP_LIMIT,
 } from "../constants/ci-release.js";
 import { GITHUB_REPOSITORY_PATTERN, MAIN_BRANCH, RELEASE_REMOTE } from "../constants/create-version.js";
 import { CiReleaseError } from "./errors.js";
@@ -13,6 +14,7 @@ import { runCaptured } from "./process.js";
 /**
  * @typedef {{ version: string, tag: string, sha: string }} CiReleaseIdentity
  * @typedef {{ status: "submitted" | "existing", url: string | null }} CiDispatchResult
+ * @typedef {"secret" | "variable"} ActionsBindingKind
  * @typedef {{
  *   preflight: (workflow: string, secrets: string[], variables: string[]) => Promise<void>,
  *   dispatch: (workflow: string, release: CiReleaseIdentity, retryCommand: string) => Promise<CiDispatchResult>,
@@ -26,6 +28,17 @@ import { runCaptured } from "./process.js";
  */
 function safeDiagnostic(diagnostic) {
   return CI_GITHUB_TOKEN_VARIABLES.reduce((output, name) => process.env[name] ? output.replaceAll(/** @type {string} */ (process.env[name]), "[redactado]") : output, diagnostic).slice(0, CI_DIAGNOSTIC_LIMIT);
+}
+
+/**
+ * Builds the repository-level commands that would configure the missing bindings.
+ * @param {ActionsBindingKind} kind - Actions binding kind.
+ * @param {string[]} names - Missing binding names.
+ * @param {string} repository - `owner/name` repository.
+ * @returns {string} Commands joined for a terminal hint.
+ */
+function repositorySetCommands(kind, names, repository) {
+  return names.map((name) => `gh ${kind} set ${name} --repo ${repository}`).join("; ");
 }
 
 /**
@@ -54,12 +67,27 @@ export function createGithubWorkflowClient(repositoryRoot, capture = runCaptured
     return runs.find((/** @type {{ displayTitle: string, status: string, conclusion: string | null }} */ run) => run.displayTitle === `beez-rp release ${release.tag} ${release.sha}` && (run.status !== "completed" || run.conclusion === "success")) ?? null;
   }
 
+  /**
+   * Lists organization bindings of one kind that GitHub shares with the repository, honoring their visibility.
+   * @param {ActionsBindingKind} kind - Actions binding kind.
+   * @param {string} workflow - Workflow to be dispatched, for diagnostics.
+   * @param {string[]} missing - Names absent at repository level, for diagnostics.
+   * @returns {Promise<string[]>} Binding names available to the repository through its organization.
+   * @throws {CiReleaseError} When organization bindings cannot be listed; the missing names stay unverified.
+   */
+  async function listOrganizationBindings(kind, workflow, missing) {
+    const resource = CI_ORGANIZATION_BINDING_RESOURCE[kind];
+    const result = await github(["api", "--paginate", `repos/${repository}/actions/${resource.path}?per_page=${CI_ORGANIZATION_BINDING_PAGE_SIZE}`, "--jq", `.${resource.collection}[].name`]);
+    if (result.status !== 0) throw new CiReleaseError(CI_FAILURE_CODE.preflight, `Faltan ${kind}s de Actions para ${workflow} a nivel repositorio (${missing.join(", ")}) y no se pudieron verificar los ${kind}s de organización compartidos con ${repository}: ${safeDiagnostic(result.stderr)}`, `Dale a gh permiso para leer los ${kind}s de Actions de ${repository} o configurá ${repositorySetCommands(kind, missing, repository)}; no se tocó la versión.`);
+    return result.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
+  }
+
   return {
     /**
      * Checks GitHub CLI, authentication, default branch and configured worker credentials.
      * @param {string} workflow - Workflow to be dispatched.
-     * @param {string[]} secrets - Secret names required by the worker.
-     * @param {string[]} variables - Variable names required by the worker.
+     * @param {string[]} secrets - Secret names required by the worker, at repository or shared organization level.
+     * @param {string[]} variables - Variable names required by the worker, at repository or shared organization level.
      * @returns {Promise<void>} Resolves before any bump when dispatch prerequisites are available.
      * @throws {CiReleaseError} When a prerequisite is missing or cannot be checked.
      */
@@ -71,16 +99,25 @@ export function createGithubWorkflowClient(repositoryRoot, capture = runCaptured
       if (installed.status !== 0) throw new CiReleaseError(CI_FAILURE_CODE.preflight, "No se pudo ejecutar GitHub CLI (gh).", "Instalá gh y ejecutá gh auth login, o elegí --local.");
       const authenticated = await github(["auth", "status", "--hostname", "github.com"]);
       if (authenticated.status !== 0) throw new CiReleaseError(CI_FAILURE_CODE.preflight, `gh no está autenticado para disparar ${workflow}.`, "Ejecutá gh auth login con acceso al repo; no se tocó la versión.");
-      const metadata = await github(["repo", "view", repository, "--json", "defaultBranchRef"]);
+      const metadata = await github(["repo", "view", repository, "--json", "defaultBranchRef,isInOrganization"]);
       if (metadata.status !== 0) throw new CiReleaseError(CI_FAILURE_CODE.preflight, `No se pudo consultar ${repository}: ${safeDiagnostic(metadata.stderr)}`, "Verificá el acceso del usuario de gh al repo.");
-      if (JSON.parse(metadata.stdout).defaultBranchRef?.name !== MAIN_BRANCH) throw new CiReleaseError(CI_FAILURE_CODE.preflight, "workflow_dispatch requiere que el workflow exista en la rama por defecto, que en este flujo debe ser main.", "Usá main como rama por defecto o ejecutá el release con --local.");
-      for (const [kind, required] of /** @type {[string, string[]][]} */ ([["secret", secrets], ["variable", variables]])) {
+      const repositoryMetadata = JSON.parse(metadata.stdout);
+      if (repositoryMetadata.defaultBranchRef?.name !== MAIN_BRANCH) throw new CiReleaseError(CI_FAILURE_CODE.preflight, "workflow_dispatch requiere que el workflow exista en la rama por defecto, que en este flujo debe ser main.", "Usá main como rama por defecto o ejecutá el release con --local.");
+      const ownedByOrganization = repositoryMetadata.isInOrganization === true;
+      for (const [kind, required] of /** @type {[ActionsBindingKind, string[]][]} */ ([["secret", secrets], ["variable", variables]])) {
         if (required.length === 0) continue;
         const listed = await github([kind, "list", "--repo", repository, "--json", "name"]);
         if (listed.status !== 0) throw new CiReleaseError(CI_FAILURE_CODE.preflight, `No se pudieron verificar los ${kind}s de CI en ${repository}.`, `Revisá los permisos de gh y los ${kind}s de Actions; no se tocó la versión.`);
         const available = JSON.parse(listed.stdout).map((/** @type {{ name: string }} */ entry) => entry.name);
-        const missing = required.filter((name) => !available.includes(name));
-        if (missing.length > 0) throw new CiReleaseError(CI_FAILURE_CODE.preflight, `Faltan ${kind}s de Actions para ${workflow}: ${missing.join(", ")}.`, `Configurá ${missing.map((name) => `gh ${kind} set ${name} --repo ${repository}`).join("; ")} y volvé a correr el comando.`);
+        let missing = required.filter((name) => !available.includes(name));
+        if (missing.length > 0 && ownedByOrganization) {
+          const shared = await listOrganizationBindings(kind, workflow, missing);
+          missing = missing.filter((name) => !shared.includes(name));
+        }
+        if (missing.length > 0) {
+          const organizationHint = ownedByOrganization ? ` o compartí el ${kind} de organización con ${repository}` : "";
+          throw new CiReleaseError(CI_FAILURE_CODE.preflight, `Faltan ${kind}s de Actions para ${workflow}: ${missing.join(", ")}.`, `Configurá ${repositorySetCommands(kind, missing, repository)}${organizationHint} y volvé a correr el comando.`);
+        }
       }
     },
 
