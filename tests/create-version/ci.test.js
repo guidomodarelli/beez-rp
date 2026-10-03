@@ -97,6 +97,15 @@ function isolateGithub() {
   return client;
 }
 
+/**
+ * Runs the generated Vercel ignore command the way Vercel does: from the checkout root, before installing dependencies.
+ * @param {string} checkout - Deployed checkout.
+ * @returns {import("node:child_process").SpawnSyncReturns<string>} Exit status 0 skips the build; any other status builds.
+ */
+function runVercelGate(checkout) {
+  return spawnSync(process.execPath, [".beez-rp/vercel-ignore-build.mjs"], { cwd: checkout, encoding: "utf8", env: commandEnvironment() });
+}
+
 beforeEach(() => {
   vi.stubEnv("CI", "false");
   vi.stubEnv("GITHUB_ACTIONS", "false");
@@ -250,6 +259,36 @@ describe("local CI preparation with real Git", () => {
     expect(localGate.status, localGate.stderr).toBe(1);
     expect(JSON.parse(runGit(["show", "main:.beez-rp/release.json"], remote))).toEqual({ version: "1.2.4", execution: "ci" });
     expect(github.preflight).toHaveBeenCalledWith("release.yml", ["VERCEL_TOKEN", "VERCEL_ORG_ID", "VERCEL_PROJECT_ID"], []);
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+
+  it.each([
+    ["the original ignoreCommand", { ignoreCommand: "node -e \"process.exit(7)\"" }, 7],
+    ["a normal build", {}, 1],
+  ])("should skip only the delegated release commit and let later commits without a bump reach %s", async (_outcome, vercelConfig, laterCommitStatus) => {
+    // Arrange
+    const { root, remote } = createCiProject({ configured: false });
+    writeFileSync(path.join(root, "vercel.json"), JSON.stringify(vercelConfig));
+    writeFileSync(path.join(root, "beez-rp.config.mjs"), "export default { checks: ['node checks.mjs'] };\n");
+    runGit(["add", "vercel.json", "beez-rp.config.mjs"], root);
+    runGit(["commit", "--quiet", "-m", "chore: configure deployment"], root);
+    runGit(["push", "--quiet", "origin", "main"], root);
+    isolateGithub();
+    const status = await runCreateVersion({ repositoryRoot: root, argv: ["--setup-ci", "--bump", "patch"] });
+    const shallowCheckout = path.join(createTemporaryDirectory("beez-rp-vercel-shallow-"), "checkout");
+    runGit(["clone", "--quiet", "--depth", "1", pathToFileURL(remote).href, shallowCheckout], root);
+    // Act
+    const releaseGate = runVercelGate(root);
+    const shallowReleaseGate = runVercelGate(shallowCheckout);
+    writeFileSync(path.join(root, "feature.txt"), "Follow-up change without a version bump\n");
+    runGit(["commit", "--quiet", "-am", "fix: follow-up change"], root);
+    const laterCommitGate = runVercelGate(root);
+    // Assert
+    expect(status).toBe(0);
+    expect(releaseGate.status, releaseGate.stderr).toBe(0);
+    expect(shallowReleaseGate.status, shallowReleaseGate.stderr).toBe(laterCommitStatus);
+    expect(JSON.parse(runGit(["show", "HEAD:.beez-rp/release.json"], root))).toEqual({ version: "1.2.4", execution: "ci" });
+    expect(JSON.parse(runGit(["show", "HEAD:package.json"], root)).version).toBe("1.2.4");
+    expect(laterCommitGate.status, laterCommitGate.stderr).toBe(laterCommitStatus);
   }, GIT_FIXTURE_TEST_TIMEOUT_MS);
 
   it.each([".env", ".vercel/project.json"])("should reject Vercel setup without creating a release when the worker would overwrite tracked %s", async (trackedPath) => {

@@ -75,7 +75,7 @@ export const CI_DENO_JSR_CLIENT = "deno";
 /** Observable acceptance outcomes returned by the workflow adapter. */
 export const CI_DISPATCH_STATUS = Object.freeze({ submitted: "submitted", existing: "existing" });
 
-/** Early-build metadata; its version scopes the decision to exactly one release. */
+/** Early-build metadata; its version and the commit that changes it scope the decision to exactly one release commit. */
 export const CI_RELEASE_METADATA_FILE = ".beez-rp/release.json";
 
 /** Vercel project configuration used to offer deployment setup for applications. */
