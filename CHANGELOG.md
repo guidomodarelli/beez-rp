@@ -6,6 +6,11 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y e
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-03
+
+- 121502f agrega directorio a la ejecución de pruebas
+- e4f465c feat!: generate changelogs from release commits (#8)
+
 ## [0.6.0] - 2026-09-30
 
 ### Added
