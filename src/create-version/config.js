@@ -27,8 +27,10 @@ import {
 } from "../constants/create-version.js";
 import { DEFAULT_MONOREPO_TAG_FORMAT, TAG_FORMAT_PLACEHOLDER, WORKSPACES_PACKAGES } from "../constants/monorepo.js";
 import { RELEASE_COMMIT_BUILT_IN_FILES } from "../constants/version-files.js";
+import { CHANGELOG_FILE } from "../constants/changelog.js";
 import { RELEASE_TYPE, RELEASE_TYPE_ORDER } from "../constants/versions.js";
 import { DEFAULT_PROJECT_COMMANDS, describeProjectCommands, detectPackageManager } from "../package-manager.js";
+import { isRegistryProvider, resolvePublicationOptions } from "./registry-config.js";
 import { isPreMajorShiftActive } from "../versions.js";
 
 /**
@@ -58,12 +60,13 @@ import { isPreMajorShiftActive } from "../versions.js";
  *   projectName?: string,
  *   releaseTypeDescriptions?: Partial<Record<ReleaseType, string>>,
  *   preMajorShift?: boolean,
- *   registry?: "npm" | null,
+ *   registry?: import("./registry-config.js").RegistryProvider | null,
+ *   publication?: import("./registry-config.js").PublicationOptions,
  *   publishedLabel?: string,
  *   checks?: string[] | false,
  *   migrations?: MigrationsAdapter | null,
  *   prepare?: string[] | ReleaseHook | null,
- *   publish?: "npm" | ReleaseHook | null,
+ *   publish?: import("./registry-config.js").RegistryProvider | ReleaseHook | null,
  *   artifact?: string | null,
  *   summary?: string[],
  *   versionFiles?: string[],
@@ -81,18 +84,21 @@ import { isPreMajorShiftActive } from "../versions.js";
  *   `packages` turns on the monorepo mode: every non-private workspace package (`"workspaces"`: the
  *   ones the root `package.json` declares; or explicit patterns such as `["packages/*"]`) gets its
  *   own version, CHANGELOG and tag, formatted with `tagFormat` (`{component}-v{version}` by default).
+ *   Changelogs are maintained manually and must change since the last release; the command
+ *   includes them without rewriting their content.
  *   `preMajorShift` lowers the suggested release type one level while a version is `0.x`
  *   (breaking → minor, features → patch).
  * @typedef {{
  *   projectName: string | null,
  *   releaseTypeDescriptions: Record<ReleaseType, string>,
  *   preMajorShift: boolean,
- *   registry: "npm" | null,
+ *   registry: import("./registry-config.js").RegistryProvider | null,
+ *   publication: import("./registry-config.js").ResolvedPublicationOptions,
  *   publishedLabel: string,
  *   checks: string[] | null,
  *   migrations: MigrationsAdapter | null,
  *   prepare: string[] | ReleaseHook | null,
- *   publish: "npm" | ReleaseHook | null,
+ *   publish: import("./registry-config.js").RegistryProvider | ReleaseHook | null,
  *   artifact: string | null,
  *   summary: string[],
  *   versionFiles: string[],
@@ -232,14 +238,18 @@ export function resolveCreateVersionConfig(rawConfig, { packageScripts = {}, com
   }
 
   const publish = config.publish ?? null;
-  if (publish !== null && publish !== NPM_PUBLISHER && typeof publish !== "function") {
-    throw invalidField("publish", `"${NPM_PUBLISHER}", a function or null`);
+  if (publish !== null && !isRegistryProvider(publish) && typeof publish !== "function") {
+    throw invalidField("publish", "npm, github, gitlab, jsr, a function or null");
   }
 
-  const registry = config.registry ?? (publish === NPM_PUBLISHER ? RELEASE_REGISTRY.npm : null);
+  const registry = config.registry ?? (isRegistryProvider(publish) ? publish : null);
   if (registry !== null && !(/** @type {readonly unknown[]} */ (Object.values(RELEASE_REGISTRY))).includes(registry)) {
     throw invalidField("registry", `one of ${Object.values(RELEASE_REGISTRY).join(", ")} or null`);
   }
+  if (isRegistryProvider(publish) && registry !== null && registry !== publish) {
+    throw invalidField("registry", "the same provider as publish: each project publishes to a single registry");
+  }
+  const publication = resolvePublicationOptions(config.publication, isRegistryProvider(publish) ? publish : isRegistryProvider(registry) ? registry : undefined);
 
   const checks = resolveChecks(config.checks, packageScripts, commands);
 
@@ -261,7 +271,7 @@ export function resolveCreateVersionConfig(rawConfig, { packageScripts = {}, com
     if (typeof artifact !== "string" || !artifact.includes(ARTIFACT_VERSION_PLACEHOLDER)) {
       throw invalidField("artifact", `a path pattern containing ${ARTIFACT_VERSION_PLACEHOLDER}, such as releases/{version}-*/{name}-{version}.tgz`);
     }
-    if (publish !== NPM_PUBLISHER) {
+    if (!isRegistryProvider(publish) || publish === RELEASE_REGISTRY.jsr) {
       throw invalidField("artifact", `used only with publish: "${NPM_PUBLISHER}"`);
     }
   }
@@ -295,11 +305,11 @@ export function resolveCreateVersionConfig(rawConfig, { packageScripts = {}, com
     throw invalidField("versionFiles", "a list of file paths relative to the project root, inside it");
   }
   const versionFiles = configuredVersionFiles.map(toSlashSeparatedPath);
-  const builtInVersionFile = versionFiles.find((filePath) => RELEASE_COMMIT_BUILT_IN_FILES.includes(filePath));
+  const builtInVersionFile = versionFiles.find((filePath) => RELEASE_COMMIT_BUILT_IN_FILES.includes(filePath) || filePath.toLowerCase() === CHANGELOG_FILE.toLowerCase());
   if (builtInVersionFile !== undefined) {
     throw invalidField(
       "versionFiles",
-      `a list without ${RELEASE_COMMIT_BUILT_IN_FILES.join(" nor ")}, which the release commit already updates (found ${JSON.stringify(builtInVersionFile)})`
+      `a list without ${RELEASE_COMMIT_BUILT_IN_FILES.join(" nor ")}, which the release commit owns and includes without rewriting CHANGELOG.md (found ${JSON.stringify(builtInVersionFile)})`
     );
   }
 
@@ -307,12 +317,13 @@ export function resolveCreateVersionConfig(rawConfig, { packageScripts = {}, com
     projectName: /** @type {string | undefined} */ (config.projectName) ?? null,
     releaseTypeDescriptions: { ...DEFAULT_RELEASE_TYPE_DESCRIPTIONS, .../** @type {Partial<Record<ReleaseType, string>>} */ (descriptions) },
     preMajorShift,
-    registry: /** @type {"npm" | null} */ (registry),
+    registry: /** @type {import("./registry-config.js").RegistryProvider | null} */ (registry),
+    publication,
     publishedLabel: /** @type {string | undefined} */ (config.publishedLabel) ?? DEFAULT_PUBLISHED_LABEL,
     checks,
     migrations,
     prepare: /** @type {string[] | ReleaseHook | null} */ (prepare),
-    publish: /** @type {"npm" | ReleaseHook | null} */ (publish),
+    publish: /** @type {import("./registry-config.js").RegistryProvider | ReleaseHook | null} */ (publish),
     artifact: /** @type {string | null} */ (artifact),
     summary,
     versionFiles,

@@ -8,7 +8,7 @@
 
 import { spawn } from "node:child_process";
 
-import { FIELD_SEPARATOR, PACKAGE_MANIFEST_FILE, RECORD_SEPARATOR } from "../constants/create-version.js";
+import { FIELD_SEPARATOR, PACKAGE_MANIFEST_FILE, RECORD_SEPARATOR, VERSION_FIELD_CHANGE_PATTERN } from "../constants/create-version.js";
 
 /**
  * @typedef {{ status: number, stdout: string, stderr: string }} CapturedResult
@@ -59,6 +59,49 @@ export function runCaptured(command, commandArguments, options = {}) {
 export function runInherited(command, commandArguments, options = {}) {
   return new Promise((resolve) => {
     const child = spawn(command, commandArguments, { cwd: options.cwd, env: options.env, shell: options.shell ?? false, stdio: "inherit" });
+    child.on("error", () => resolve(1));
+    child.on("close", (status) => resolve(status ?? 1));
+  });
+}
+
+/**
+ * Forwards complete output lines, retaining incomplete chunks so a split credential is redacted.
+ *
+ * @param {import("node:stream").Readable} source - Child stream.
+ * @param {NodeJS.WriteStream} destination - Parent stream.
+ * @param {string[]} secrets - Values that must not be logged.
+ * @returns {void}
+ */
+function streamRedactedOutput(source, destination, secrets) {
+  let pending = "";
+  /** @param {string} value - Complete output line or final tail. */
+  const write = (value) => destination.write(secrets.filter(Boolean).reduce((output, secret) => output.replaceAll(secret, "[redactado]"), value));
+  source.setEncoding("utf8");
+  source.on("data", (chunk) => {
+    pending += chunk;
+    let newline;
+    while ((newline = pending.indexOf("\n")) !== -1) {
+      write(pending.slice(0, newline + 1));
+      pending = pending.slice(newline + 1);
+    }
+  });
+  source.on("end", () => { if (pending) write(pending); });
+}
+
+/**
+ * Streams a client that may print its own command on failure, redacting credentials across chunks.
+ *
+ * @param {string} command - Executable or trusted shell command.
+ * @param {string[]} commandArguments - Client arguments.
+ * @param {CommandOptions} options - Child environment and checkout.
+ * @param {string[]} secrets - Values to redact; never included in diagnostics.
+ * @returns {Promise<number>} Exit code with interactive stdin and safe terminal output.
+ */
+export function runRedactedInherited(command, commandArguments, options, secrets) {
+  return new Promise((resolve) => {
+    const child = spawn(command, commandArguments, { cwd: options.cwd, env: options.env, shell: options.shell ?? false, stdio: ["inherit", "pipe", "pipe"], windowsHide: true });
+    streamRedactedOutput(child.stdout, process.stdout, secrets);
+    streamRedactedOutput(child.stderr, process.stderr, secrets);
     child.on("error", () => resolve(1));
     child.on("close", (status) => resolve(status ?? 1));
   });
@@ -164,4 +207,21 @@ export async function readPackageManifestAt(reader, revision, manifestPath = PAC
 export async function readPackageVersionAt(reader, revision, manifestPath = PACKAGE_MANIFEST_FILE) {
   const manifest = await readPackageManifestAt(reader, revision, manifestPath);
   return typeof manifest?.version === "string" ? manifest.version : null;
+}
+
+/**
+ * Finds the newest top-level version change, including compact JSON and excluding edits to nested versions.
+ *
+ * @param {GitReader} reader - Read-only Git boundary.
+ * @param {string} revision - History to inspect.
+ * @param {string} [manifestPath] - Package manifest path.
+ * @returns {Promise<string | null>} Commit that actually changed the top-level version.
+ */
+export async function findVersionChangeCommit(reader, revision, manifestPath = PACKAGE_MANIFEST_FILE) {
+  const history = await reader.tryGit(["log", "--format=%H", `-G${VERSION_FIELD_CHANGE_PATTERN}`, revision, "--", manifestPath]);
+  for (const sha of (history ?? "").split("\n").filter(Boolean)) {
+    const [version, previous] = await Promise.all([readPackageVersionAt(reader, sha, manifestPath), readPackageVersionAt(reader, `${sha}^`, manifestPath)]);
+    if (version !== null && version !== previous) return sha;
+  }
+  return null;
 }

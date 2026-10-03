@@ -27,12 +27,13 @@ const NPM_COMMAND_HEADER = "npm-command";
 const OWNER_COMMAND = "owner";
 
 /**
- * @typedef {{ maintainers: string[], versions: string[], hiddenFromOwnerList?: boolean }} FixturePackage
+ * @typedef {{ maintainers: string[], versions: string[], hiddenFromOwnerList?: boolean, tags?: Record<string, string> }} FixturePackage
  *   `hiddenFromOwnerList` answers `npm owner ls` with 404 while `npm view` still lists the versions.
  * @typedef {{ packageName: string, version: string, user: string }} FixturePublication
  * @typedef {{
  *   registryUrl: string,
  *   publications: FixturePublication[],
+ *   requests: { path: string, command: string | undefined }[],
  *   close: () => Promise<void>,
  * }} FixtureRegistry
  */
@@ -74,7 +75,7 @@ function readBody(request) {
 function buildPackument(packageName, fixturePackage) {
   return {
     name: packageName,
-    "dist-tags": fixturePackage.versions.length > 0 ? { latest: fixturePackage.versions.at(-1) } : {},
+    "dist-tags": { ...(fixturePackage.versions.length > 0 ? { latest: fixturePackage.versions.at(-1) } : {}), ...fixturePackage.tags },
     versions: Object.fromEntries(fixturePackage.versions.map((version) => [version, { name: packageName, version }])),
     maintainers: fixturePackage.maintainers.map((maintainer) => ({ name: maintainer, email: `${maintainer}@example.test` })),
   };
@@ -88,21 +89,33 @@ function buildPackument(packageName, fixturePackage) {
  *   packages?: Record<string, FixturePackage>,
  *   rejectPublications?: boolean,
  *   rejectUnknownTokenReads?: boolean,
+ *   basePath?: string,
+ *   unsupportedPermissionChecks?: boolean,
+ *   failAfterPublishing?: boolean,
  * }} [options] - `users` maps each accepted token to its npm user; `packages` are the published
  *   packages; `rejectPublications` answers every PUT with 404, as npm does for a token without write access;
  *   `rejectUnknownTokenReads` answers 401 to a GET whose bearer token maps to no user.
  * @returns {Promise<FixtureRegistry>} Running registry.
  */
-export async function startFixtureNpmRegistry({ users = {}, packages = {}, rejectPublications = false, rejectUnknownTokenReads = false } = {}) {
+export async function startFixtureNpmRegistry({ users = {}, packages = {}, rejectPublications = false, rejectUnknownTokenReads = false, basePath = "", unsupportedPermissionChecks = false, failAfterPublishing = false } = {}) {
   /** @type {Map<string, FixturePackage>} */
   const registryPackages = new Map(Object.entries(packages).map(([name, fixturePackage]) => [name, { ...fixturePackage, maintainers: [...fixturePackage.maintainers], versions: [...fixturePackage.versions] }]));
   /** @type {FixturePublication[]} */
   const publications = [];
+  /** Requests observed at the external registry boundary. */
+  const requests = /** @type {{ path: string, command: string | undefined }[]} */ ([]);
 
   const server = createServer(async (request, response) => {
     const authorization = request.headers.authorization ?? "";
     const user = authorization.startsWith(BEARER_PREFIX) ? (users[authorization.slice(BEARER_PREFIX.length)] ?? null) : null;
-    const requestPath = decodeURIComponent(new URL(request.url ?? "/", "http://registry.test").pathname.slice(1));
+    const incomingPath = new URL(request.url ?? "/", "http://registry.test").pathname.slice(1);
+    const requestPath = decodeURIComponent(incomingPath.startsWith(basePath) ? incomingPath.slice(basePath.length) : incomingPath);
+    requests.push({ path: requestPath, command: /** @type {string | undefined} */ (request.headers[NPM_COMMAND_HEADER]) });
+
+    if (unsupportedPermissionChecks && (requestPath === WHOAMI_PATH || request.headers[NPM_COMMAND_HEADER] === OWNER_COMMAND)) {
+      sendJson(response, 501, { error: "not supported" });
+      return;
+    }
 
     if (requestPath === WHOAMI_PATH) {
       sendJson(response, user ? 200 : 401, user ? { username: user } : { error: "authentication required" });
@@ -141,7 +154,8 @@ export async function startFixtureNpmRegistry({ users = {}, packages = {}, rejec
         publications.push({ packageName: requestPath, version, user });
       }
       registryPackages.set(requestPath, target);
-      sendJson(response, 200, { ok: true });
+      target.tags = { ...target.tags, ...body["dist-tags"] };
+      sendJson(response, failAfterPublishing ? 503 : 200, { ok: !failAfterPublishing });
       return;
     }
 
@@ -152,8 +166,9 @@ export async function startFixtureNpmRegistry({ users = {}, packages = {}, rejec
   const { port } = /** @type {import("node:net").AddressInfo} */ (server.address());
 
   return {
-    registryUrl: `http://127.0.0.1:${port}/`,
+    registryUrl: `http://127.0.0.1:${port}/${basePath}`,
     publications,
+    requests,
     close: () =>
       new Promise((resolve) => {
         server.close(() => resolve(undefined));

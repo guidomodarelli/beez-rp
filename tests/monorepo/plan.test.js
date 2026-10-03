@@ -34,7 +34,7 @@ function packageSnapshot(component, overrides = {}) {
     releasedVersion: "1.0.0",
     lastRelease: { sha: `sha-${component}`, version: "1.0.0", subject: `release: ${name}@1.0.0`, tag: `${component}-v1.0.0`, tagged: true, tagOnOrigin: true },
     unreleasedCommits: [],
-    changelog: { exists: true, entryCount: 0, unknownSections: [] },
+    changelog: { exists: true, entryCount: 0, unknownSections: [], updated: true, reason: null },
     npm: { status: NPM_LOOKUP_STATUS.ok, publishedVersions: ["1.0.0"], latestVersion: "1.0.0", reason: null },
     npmAuth: null,
     ...overrides,
@@ -73,7 +73,7 @@ describe("buildMonorepoPlan", () => {
     expect(plan.candidates).toEqual(["@acme/widget"]);
     expect(stepIds(plan)).toEqual([
       MONOREPO_RELEASE_STEP.chooseVersions,
-      MONOREPO_RELEASE_STEP.generateChangelogs,
+      MONOREPO_RELEASE_STEP.verifyChangelogs,
       RELEASE_STEP.runChecks,
       MONOREPO_RELEASE_STEP.bumpPackages,
       RELEASE_STEP.prepareRelease,
@@ -83,11 +83,11 @@ describe("buildMonorepoPlan", () => {
     expect(listPackagesToAuthenticate(plan)).toEqual(["@acme/widget"]);
   });
 
-  it("regenerates the changelogs of changed packages regardless of their old sections", () => {
+  it("should preserve manual changelog sections when changed packages are planned", () => {
     const state = monorepoState({
       packages: [
-        packageSnapshot("widget", { unreleasedCommits: [{ sha: "c1", subject: "feat(widget): new option", body: "" }], changelog: { exists: true, entryCount: 1, unknownSections: ["Added"] } }),
-        packageSnapshot("cli", { unreleasedCommits: [{ sha: "c2", subject: "fix(cli): typo", body: "" }], changelog: { exists: true, entryCount: 1, unknownSections: ["Nope"] } }),
+        packageSnapshot("widget", { unreleasedCommits: [{ sha: "c1", subject: "feat(widget): new option", body: "" }], changelog: { exists: true, entryCount: 1, unknownSections: ["Added"], updated: true, reason: null } }),
+        packageSnapshot("cli", { unreleasedCommits: [{ sha: "c2", subject: "fix(cli): typo", body: "" }], changelog: { exists: true, entryCount: 1, unknownSections: ["Nope"], updated: true, reason: null } }),
       ],
     });
 
@@ -98,6 +98,21 @@ describe("buildMonorepoPlan", () => {
     expect(plan.candidates).toEqual(["@acme/widget", "@acme/cli"]);
     expect(stepIds(plan)[0]).toBe(MONOREPO_RELEASE_STEP.chooseVersions);
     expect(plan.warnings).toEqual([]);
+  });
+
+  it("should warn about unchanged notes and verify selected changelogs before migrations", () => {
+    // Arrange
+    const state = monorepoState({
+      packages: [packageSnapshot("widget", { unreleasedCommits: [{ sha: "c1", subject: "feat(widget): new option", body: "" }], changelog: { exists: true, entryCount: 1, unknownSections: [], updated: false, reason: null } })],
+      migrations: { status: MIGRATION_STATUS.pending, pending: ["0001_init"], target: "db.example.test", reason: null },
+    });
+
+    // Act
+    const plan = buildMonorepoPlan(state, NPM_PACKAGE, { tagFormat: TAG_FORMAT });
+
+    // Assert
+    expect(plan.warnings).toEqual([expect.stringContaining("packages/widget/CHANGELOG.md no fue actualizado")]);
+    expect(stepIds(plan).slice(0, 3)).toEqual([MONOREPO_RELEASE_STEP.chooseVersions, MONOREPO_RELEASE_STEP.verifyChangelogs, RELEASE_STEP.applyMigrations]);
   });
 
   it("is up to date when no package changed", () => {
@@ -235,7 +250,8 @@ describe("buildMonorepoPlan", () => {
     const ids = stepIds(buildMonorepoPlan(state, NPM_PACKAGE, { tagFormat: TAG_FORMAT }));
 
     expect(ids.indexOf(MONOREPO_RELEASE_STEP.chooseVersions)).toBe(0);
-    expect(ids.indexOf(RELEASE_STEP.applyMigrations)).toBe(1);
+    expect(ids.indexOf(MONOREPO_RELEASE_STEP.verifyChangelogs)).toBe(1);
+    expect(ids.indexOf(RELEASE_STEP.applyMigrations)).toBe(2);
   });
 
   it("blocks when a package about to be published has credentials that cannot publish", () => {

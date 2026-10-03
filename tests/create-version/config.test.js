@@ -42,12 +42,12 @@ describe("create-version config", () => {
     ]);
   });
 
-  it("should reject versionFiles naming package.json or CHANGELOG.md under any separator spelling, since the release commit already writes them", () => {
+  it("should reject versionFiles naming package.json or the preserved CHANGELOG under any separator or letter case", () => {
     const base = { changelog: { audience: "equipo" } };
 
-    for (const builtInFile of ["CHANGELOG.md", "./CHANGELOG.md", "package.json", ".\\package.json", "./package.json/"]) {
+    for (const builtInFile of ["CHANGELOG.md", "./CHANGELOG.md", "CHANGELOG.MD", "./changelog.md", "package.json", ".\\package.json", "./package.json/"]) {
       expect(() => resolveCreateVersionConfig({ ...base, versionFiles: ["src/cli.ts", builtInFile] })).toThrow(
-        /versionFiles must be a list without package\.json nor CHANGELOG\.md, which the release commit already updates/
+        /versionFiles must be a list without package\.json nor CHANGELOG\.md, which the release commit owns and includes without rewriting CHANGELOG\.md/
       );
     }
     expect(resolveCreateVersionConfig({ ...base, versionFiles: ["docs/CHANGELOG.md", "packages/app/package.json"] }).versionFiles).toEqual([
@@ -56,14 +56,10 @@ describe("create-version config", () => {
     ]);
   });
 
-  it("should accept versionFiles differing from package.json or CHANGELOG.md only in letter case, which are other files on a case-sensitive file system", () => {
+  it("should accept a distinct manifest name when it differs from package.json in letter case", () => {
     const base = { changelog: { audience: "equipo" } };
 
-    expect(resolveCreateVersionConfig({ ...base, versionFiles: ["Package.json", "CHANGELOG.MD", "./changelog.md"] }).versionFiles).toEqual([
-      "Package.json",
-      "CHANGELOG.MD",
-      "changelog.md",
-    ]);
+    expect(resolveCreateVersionConfig({ ...base, versionFiles: ["Package.json"] }).versionFiles).toEqual(["Package.json"]);
   });
 
   it("should run the default ci checks with the project's package manager", () => {

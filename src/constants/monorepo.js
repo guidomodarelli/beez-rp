@@ -50,7 +50,7 @@ export const SKIP_PACKAGE_CHOICE = "skip";
 /** Steps of a monorepo release plan (the shared ones reuse `RELEASE_STEP`). */
 export const MONOREPO_RELEASE_STEP = Object.freeze({
   chooseVersions: "choose-versions",
-  generateChangelogs: "generate-changelogs",
+  verifyChangelogs: "verify-changelogs",
   bumpPackages: "bump-packages",
   pushPackages: "push-packages",
   publishPackages: "publish-packages",

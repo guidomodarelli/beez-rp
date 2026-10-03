@@ -7,6 +7,9 @@
 /** Changelog file released together with `package.json`. */
 export const CHANGELOG_FILE = "CHANGELOG.md";
 
+/** Blocking release condition that exits with failure until the manual changelog is updated. */
+export const CHANGELOG_UPDATE_REQUIRED_CODE = "changelog-update-required";
+
 /** Default title when creating a changelog document. */
 export const CHANGELOG_TITLE = "# Changelog";
 

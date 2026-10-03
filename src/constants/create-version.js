@@ -4,6 +4,8 @@
  * @module constants/create-version
  */
 
+import { GITHUB_REGISTRY_PROVIDER, GITLAB_REGISTRY_PROVIDER, JSR_REGISTRY_PROVIDER, NPM_REGISTRY_PROVIDER, NPM_REGISTRY_TOKEN_VARIABLE } from "./registry.js";
+
 import { DEFAULT_CREATE_VERSION_COMMAND } from "./package-manager.js";
 
 /** Branch that receives releases. */
@@ -34,7 +36,7 @@ export const PINNED_NODE_VERSION_FILE = ".nvmrc";
 export const LOCAL_ENVIRONMENT_FILE = ".env";
 
 /** Environment variable that holds the npm token; the temporary npm config references it as `${NPM_TOKEN}`. */
-export const NPM_TOKEN_VARIABLE = "NPM_TOKEN";
+export const NPM_TOKEN_VARIABLE = NPM_REGISTRY_TOKEN_VARIABLE;
 
 /**
  * Path segments, relative to the user home directory (`os.homedir()`), of the environment file
@@ -77,6 +79,7 @@ export const NPM_AUTH_STATUS = Object.freeze({
   invalidToken: "invalid-token",
   notOwner: "not-owner",
   projectCredentials: "project-credentials",
+  unsupportedAuth: "unsupported-auth",
   unknown: "unknown",
 });
 
@@ -154,7 +157,7 @@ export const NPM_OWNER_LINE_PATTERN = /^(?<user>[^\s<]+)(?:\s+<[^>]*>)?$/u;
 export const RELEASE_STEP = Object.freeze({
   syncMain: "sync-main",
   applyMigrations: "apply-migrations",
-  generateChangelog: "generate-changelog",
+  verifyChangelog: "verify-changelog",
   runChecks: "run-checks",
   bumpVersion: "bump-version",
   prepareRelease: "prepare-release",
@@ -193,7 +196,10 @@ export const NO_PULL_REQUEST_MESSAGE_PATTERN = /no pull requests found/iu;
 
 /** Registries whose published versions drive resumes and the banner. */
 export const RELEASE_REGISTRY = Object.freeze({
-  npm: "npm",
+  npm: NPM_REGISTRY_PROVIDER,
+  github: GITHUB_REGISTRY_PROVIDER,
+  gitlab: GITLAB_REGISTRY_PROVIDER,
+  jsr: JSR_REGISTRY_PROVIDER,
 });
 
 /** `package.json` script run as the release checks when the configuration does not set `checks`. */
@@ -203,7 +209,7 @@ export const DEFAULT_CHECKS_SCRIPT = "ci";
 export const DEFAULT_CHECKS_COMMAND = `pnpm run ${DEFAULT_CHECKS_SCRIPT}`;
 
 /** Built-in publisher selected with `publish: "npm"`. */
-export const NPM_PUBLISHER = "npm";
+export const NPM_PUBLISHER = NPM_REGISTRY_PROVIDER;
 
 /** Result of asking npm which versions of the package exist. */
 export const NPM_LOOKUP_STATUS = Object.freeze({
@@ -244,7 +250,7 @@ export const VERSION_PREFIX_PATTERN = /^v/u;
 export const PACKAGE_VERSION_FIELD_PATTERN = /("version"\s*:\s*")[^"]+(")/u;
 
 /** `git log -G` pattern of a changed top-level `version` field; the last such commit is the last release. */
-export const VERSION_FIELD_CHANGE_PATTERN = `^[[:space:]]*"version"[[:space:]]*:`;
+export const VERSION_FIELD_CHANGE_PATTERN = `"version"[[:space:]]*:`;
 
 /** GitHub `owner/repo` inside an SSH or HTTPS remote URL. */
 export const GITHUB_REPOSITORY_PATTERN = /github\.com[:/]([^/]+\/[^/]+?)(?:\.git)?$/u;

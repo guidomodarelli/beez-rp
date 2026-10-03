@@ -4,7 +4,7 @@
  *
  * - a new release: the packages with commits under their paths are the
  *   candidates; the run asks the version of each one (or skips it) before
- *   applying migrations, generates commit changelogs, runs the checks, creates one release commit with a tag
+ *   verifying manual changelogs, applying migrations, running the checks and creating one release commit with a tag
  *   per package, prepares, pushes and publishes in dependency order;
  * - the resume of a local release commit that never reached `origin`, or of
  *   tagged releases on `origin/main` that npm does not have yet;
@@ -14,7 +14,6 @@
  * @module monorepo/plan
  */
 
-import { UNRELEASED_HEADING } from "../constants/changelog.js";
 import {
   CREATE_VERSION_FLAG,
   MAIN_BRANCH,
@@ -146,7 +145,7 @@ function findBlockers(state, ignoreLocalChanges, commands) {
         packageSnapshot.npmAuth && packageSnapshot.npmAuth.status !== NPM_AUTH_STATUS.missingToken ? describeNpmAuthProblem(packageSnapshot.npmAuth, commands) : null;
       blockers.push(
         rejectedCredential ?? {
-          title: `No se pudo consultar npm para ${packageSnapshot.unit.name}`,
+          title: `No se pudo consultar ${packageSnapshot.npm.registryLabel ?? "npm"} para ${packageSnapshot.unit.name}`,
           details: [`${packageSnapshot.npm.reason ?? "npm no respondió"}.`, `Revisá la conexión y volvé a correr ${commands.createVersion}.`],
         }
       );
@@ -258,7 +257,7 @@ function planPendingPublications(state, capabilities) {
 
     const highestPublished = findHighestStableVersion(npm.publishedVersions);
     if (highestPublished && !isStableVersionAbove(/** @type {string} */ (version), highestPublished)) {
-      warnings.push(`${unit.name}@${version} (${lastRelease.tag}) no está en npm, pero npm ya tiene ${highestPublished}: publicarla movería latest hacia atrás, así que no se publica.`);
+      warnings.push(`${unit.name}@${version} (${lastRelease.tag}) no está en ${npm.registryLabel ?? "npm"}, pero ${npm.registryLabel ?? "npm"} ya tiene ${highestPublished}: publicarla movería ${npm.tag ?? "latest"} hacia atrás, así que no se publica.`);
       continue;
     }
 
@@ -291,10 +290,11 @@ function planPendingPublications(state, capabilities) {
  * @param {string} name - Package name.
  * @param {string} version - Skipped version.
  * @param {string} tag - Its tag.
+ * @param {string} [registryLabel] - Selected registry label.
  * @returns {string} Warning.
  */
-function describeSkippedPublication(name, version, tag) {
-  return `Se saltea ${name}@${version} (tag ${tag}), que no está en npm: el release nuevo sale sin publicarla (--${CREATE_VERSION_FLAG.skipUnpublished}).`;
+function describeSkippedPublication(name, version, tag, registryLabel = "npm") {
+  return `Se saltea ${name}@${version} (tag ${tag}), que no está en ${registryLabel}: el release nuevo sale sin publicarla (--${CREATE_VERSION_FLAG.skipUnpublished}).`;
 }
 
 /**
@@ -342,7 +342,18 @@ function planNewRelease(state, capabilities, commands, warnings) {
       title: `Elegir la versión de cada paquete con cambios (${candidates.length})`,
       detail: candidateNames.join(", "),
     },
+    {
+      id: MONOREPO_RELEASE_STEP.verifyChangelogs,
+      title: "Verificar la actualización manual de los CHANGELOG elegidos",
+      detail: "Cada uno debe haber cambiado desde su último release; su contenido se conserva sin reescribirlo.",
+    },
   ];
+
+  for (const { changelog, unit } of candidates) {
+    if (changelog.updated !== true) {
+      warnings.push(`${changelog.reason ?? `${unit.changelogPath} no fue actualizado desde el último release`}; si elegís publicar ${unit.name}, el release se corta. Actualizalo manualmente.`);
+    }
+  }
 
   if (state.migrations?.status === MIGRATION_STATUS.pending) {
     steps.push({
@@ -354,12 +365,6 @@ function planNewRelease(state, capabilities, commands, warnings) {
     warnings.push(`No se pudo verificar si hay migraciones pendientes: ${state.migrations.reason ?? "motivo desconocido"}.`);
   }
 
-  steps.push({
-    id: MONOREPO_RELEASE_STEP.generateChangelogs,
-    title: `Generar ${UNRELEASED_HEADING} de los CHANGELOG desde los commits`,
-    detail: "Solo de los paquetes elegidos, con una entrada por commit desde su versión anterior.",
-  });
-
   if (capabilities.checks) {
     steps.push({ id: RELEASE_STEP.runChecks, title: "Validar el proyecto", detail: "Corre los checks configurados antes de tocar las versiones." });
   }
@@ -367,7 +372,7 @@ function planNewRelease(state, capabilities, commands, warnings) {
   steps.push({
     id: MONOREPO_RELEASE_STEP.bumpPackages,
     title: "Crear el commit de release y un tag por paquete",
-    detail: `Cada ${UNRELEASED_HEADING} pasa a su versión con la fecha de hoy y se commitea con su package.json.`,
+    detail: "Actualiza los package.json e incluye los CHANGELOG manuales sin modificar su contenido.",
   });
 
   if (capabilities.prepare) {
@@ -409,7 +414,7 @@ function applyNpmAuth(plan, state, commands) {
     if (problem) {
       blockers.push(problem);
     } else if (npmAuth.status === NPM_AUTH_STATUS.unknown) {
-      warnings.push(`No se pudieron verificar las credenciales de npm de ${unit.name}: ${npmAuth.reason ?? "motivo desconocido"}. Se intenta publicar igual.`);
+      warnings.push(`No se pudieron verificar las credenciales de ${npmAuth.registryLabel ?? "npm"} de ${unit.name}: ${npmAuth.reason ?? "motivo desconocido"}. Se intenta publicar igual.`);
     } else {
       const firstPublication = describeNpmFirstPublicationWarning(npmAuth);
       if (firstPublication) {
@@ -453,7 +458,7 @@ export function buildMonorepoPlan(state, capabilities, { tagFormat, ignoreLocalC
 
   const localResume = planLocalResume(state, capabilities, tagFormat);
   const pending = localResume ? { plan: null, warnings: [] } : planPendingPublications(state, capabilities);
-  const skipped = skipUnpublished && pending.plan ? pending.plan.pendingReleases.map(({ name, version, tag }) => describeSkippedPublication(name, version, tag)) : [];
+  const skipped = skipUnpublished && pending.plan ? pending.plan.pendingReleases.map(({ name, version, tag }) => describeSkippedPublication(name, version, tag, state.packages.find(({ unit }) => unit.name === name)?.npm?.registryLabel)) : [];
   const plan = localResume ?? (skipUnpublished ? null : pending.plan) ?? planNewRelease(state, capabilities, commands, [...pending.warnings, ...skipped]);
   const withAuth = applyNpmAuth(plan, state, commands);
   // As in single-package mode: the configuration and the workspace manifests were already read from the
@@ -464,14 +469,18 @@ export function buildMonorepoPlan(state, capabilities, { tagFormat, ignoreLocalC
     return createPlan({ blockers: [codeChangesToSetAsideBlocker(codeChanges, commands)] });
   }
 
-  if (withAuth.mode === RELEASE_MODE.resume && !ignoreLocalChanges && state.workingTreeChanges.length > 0) {
+  const changelogPaths = new Set(state.packages.map(({ unit }) => unit.changelogPath));
+  const dirtyChangelogs = state.workingTreeChanges.filter((line) => changesOneOf(line, changelogPaths));
+  if (withAuth.mode === RELEASE_MODE.resume && ((!ignoreLocalChanges && state.workingTreeChanges.length > 0) || dirtyChangelogs.length > 0)) {
     return createPlan({
       blockers: [
         {
           title: "Hay cambios sin commitear y el release ya está commiteado",
           details: [
             ...state.workingTreeChanges.slice(0, MAX_LISTED_ITEMS),
-            `Retomar un release usa los archivos de su commit: guardalos (git stash) y volvé a correr ${commands.createVersion}, o usá --${CREATE_VERSION_FLAG.ignoreLocalChanges}.`,
+            dirtyChangelogs.length > 0
+              ? `Guardá manualmente los cambios del CHANGELOG (git stash) y volvé a correr ${commands.createVersion}; --${CREATE_VERSION_FLAG.ignoreLocalChanges} no lo aparta ni restaura.`
+              : `Retomar un release usa los archivos de su commit: guardalos (git stash) y volvé a correr ${commands.createVersion}, o usá --${CREATE_VERSION_FLAG.ignoreLocalChanges}.`,
           ],
         },
       ],

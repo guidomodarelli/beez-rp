@@ -56,13 +56,16 @@ function describeOwners(npmAuth) {
  */
 function describeCredentialProblem(npmAuth, nextAction) {
   const sourceLabel = describeNpmTokenSource(npmAuth);
+  const tokenVariable = npmAuth.tokenVariable ?? NPM_TOKEN_VARIABLE;
 
   switch (npmAuth.status) {
     case NPM_AUTH_STATUS.missingToken:
-      return { title: `Falta ${NPM_TOKEN_VARIABLE} para publicar ${npmAuth.packageName}`, reason: null, fix: `Definilo en ${NPM_TOKEN_LOCATIONS} y ${nextAction}.` };
+      return { title: `Falta ${tokenVariable} para publicar ${npmAuth.packageName}`, reason: null, fix: `Definilo en ${tokenVariable === NPM_TOKEN_VARIABLE ? NPM_TOKEN_LOCATIONS : `la variable de entorno ${tokenVariable}, el .env del repo o ~/.config/beez-rp/.env`} y ${nextAction}.` };
+    case NPM_AUTH_STATUS.unsupportedAuth:
+      return { title: npmAuth.reason ?? "La autenticación configurada no está disponible", reason: null, fix: `Corregí publication.authentication o el entorno del CI y ${nextAction}.` };
     case NPM_AUTH_STATUS.invalidToken:
       return {
-        title: `El ${NPM_TOKEN_VARIABLE} (${sourceLabel}) es inválido o venció`,
+        title: `El ${tokenVariable} (${sourceLabel}) es inválido o venció`,
         reason: `${npmAuth.reason ?? "npm whoami rechazó el token"} (registry ${npmAuth.registryUrl}).`,
         fix: `Generá uno nuevo con permiso de publicación (npm → Access Tokens), reemplazalo (${sourceLabel}) y ${nextAction}.`,
       };
@@ -74,9 +77,9 @@ function describeCredentialProblem(npmAuth, nextAction) {
       };
     case NPM_AUTH_STATUS.projectCredentials:
       return {
-        title: `El ${PROJECT_NPM_CONFIG_FILE} del proyecto define credenciales para ${npmAuth.registryUrl} que tienen prioridad sobre ${NPM_TOKEN_VARIABLE}`,
+        title: `El ${PROJECT_NPM_CONFIG_FILE} del proyecto define credenciales para ${npmAuth.registryUrl} que tienen prioridad sobre ${tokenVariable}`,
         reason: `${npmAuth.reason ?? `${PROJECT_NPM_CONFIG_FILE} del proyecto con credenciales`}.`,
-        fix: `Sacalas: beez-rp usa ${NPM_TOKEN_VARIABLE} con una config temporal. Después ${nextAction}.`,
+        fix: `Sacalas: beez-rp usa ${tokenVariable} con una config temporal. Después ${nextAction}.`,
       };
     default:
       return null;

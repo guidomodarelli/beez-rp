@@ -13,12 +13,10 @@
  * @module monorepo/run
  */
 
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { fillUnreleasedFromCommits, readUnreleased, releaseUnreleased } from "../changelog.js";
-import { UNRELEASED_HEADING } from "../constants/changelog.js";
 import {
   CREATE_VERSION_FLAG,
   FAILURE_EXIT_CODE,
@@ -26,9 +24,6 @@ import {
   MAIN_BRANCH,
   MAX_LISTED_ITEMS,
   NPM_LOOKUP_STATUS,
-  NPM_PUBLISHER,
-  NPM_TOKEN_LOCATIONS,
-  NPM_TOKEN_VARIABLE,
   PACKAGE_MANIFEST_FILE,
   RELEASE_MODE,
   RELEASE_REGISTRY,
@@ -42,9 +37,14 @@ import { MONOREPO_RELEASE_STEP, SKIP_PACKAGE_CHOICE, SUMMARY_PACKAGE_PLACEHOLDER
 import { RELEASE_TYPE_ORDER } from "../constants/versions.js";
 import { findPnpmPackRewrites, findPreparedArtifact, expandArtifactPattern, isSafeArtifactPath, verifyPreparedArtifact, withArtifactOutsidePackageRoot } from "../create-version/artifact.js";
 import { describeReleaseTypes } from "../create-version/config.js";
+import { isRegistryProvider } from "../create-version/registry-config.js";
+import { checkRegistryAccess, publishRegistryRelease, resolveRegistry, selectProjectRegistry } from "../create-version/registry.js";
+import { prepareJsrVersionUpdates } from "../create-version/jsr.js";
+import { JSR_REGISTRY_PROVIDER } from "../constants/registry.js";
+import { verifyChangelogUpdate } from "../create-version/changelog.js";
 import { ReleaseStepError } from "../create-version/errors.js";
 import { restoreLocalChanges, setAsideLocalChanges } from "../create-version/local-changes.js";
-import { buildNpmAuthConfigLine, checkNpmPublishAccess, describePublishedRelease, publishToNpm, readNpmPackIntegrity, resolvePublishRegistry } from "../create-version/npm.js";
+import { describePublishedRelease, readNpmPackIntegrity } from "../create-version/npm.js";
 import { describeNpmPublishFailure } from "../create-version/npm-auth.js";
 import { createGitReader } from "../create-version/process.js";
 import {
@@ -60,7 +60,6 @@ import {
   commitReleaseFiles,
   prepareVersionFileUpdates,
   readReleaseFile,
-  readChangelogReleaseFile,
   renderCommitList,
   renderNpmAuthRow,
   rewriteManifestVersion,
@@ -99,9 +98,10 @@ import { discoverWorkspacePackages, formatPackageTag, resolveReleaseUnits, sortB
  *   units: ReleaseUnit[],
  *   plan: MonorepoPlan,
  *   chosen: ChosenRelease[],
+ *   changelogFiles: import("../create-version/changelog.js").PreservedReleaseFile[],
  *   preparedRoots: Set<string>,
  *   pushed: boolean,
- *   published: { name: string, version: string, registryUrl: string | null }[],
+ *   published: { name: string, version: string, registryUrl: string | null, registryLabel?: string, packageName?: string }[],
  * }} MonorepoContext
  */
 
@@ -133,11 +133,11 @@ function renderMonorepoDiagnosis(state, repositoryRoot) {
   ];
 
   for (const packageSnapshot of state.packages) {
-    const { unit, lastRelease, unreleasedCommits, npm, npmAuth } = packageSnapshot;
+    const { unit, lastRelease, unreleasedCommits, npm, npmAuth, changelog } = packageSnapshot;
     const released = lastRelease?.version ? paint("cyan", lastRelease.tag ?? lastRelease.version) : paint("gray", "sin releases");
     const pending = unreleasedCommits.length > 0 ? paint("yellow", `${unreleasedCommits.length} commit(s) sin publicar`) : "al día";
-    const published = npm ? (npm.status === NPM_LOOKUP_STATUS.ok ? `npm ${npm.latestVersion ?? npm.publishedVersions.at(-1) ?? "—"}` : paint("red", "npm no respondió")) : null;
-    const changelogNote = unreleasedCommits.length > 0 ? paint("gray", "CHANGELOG: listado de commits al versionar") : null;
+    const published = npm ? (npm.status === NPM_LOOKUP_STATUS.ok ? `${npm.registryLabel ?? "npm"} ${npm.latestVersion ?? npm.publishedVersions.at(-1) ?? "—"}` : paint("red", `${npm.registryLabel ?? "npm"} no respondió`)) : null;
+    const changelogNote = unreleasedCommits.length > 0 ? paint(changelog.updated ? "gray" : "yellow", changelog.updated ? "CHANGELOG actualizado manualmente" : "CHANGELOG sin actualización manual; bloquea si se elige publicar") : null;
     rows.push(
       renderRow(
         unreleasedCommits.length > 0 ? ICON.warning : ICON.success,
@@ -265,7 +265,7 @@ async function chooseVersionsStep(context) {
     const highestPublished = findHighestStableVersion(packageSnapshot.npm?.publishedVersions ?? []);
     if (highestPublished && compareReleaseVersions(version, highestPublished) <= 0) {
       throw new ReleaseStepError(
-        `${unit.name}@${version} no es mayor que ${highestPublished}, la versión más alta publicada en npm.`,
+        `${unit.name}@${version} no es mayor que ${highestPublished}, la versión más alta publicada en ${packageSnapshot.npm?.registryLabel ?? "npm"}.`,
         `No se escribió nada. Llevá la versión de ${unit.manifestPath} a ${highestPublished} o elegí otro tipo de versión, y volvé a correr ${context.commands.createVersion}.`
       );
     }
@@ -295,21 +295,20 @@ async function chooseVersionsStep(context) {
   for (const { unit, version } of context.chosen) {
     // Only validates: a missing, untracked or unmarked versionFiles entry stops the release before migrations.
     await prepareVersionFileUpdates(context, versionFilesByPackage.get(unit.name) ?? [], version);
+    if (context.config.publish === JSR_REGISTRY_PROVIDER) await prepareJsrVersionUpdates(context, path.join(context.repositoryRoot, unit.directory), context.config.publication, version);
   }
 }
 
 /**
- * Previews each chosen package's commit list; the version step writes the release files.
+ * Verifies the chosen packages' manual changelogs before migrations and preserves their bytes.
  *
  * @param {MonorepoContext} context - Context.
  * @returns {Promise<void>}
  */
-async function generateChangelogsStep(context) {
+async function verifyChangelogsStep(context) {
   for (const { unit, snapshot } of context.chosen) {
-    const changelogPath = path.join(context.repositoryRoot, unit.changelogPath);
-    const previous = existsSync(changelogPath) ? readFileSync(changelogPath, "utf8") : "";
-    const unreleased = readUnreleased(fillUnreleasedFromCommits(previous, snapshot.unreleasedCommits));
-    print(renderBox({ title: `${unit.changelogPath} · ${UNRELEASED_HEADING} (listado de commits)`, lines: unreleased.body.split("\n"), tone: BOX_TONE.info }));
+    context.changelogFiles.push(await verifyChangelogUpdate(context, unit.changelogPath, snapshot.lastRelease?.sha ?? null));
+    print(`${ICON.success} ${unit.changelogPath} actualizado manualmente; se conserva sin reescribirlo.`);
   }
 }
 
@@ -319,7 +318,7 @@ async function generateChangelogsStep(context) {
  * @param {MonorepoContext} context - Context.
  * @returns {Map<string, string[]>} Files per package name.
  * @throws {ReleaseStepError} When an entry is outside every released package, or is the manifest or
- *   changelog of its package (the release commit already writes them).
+ *   changelog of its package (the release commit includes it without rewriting it).
  */
 function groupVersionFilesByPackage(context) {
   /** @type {Map<string, string[]>} */
@@ -336,9 +335,9 @@ function groupVersionFilesByPackage(context) {
         `En un monorepo cada archivo toma la versión del paquete que lo contiene: movelo o sacalo de versionFiles y volvé a correr ${context.commands.createVersion}.`
       );
     }
-    if (filePath === owner.manifestPath || filePath === owner.changelogPath) {
+    if (filePath === owner.manifestPath || filePath.toLowerCase() === owner.changelogPath.toLowerCase()) {
       throw new ReleaseStepError(
-        `${filePath} (versionFiles) es el package.json o el CHANGELOG.md de ${owner.name}: el commit de release ya lo escribe.`,
+        `${filePath} (versionFiles) es el package.json o el CHANGELOG.md de ${owner.name}: el commit de release los incluye y no reescribe el CHANGELOG.`,
         `Sacalo de versionFiles en beez-rp.config.(m)js y volvé a correr ${context.commands.createVersion}; no se tocó la versión.`
       );
     }
@@ -427,7 +426,7 @@ async function assertReleaseScope(context) {
 }
 
 /**
- * Writes the new versions, releases every chosen changelog and creates the release commit with an
+ * Writes the new versions, preserves every manual changelog and creates the release commit with an
  * annotated tag per package. Every file is computed before anything is written, and the commit
  * reuses the single-package one: literal staging, rollback on failure and the prepared-tree check.
  *
@@ -435,37 +434,23 @@ async function assertReleaseScope(context) {
  * @returns {Promise<void>}
  */
 async function bumpPackagesStep(context) {
-  const today = new Date().toISOString().split("T")[0];
   const versionFilesByPackage = await assertReleaseScope(context);
   await assertReleaseFilesMatchHead(context, [...context.chosen.map(({ unit }) => unit.manifestPath), ...context.config.versionFiles]);
   /** @type {import("../create-version/run.js").ReleaseFileUpdate[]} */
   const releaseFiles = [];
 
-  for (const { unit, version, snapshot } of context.chosen) {
-    const changelog = readChangelogReleaseFile(context, unit.changelogPath);
-    let releasedChangelog;
-
-    try {
-      releasedChangelog = releaseUnreleased(fillUnreleasedFromCommits(changelog.text, snapshot.unreleasedCommits), version, today);
-    } catch (error) {
-      throw new ReleaseStepError(
-        `${unit.changelogPath} no está listo: ${error instanceof Error ? error.message : String(error)}`,
-        `Revisá el CHANGELOG y los commits pendientes y volvé a correr ${context.commands.createVersion}.`,
-        { cause: error }
-      );
-    }
-
+  for (const { unit, version } of context.chosen) {
     const manifest = readReleaseFile(context, unit.manifestPath, unit.manifestPath);
     releaseFiles.push(
       { filePath: unit.manifestPath, originalBytes: manifest.originalBytes, content: rewriteManifestVersion(context, unit.manifestPath, manifest.text, version) },
-      { filePath: unit.changelogPath, originalBytes: changelog.originalBytes, content: releasedChangelog },
       ...(await prepareVersionFileUpdates(context, versionFilesByPackage.get(unit.name) ?? [], version))
     );
+    if (context.config.publish === JSR_REGISTRY_PROVIDER) releaseFiles.push(...await prepareJsrVersionUpdates(context, path.join(context.repositoryRoot, unit.directory), context.config.publication, version));
   }
 
   const ordered = sortByPublicationOrder(context.chosen.map((release) => ({ ...release, name: release.unit.name, publishedDependencies: release.unit.publishedDependencies })));
   const subject = buildMonorepoReleaseSubject(ordered.map(({ name, version }) => ({ name, version })));
-  await commitReleaseFiles(context, releaseFiles, subject);
+  await commitReleaseFiles(context, releaseFiles, subject, context.changelogFiles);
 
   const commitSha = await context.reader.git(["rev-parse", "HEAD"]);
   for (const release of context.chosen) {
@@ -610,7 +595,7 @@ async function publishPackage(context, checkoutRoot, release) {
   const { unit } = requirePackage(context, release.name);
   const packageRoot = path.join(checkoutRoot, unit.directory);
 
-  if (context.config.publish !== NPM_PUBLISHER) {
+  if (!isRegistryProvider(context.config.publish)) {
     await /** @type {import("../create-version/config.js").ReleaseHook} */ (context.config.publish)({
       ...createHookContext(checkoutRoot, createGitReader(checkoutRoot), release.version),
       releases: [{ name: release.name, version: release.version, directory: unit.directory }],
@@ -629,33 +614,40 @@ async function publishPackage(context, checkoutRoot, release) {
       `No se publicó nada. Publicá ese release a mano con su nombre original, o dalo por descartado con --${CREATE_VERSION_FLAG.skipUnpublished}.`
     );
   }
-  const rewrites = findPnpmPackRewrites(manifest);
+  const rewrites = context.config.publish === JSR_REGISTRY_PROVIDER ? [] : findPnpmPackRewrites(manifest);
   if (rewrites.length > 0) {
     throw new ReleaseStepError(`${release.name} depende de reescrituras del package manager al empaquetar: ${rewrites.join("; ")}.`, "No se publicó nada. Reemplazá workspace:/catalog:/jsr: por rangos de versión.");
   }
 
-  let registryUrl;
+  const selection = selectProjectRegistry(context.config);
+  let registry;
   try {
     // Resolved in the repository, as the diagnosis did: a temporary release checkout lacks an untracked project .npmrc.
-    registryUrl = await resolvePublishRegistry(manifest, context.repositoryRoot);
+    registry = await resolveRegistry(selection, manifest, context.repositoryRoot, packageRoot);
   } catch (error) {
     throw new ReleaseStepError(`No se puede publicar ${release.name}: ${error instanceof Error ? error.message : String(error)}.`, "Corregí el registry (publishConfig) y volvé a correr el comando.");
   }
 
-  const artifactPath = await resolvePackageArtifact(context, packageRoot, manifest, release.version);
-  const result = await publishToNpm(context.repositoryRoot, { authConfigLine: buildNpmAuthConfigLine(registryUrl), artifactPath, packageRoot, registryUrl });
+  const registryUrl = registry.registryUrl;
+  const artifactPath = registry.provider === JSR_REGISTRY_PROVIDER ? null : await resolvePackageArtifact(context, packageRoot, manifest, release.version);
+  const result = await publishRegistryRelease(selection, manifest, context.repositoryRoot, packageRoot, release.version, artifactPath);
 
   if (result.missingToken) {
-    throw new ReleaseStepError(`Falta ${NPM_TOKEN_VARIABLE} para publicar ${release.name}@${release.version}.`, `Definilo en ${NPM_TOKEN_LOCATIONS} y corré ${context.commands.createVersion}: retoma solo lo que falta publicar.`);
+    throw new ReleaseStepError(`Falta ${registry.options.tokenEnv} para publicar ${release.name}@${release.version} en ${registry.label}.`, `Definilo en el entorno, .env del repo o ~/.config/beez-rp/.env y corré ${context.commands.createVersion}: retoma solo lo que falta publicar.`);
   }
 
-  if (result.exitCode !== 0) {
-    const npmAuth = await checkNpmPublishAccess(release.name, context.repositoryRoot, registryUrl);
-    const failure = describeNpmPublishFailure(npmAuth, { exitCode: result.exitCode, version: `${release.name}@${release.version}` }, context.commands);
+  if (!result.confirmed) {
+    const npmAuth = await checkRegistryAccess(selection, manifest, context.repositoryRoot, packageRoot);
+    const failure = registry.provider === RELEASE_REGISTRY.npm ? describeNpmPublishFailure(npmAuth, { exitCode: result.exitCode, version: `${release.name}@${release.version}` }, context.commands) : {
+      message: result.exitCode === 0
+        ? `El cliente de ${registry.label} terminó con código 0, pero la metadata no confirmó ${registry.packageName}@${release.version}.`
+        : `No se confirmó la publicación de ${registry.packageName}@${release.version} en ${registry.label} (código ${result.exitCode}).`,
+      hint: `Consultá ${registryUrl} antes de reintentar; ${context.commands.createVersion} retoma lo pendiente. ${npmAuth.reason ?? "Revisá las credenciales y el permiso de escritura."}`,
+    };
     throw new ReleaseStepError(failure.message, failure.hint);
   }
 
-  context.published.push({ name: release.name, version: release.version, registryUrl });
+  context.published.push({ name: release.name, version: release.version, registryUrl, registryLabel: registry.label, packageName: registry.packageName });
 }
 
 /**
@@ -725,7 +717,7 @@ const STEP_EXECUTORS = {
   [RELEASE_STEP.runChecks]: runChecksStep,
   [RELEASE_STEP.prepareRelease]: prepareReleaseStep,
   [MONOREPO_RELEASE_STEP.chooseVersions]: chooseVersionsStep,
-  [MONOREPO_RELEASE_STEP.generateChangelogs]: generateChangelogsStep,
+  [MONOREPO_RELEASE_STEP.verifyChangelogs]: verifyChangelogsStep,
   [MONOREPO_RELEASE_STEP.bumpPackages]: bumpPackagesStep,
   [MONOREPO_RELEASE_STEP.pushPackages]: pushPackagesStep,
   [MONOREPO_RELEASE_STEP.publishPackages]: publishPackagesStep,
@@ -744,7 +736,7 @@ function renderMonorepoSummary(context, remoteUrl, startedAt) {
   const githubRepository = GITHUB_REPOSITORY_PATTERN.exec(remoteUrl)?.[1];
   const lines = releases.map((release) => {
     const published = context.published.find((entry) => entry.name === release.name);
-    const npmNote = published?.registryUrl ? paint("gray", ` · ${describePublishedRelease({ registryUrl: published.registryUrl, packageName: release.name, version: release.version })}`) : "";
+    const npmNote = published?.registryUrl ? paint("gray", ` · ${published.registryLabel ?? "Registro"}: ${describePublishedRelease({ registryUrl: published.registryUrl, packageName: published.packageName ?? release.name, version: release.version })}`) : "";
     return `${ICON.success} ${paint("bold", release.name)} ${paint(["bold", "greenBright"], release.version)} ${paint("gray", `(${release.tag})`)}${npmNote}`;
   });
 
@@ -854,7 +846,7 @@ export async function runMonorepoCreateVersion({ repositoryRoot, config, options
 
   const reader = createGitReader(repositoryRoot);
   const remoteUrl = (await reader.tryGit(["remote", "get-url", RELEASE_REMOTE])) ?? "";
-  const capabilities = describeReleaseCapabilities(config);
+  let capabilities = describeReleaseCapabilities(config);
   const { migrations } = config;
   const spinner = startSpinner("Diagnosticando el monorepo");
   let state;
@@ -864,10 +856,11 @@ export async function runMonorepoCreateVersion({ repositoryRoot, config, options
       repositoryRoot,
       units,
       tagFormat,
-      trackNpm: config.registry === RELEASE_REGISTRY.npm,
+      trackNpm: config.registry !== null,
+      registrySelection: selectProjectRegistry(config),
       checkMigrations: migrations ? () => migrations.check(createHookContext(repositoryRoot, reader, null)) : null,
       checkNpmAuthFor: (snapshot) =>
-        config.publish === NPM_PUBLISHER ? listPackagesToAuthenticate(buildMonorepoPlan(snapshot, capabilities, { tagFormat, ignoreLocalChanges: true, skipUnpublished: options.skipUnpublished })) : [],
+        isRegistryProvider(config.publish) ? listPackagesToAuthenticate(buildMonorepoPlan(snapshot, capabilities, { tagFormat, ignoreLocalChanges: true, skipUnpublished: options.skipUnpublished })) : [],
       onProgress: (label) => spinner.update(label),
     });
     spinner.succeed("Diagnóstico completo");
@@ -885,6 +878,7 @@ export async function runMonorepoCreateVersion({ repositoryRoot, config, options
     }
   })();
   print(renderBanner({ projectName: config.projectName ?? rootName, publishedLabel: `${units.length} paquete(s)` }));
+  capabilities = describeReleaseCapabilities(config, state.packages.find((packageSnapshot) => packageSnapshot.npm?.registryLabel)?.npm?.registryLabel);
   print(renderMonorepoDiagnosis(state, repositoryRoot));
 
   let plan = buildMonorepoPlan(state, capabilities, { tagFormat, ignoreLocalChanges: options.ignoreLocalChanges, skipUnpublished: options.skipUnpublished });
@@ -934,6 +928,7 @@ export async function runMonorepoCreateVersion({ repositoryRoot, config, options
     units,
     plan,
     chosen: [],
+    changelogFiles: [],
     preparedRoots: new Set(),
     pushed: false,
     published: [],
