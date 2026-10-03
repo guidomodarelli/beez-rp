@@ -76,7 +76,7 @@
     "build:types": "tsc -p tsconfig.types.json",
     "lint": "oxlint",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "vitest run",
+    "test": "vitest run --dir tests",
     "check": "pnpm lint && pnpm typecheck && pnpm test",
     "create-version": "node bin/beez-rp.js create-version",
     "cv": "node bin/beez-rp.js create-version",
