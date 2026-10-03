@@ -1,7 +1,7 @@
 {
   "name": "beez-rp",
   "version": "0.6.0",
-  "description": "Dependency-free release process shared by the Beez projects: stable version rules, Vercel build gate, Keep a Changelog and terminal UI.",
+  "description": "Dependency-free release process shared by the Beez projects: stable version rules, Vercel build gate, commit-based changelog and terminal UI.",
   "license": "MIT",
   "author": "Guido Modarelli",
   "repository": {
@@ -33,10 +33,6 @@
     "./changelog": {
       "types": "./types/changelog.d.ts",
       "default": "./src/changelog.js"
-    },
-    "./changelog-ai": {
-      "types": "./types/changelog-ai.d.ts",
-      "default": "./src/changelog-ai.js"
     },
     "./terminal-ui": {
       "types": "./types/terminal-ui.d.ts",

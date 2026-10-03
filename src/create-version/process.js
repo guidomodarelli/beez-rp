@@ -17,7 +17,7 @@ import { FIELD_SEPARATOR, PACKAGE_MANIFEST_FILE, RECORD_SEPARATOR } from "../con
  * @typedef {{ sha: string, subject: string, body: string }} CommitRecord
  */
 
-/** Windows resolves `pnpm.cmd`, `npm.cmd` and `codex.cmd` only through a shell. */
+/** Windows resolves `pnpm.cmd` and `npm.cmd` only through a shell. */
 export const USES_SHELL_FOR_PACKAGE_MANAGERS = process.platform === "win32";
 
 /**

@@ -20,9 +20,6 @@ export const TAG_FORMAT_PLACEHOLDER = Object.freeze({
 /** Tag of each package in monorepo mode: `widget-v1.2.0` (the release-please component tag). */
 export const DEFAULT_MONOREPO_TAG_FORMAT = `${TAG_FORMAT_PLACEHOLDER.component}-v${TAG_FORMAT_PLACEHOLDER.version}`;
 
-/** Placeholder of `changelog.audience` replaced by the package name in monorepo mode. */
-export const AUDIENCE_PACKAGE_PLACEHOLDER = "{name}";
-
 /**
  * Placeholder of `summary` replaced by the name of each released package in monorepo mode (next
  * to `{version}`, its version): a line with either one is printed once per released package.

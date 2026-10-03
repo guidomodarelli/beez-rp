@@ -1,12 +1,9 @@
 /**
- * Reads and releases CHANGELOG.md in the Keep a Changelog format.
+ * Generates CHANGELOG.md entries from commits and releases `[Unreleased]`.
  *
- * Every change adds its entries under `## [Unreleased]`, grouped by change
- * type (`### Added`, `### Changed`, `### Deprecated`, `### Removed`,
- * `### Fixed`, `### Security`). Releasing moves that block under
- * `## [X.Y.Z] - YYYY-MM-DD` and leaves an empty `## [Unreleased]` on top.
- * Headings of older releases without brackets (`## 0.6.0 - 2026-09-23`)
- * remain valid.
+ * A release lists the hash and original subject of every commit since the
+ * previous version, then moves the block under `## [X.Y.Z] - YYYY-MM-DD`.
+ * Published history, including legacy unbracketed headings, is preserved.
  *
  * @module changelog
  */
@@ -18,9 +15,34 @@ import {
   LINE_BREAK_PATTERN,
   RELEASE_HEADING_PATTERN,
   SECTION_HEADING_PATTERN,
+  COMMIT_SHORT_SHA_LENGTH,
+  CHANGELOG_TITLE,
   UNRELEASED_HEADING,
   UNRELEASED_LINE_PATTERN,
 } from "./constants/changelog.js";
+
+/**
+ * Replaces `[Unreleased]` with the exact commit list for the next version.
+ * Creates the block or document when missing and preserves released history.
+ *
+ * @param {string} changelog - Existing contents, or an empty string for a new file.
+ * @param {{ sha: string, subject: string }[]} commits - Commits since the previous release, newest first.
+ * @returns {string} Changelog with one hash and original subject per commit.
+ * @throws {Error} When there are no commits to release.
+ */
+export function fillUnreleasedFromCommits(changelog, commits) {
+  if (commits.length === 0) throw new Error("create-version: no commits available to generate CHANGELOG.md");
+  const body = commits.map((commit) => `- ${commit.sha.slice(0, COMMIT_SHORT_SHA_LENGTH)} ${commit.subject}`).join("\n");
+  const replacement = `${UNRELEASED_HEADING}\n\n${body}\n\n`;
+  const blocks = listBlocks(changelog);
+  const unreleased = blocks.find((block) => UNRELEASED_LINE_PATTERN.test(block.heading));
+  if (unreleased) {
+    return `${changelog.slice(0, unreleased.start)}${replacement}${changelog.slice(unreleased.end)}`;
+  }
+  const insertion = blocks[0]?.start ?? changelog.length;
+  const prefix = changelog.slice(0, insertion).trimEnd() || CHANGELOG_TITLE;
+  return `${prefix}\n\n${replacement}${changelog.slice(insertion)}`;
+}
 
 /**
  * @typedef {{ label: string, heading: string, start: number, bodyStart: number, end: number }} ChangelogBlock

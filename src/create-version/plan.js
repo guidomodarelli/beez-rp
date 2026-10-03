@@ -19,7 +19,7 @@
 
 import { parseArgs } from "node:util";
 
-import { CHANGE_TYPES, CHANGELOG_FILE, UNRELEASED_HEADING } from "../constants/changelog.js";
+import { CHANGELOG_FILE, UNRELEASED_HEADING } from "../constants/changelog.js";
 import {
   CREATE_VERSION_CONFIG_FILES,
   CREATE_VERSION_FLAG,
@@ -849,21 +849,6 @@ function planRelease(state, capabilities, { skipUnpublished = false, ignoreLocal
     return { mode: RELEASE_MODE.upToDate, steps: [], blockers: [], warnings: [], pendingVersion: null };
   }
 
-  if (state.changelog.unknownSections.length > 0) {
-    return {
-      mode: RELEASE_MODE.blocked,
-      steps: [],
-      blockers: [
-        {
-          title: `CHANGELOG.md ${UNRELEASED_HEADING} usa secciones no válidas: ${state.changelog.unknownSections.join(", ")}`,
-          details: [`Usá solo ${CHANGE_TYPES.map((type) => `### ${type}`).join(", ")} y volvé a correr ${commands.createVersion}.`],
-        },
-      ],
-      warnings: [],
-      pendingVersion: null,
-    };
-  }
-
   /** @type {ReleasePlanStep[]} */
   const steps = [];
   /** @type {string[]} */
@@ -894,13 +879,11 @@ function planRelease(state, capabilities, { skipUnpublished = false, ignoreLocal
     warnings.push(`No se pudo verificar si hay migraciones pendientes: ${state.migrations.reason ?? "motivo desconocido"}.`);
   }
 
-  if (state.changelog.entryCount === 0) {
-    steps.push({
-      id: RELEASE_STEP.generateChangelog,
-      title: `Completar ${UNRELEASED_HEADING} del CHANGELOG con Codex`,
-      detail: "Está vacío: Codex lo arma desde los commits sin publicar. Si no puede, el release se corta.",
-    });
-  }
+  steps.push({
+    id: RELEASE_STEP.generateChangelog,
+    title: `Generar ${UNRELEASED_HEADING} del CHANGELOG desde los commits`,
+    detail: "Una entrada por commit desde la versión anterior, con su hash y título original.",
+  });
 
   if (capabilities.checks) {
     steps.push({ id: RELEASE_STEP.runChecks, title: "Validar el proyecto", detail: "Corre los checks configurados antes de tocar la versión." });

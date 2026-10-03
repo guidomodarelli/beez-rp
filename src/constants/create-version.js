@@ -220,11 +220,6 @@ export const NPM_NOT_FOUND_CODE = "E404";
 /** npm dist-tag every stable release is published under. */
 export const NPM_DIST_TAG = "latest";
 
-/** Languages the Codex changelog prompt can request. */
-export const CHANGELOG_LANGUAGE = Object.freeze({
-  spanish: "es",
-  english: "en",
-});
 
 /** Command-line flags of `beez-rp create-version`. */
 export const CREATE_VERSION_FLAG = Object.freeze({

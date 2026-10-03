@@ -14,8 +14,7 @@ Proceso de release compartido por los proyectos Beez (beez-ui, TuTribu, Control 
 | --- | --- |
 | `beez-rp/versions` | `isStableReleaseVersion`, `parseReleaseVersion`, `bumpReleaseVersion`, `listNextVersions`, `listAllowedVersionsAfter`, `resolveRequestedVersion` (`--bump` / `--set-version`), `toReleaseTag`, `isReleaseCommitSubject`, `suggestReleaseType`, `suggestNextReleaseType` e `isPreMajorShiftActive` (con `preMajorShift`). |
 | `beez-rp/build-gate` | `decideBuild(previousVersion, currentVersion)` y `decideBuildForCheckout(repositoryRoot)` para el `ignoreCommand` de Vercel. |
-| `beez-rp/changelog` | Lectura y release del bloque `## [Unreleased]` de `CHANGELOG.md` (Keep a Changelog). |
-| `beez-rp/changelog-ai` | Prompt e invocación de Codex para completar `[Unreleased]` vacío. |
+| `beez-rp/changelog` | Generación desde commits, lectura y release del bloque `## [Unreleased]` de `CHANGELOG.md`. |
 | `beez-rp/guard-publish` | `decidePublishGuard(userAgent)` del `prepublishOnly` que bloquea publicaciones con pnpm, yarn o bun. |
 | `beez-rp/version-files` | `updateVersionMarkers(content, version)`: reescribe las versiones de las líneas marcadas de `versionFiles`. |
 | `beez-rp/package-manager` | `detectPackageManager(root)` (pnpm, bun, npm o yarn) y `describeProjectCommands(packageManager)`: los comandos que beez-rp corre y muestra en ese proyecto. |
@@ -90,7 +89,7 @@ El comando sale solo desde `main`, limpio y al día con origin (solo `CHANGELOG.
 
 1. Si `main` está atrás de origin, lo actualiza en fast-forward y termina (código de salida 0) sin tocar la versión ni los tags: hay que volver a correr `pnpm create-version`, que en un proceso nuevo carga `beez-rp.config.(m)js`, sus módulos y el diagnóstico desde el código actualizado.
 2. Aplica migraciones pendientes, si el proyecto tiene adaptador, después de pedir confirmación.
-3. Si `[Unreleased]` está vacío, lo completa Codex a partir de los commits sin publicar.
+3. Genera `[Unreleased]` con todos los commits desde la versión anterior: una entrada por commit, con hash corto y título original, del más nuevo al más viejo. Reemplaza el contenido previo del bloque y conserva el historial publicado; no usa IA.
 4. Corre los `checks` (por defecto `pnpm run ci`; ver abajo).
 5. Pide la versión, pasa `[Unreleased]` a `## [X.Y.Z] - AAAA-MM-DD` y crea el commit `X.Y.Z` con el tag anotado `vX.Y.Z`.
 6. Corre `prepare`, sube `main` y el tag con `git push --atomic` y corre `publish`.
@@ -105,7 +104,6 @@ Si un paso falla cuando `main` y el tag ya están en origin (recién pusheados o
 /** @type {import("beez-rp/create-version").CreateVersionConfig} */
 export default {
   projectName: "TuTribu",                       // banner; por defecto el name de package.json
-  changelog: { audience: "quien usa TuTribu", language: "es" }, // "en": entradas en inglés ASCII
   releaseTypeDescriptions: { patch: "…", minor: "…", major: "…" },
   preMajorShift: true,                          // en 0.x la sugerida baja un nivel (breaking → minor, feat → patch)
   publishedLabel: "en producción",              // banner: vX.Y.Z en producción
@@ -120,7 +118,7 @@ export default {
 };
 ```
 
-Solo `changelog.audience` es obligatorio. Sin `checks`, un release nuevo corre `<package manager> run ci` (`pnpm run ci`, `bun run ci`…) si el `package.json` declara el script `ci`; si no lo declara, el plan se bloquea para no publicar sin validar. `checks: false` saltea la validación a propósito (por ejemplo, cuando `prepare` ya corre lint, typecheck, tests y build) y una lista vacía no es válida. Los hooks (`migrations.check`, `migrations.apply`, `prepare`, `publish`) reciben `{ repositoryRoot, version, git, run, print, fail }`: `git` lee Git, `run("pnpm x")` corre un comando visible y devuelve su exit code, y `fail(mensaje, qué hacer)` corta el paso con una explicación. El config no necesita importar `beez-rp`.
+El CHANGELOG no requiere configuración: conserva el idioma original de cada commit. Sin `checks`, un release nuevo corre `<package manager> run ci` (`pnpm run ci`, `bun run ci`…) si el `package.json` declara el script `ci`; si no lo declara, el plan se bloquea para no publicar sin validar. `checks: false` saltea la validación a propósito (por ejemplo, cuando `prepare` ya corre lint, typecheck, tests y build) y una lista vacía no es válida. Los hooks (`migrations.check`, `migrations.apply`, `prepare`, `publish`) reciben `{ repositoryRoot, version, git, run, print, fail }`: `git` lee Git, `run("pnpm x")` corre un comando visible y devuelve su exit code, y `fail(mensaje, qué hacer)` corta el paso con una explicación. El config no necesita importar `beez-rp`.
 
 La versión sugerida sale de los commits: un breaking change (`feat!:` o `BREAKING CHANGE:`) sugiere major, un `feat` (o un asunto como "Add …") minor, y solo arreglos y mantenimiento patch. Con `preMajorShift: true`, mientras la versión es `0.x` la sugerida baja un nivel (breaking → minor, `feat` → patch), la convención de `0.x` que release-please aplica con `bump-minor-pre-major` y `bump-patch-for-minor-pre-major`: así un breaking change en `0.x` no sugiere saltar a `1.0.0`. Las descripciones por defecto de cada opción bajan con ella (patch: arreglos o funcionalidades nuevas compatibles; minor: cambio incompatible; major: salir de `0.x` a `1.0.0`); las que el proyecto definió en `releaseTypeDescriptions` se muestran tal cual. Es solo la sugerida (la estrella y `--accept-suggested`); se puede elegir cualquiera de las tres.
 
@@ -150,7 +148,6 @@ Con `packages` en el config, cada paquete publicable del monorepo tiene su propi
 
 ```js
 export default {
-  changelog: { audience: "quien consume {name}" }, // {name}: el paquete de cada CHANGELOG
   packages: "workspaces",                          // los workspaces del package.json raíz, o ["packages/*", "!packages/internal"]
   tagFormat: "{component}-v{version}",             // por defecto: widget-v1.2.0 ({component} es la carpeta; también {name})
   checks: ["bun run ci"],
@@ -162,7 +159,7 @@ export default {
 - Paquetes: los workspaces con `name` que no son `private`. Un paquete tiene cambios cuando un commit toca su carpeta, o la de un paquete `private` del que depende (directa o transitivamente, en cualquier campo de dependencias): los paquetes internos suelen ir bundleados en quien los usa, así que un cambio ahí sale con un release de cada consumidor. Los patrones son rutas relativas a la raíz: uno con `..` o absoluto corta el comando, igual que un `package.json` inválido en una carpeta que coincide con un patrón, o uno que no es `private` sin `name` o sin un `version` estable `X.Y.Z` (se indica la ruta y el motivo).
 - Último release de cada paquete: el último commit de `origin/main` que cambió el `version` de su `package.json`. Un paquete en `0.0.0` (el placeholder de release-please) nunca salió, salvo que su propio tag apunte a ese commit o que un commit `release: …` lo liste en `0.0.0`: todos sus commits van en su primer release, cuya sugerida no baja con `preMajorShift` (un `feat` da `0.1.0`).
 - Versión: por cada paquete con cambios pregunta patch, minor o major (la sugerida por sus commits lleva una estrella) o "No publicar ahora". `--bump` aplica el mismo tipo a todos y `--accept-suggested` toma la sugerida de cada uno; `--set-version` no aplica. Si una versión elegida no es mayor que la más alta publicada en npm (ya está publicada o movería `latest` hacia atrás), si dos paquetes elegidos darían el mismo tag (por ejemplo, dos carpetas `server` con `{component}`), si un tag no es un nombre válido para Git o ya existe en local, o si el `[Unreleased]` de un paquete elegido usa secciones no válidas, se corta sin escribir nada. Un `[Unreleased]` inválido en un paquete que no sale no bloquea a los demás: el plan (también con `--dry-run`) solo lo avisa.
-- `[Unreleased]` vacío: Codex lo completa en la carpeta del paquete, solo con sus commits.
+- CHANGELOG: se genera para cada paquete elegido con todos sus commits desde su versión anterior, incluyendo cambios en dependencias privadas empaquetadas. Reemplaza `[Unreleased]` y conserva las versiones publicadas.
 - Las versiones se eligen antes de aplicar migraciones: si no sale ningún paquete, no se toca la base de datos.
 - Los `CHANGELOG.md` de los paquetes pueden quedar sin commitear durante el plan, pero antes de escribir el commit de release el comando se corta sin tocar nada si hay algo staged que no es de los paquetes elegidos, o si el `CHANGELOG.md` de un paquete que no sale tiene cambios. Como en un solo paquete, `--ignore-local-changes` no aparta cambios en `.js`, `.mjs`, `.cjs`, `.ts`, `.json` (incluidos los `package.json` de los workspaces) ni `.npmrc`.
 - `summary`: una línea con `{version}` o `{name}` se muestra una vez por paquete publicado, con su versión y su nombre; las demás, una sola vez.

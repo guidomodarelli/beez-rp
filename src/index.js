@@ -3,7 +3,7 @@
  *
  * - `beez-rp/versions`: stable `X.Y.Z` rules; only the next patch, minor or major is allowed.
  * - `beez-rp/build-gate`: Vercel `ignoreCommand` decision built on those rules.
- * - `beez-rp/changelog` and `beez-rp/changelog-ai`: Keep a Changelog release and Codex fill-in.
+ * - `beez-rp/changelog`: release history generated from Git commits.
  * - `beez-rp/guard-publish`: `prepublishOnly` guard that blocks pnpm, yarn and bun publications.
  * - `beez-rp/package-manager`: detection of pnpm, bun, npm or yarn and the commands each one runs.
  * - `beez-rp/version-files`: rewrites the marked version lines of `versionFiles`.
@@ -16,7 +16,6 @@
 
 export * from "./build-gate.js";
 export * from "./changelog.js";
-export * from "./changelog-ai.js";
 export * from "./guard-publish.js";
 export * from "./package-manager.js";
 export * from "./version-files.js";
