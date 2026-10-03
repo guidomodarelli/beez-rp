@@ -90,7 +90,7 @@ import { checkRegistryAccess, lookupRegistryVersions, publishRegistryRelease, re
 import { prepareJsrVersionUpdates, readJsrManifest } from "./jsr.js";
 import { JSR_REGISTRY_PROVIDER, REGISTRY_LABELS } from "../constants/registry.js";
 import { CI_DISPATCH_STATUS, CI_GIT_HOOKS_OPTION, CI_VERCEL_DEPLOYMENT, CI_WORKFLOW_DIRECTORY, DISPATCH_CI_RELEASE_STEP, RELEASE_EXECUTION } from "../constants/ci-release.js";
-import { appendCiDispatch, assertCiWorkflowFile, buildCiWorkerPlan, chooseReleaseExecution, defaultCiReleaseConfig, readCiReleaseIdentity } from "./ci.js";
+import { appendCiDispatch, assertCiCompatiblePublication, assertCiWorkflowFile, assertResumeExecutionMatches, buildCiWorkerPlan, chooseReleaseExecution, defaultCiReleaseConfig, readCiReleaseIdentity } from "./ci.js";
 import { assertCiSetupFilesUnchanged, describeCiEnvironment, prepareCiReleaseMetadata, prepareCiSetupFiles } from "./ci-setup.js";
 import { createGithubWorkflowClient } from "./github-workflow.js";
 import { findLastRelease } from "./state.js";
@@ -1429,6 +1429,15 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   if (selection.setup && !config.ci) config = { ...config, ci: defaultCiReleaseConfig(repositoryRoot, config) };
   if (selection.setup && ciWasConfigured && config.ci && existsSync(path.join(repositoryRoot, CI_WORKFLOW_DIRECTORY, config.ci.workflow))) selection = { ...selection, setup: false };
   const isCiPreparation = selection.execution === RELEASE_EXECUTION.ci;
+  // Rejected before diagnosing or bumping: a pushed tag could never be published by a non-interactive worker.
+  if (isCiPreparation) {
+    try {
+      assertCiCompatiblePublication(config);
+    } catch (error) {
+      print(`${ICON.failure} ${error instanceof Error ? error.message : String(error)}${error instanceof ReleaseStepError ? ` ${error.hint}` : ""}`);
+      return FAILURE_EXIT_CODE;
+    }
+  }
   const workflowClient = isCiPreparation ? createGithubWorkflowClient(repositoryRoot) : undefined;
 
   const reader = createGitReader(repositoryRoot);
@@ -1443,7 +1452,9 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   try {
     state = await collectReleaseState({
       repositoryRoot,
-      trackNpm: !isCiPreparation && config.registry !== null,
+      // CI preparation still reads the registry: the plan must block (or require --skip-unpublished)
+      // when the last release is missing, before an immutable tag is pushed for the worker.
+      trackNpm: config.registry !== null,
       registrySelection: selectProjectRegistry(config),
       checkMigrations: !isCiPreparation && migrations ? () => migrations.check(createHookContext(repositoryRoot, reader, null)) : null,
       // The credentials are checked when the plan would publish to npm, and also when the npm lookup
@@ -1550,6 +1561,8 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   // A resume never rewrites versionFiles: before pushing or publishing, HEAD must already carry the pending version.
   if (plan.mode === RELEASE_MODE.resume && plan.pendingVersion) {
     try {
+      // The worker always runs the release committed for CI; local runs must resume in the committed mode.
+      if (!options.ciRelease) await assertResumeExecutionMatches(reader, plan.pendingVersion, selection.execution);
       await verifyReleasedVersionFiles({ repositoryRoot, config, reader, commands: config.commands }, plan.pendingVersion);
       if (config.publish === JSR_REGISTRY_PROVIDER && readJsrManifest(repositoryRoot, config.publication.configFile).manifest.version !== plan.pendingVersion) {
         throw new ReleaseStepError("El manifest JSR no coincide con la versión del release pendiente.", "Corregilo dentro del commit de release antes de subir o publicar; no se reescribió ningún archivo.");

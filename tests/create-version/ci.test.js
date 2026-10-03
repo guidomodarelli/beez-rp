@@ -10,7 +10,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { resolveCreateVersionConfig } from "../../src/create-version/config.js";
-import { chooseReleaseExecution } from "../../src/create-version/ci.js";
+import { assertCiCompatiblePublication, chooseReleaseExecution } from "../../src/create-version/ci.js";
 import { CiReleaseError } from "../../src/create-version/errors.js";
 import * as githubWorkflow from "../../src/create-version/github-workflow.js";
 import { parseReleaseArguments } from "../../src/create-version/plan.js";
@@ -401,4 +401,107 @@ describe("pinned CI worker through the real CLI", () => {
     expect(worker.status, worker.output).toBe(1);
     expect(existsSync(path.join(root, "release.log"))).toBe(false);
   }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+});
+
+/**
+ * Commits and pushes a new project configuration on top of the fixture's main.
+ * @param {string} root - Fixture checkout.
+ * @param {string} configSource - Content of beez-rp.config.mjs.
+ * @param {Record<string, string>} [extraFiles] - Additional files to commit, relative to the root.
+ * @returns {string} SHA of the pushed configuration commit.
+ */
+function commitProjectConfig(root, configSource, extraFiles = {}) {
+  writeFileSync(path.join(root, "beez-rp.config.mjs"), configSource);
+  for (const [relativePath, content] of Object.entries(extraFiles)) writeFileSync(path.join(root, relativePath), content);
+  runGit(["add", "-A"], root);
+  runGit(["commit", "--quiet", "-m", "chore: configure release"], root);
+  runGit(["push", "--quiet", "origin", "main"], root);
+  return runGit(["rev-parse", "HEAD"], root);
+}
+
+describe("CI preparation invariants shared with local releases", () => {
+  it("should block CI preparation while the last tagged release is missing from the registry unless it is skipped on purpose", async () => {
+    // Arrange
+    const registry = await startFixtureNpmRegistry({ users: { "fixture-owner-token": "fixture-owner" }, packages: { "fixture-ci-app": { maintainers: ["fixture-owner"], versions: ["1.2.2"] } } });
+    try {
+      const { root, remote } = createCiProject();
+      const manifest = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
+      const configuredSha = commitProjectConfig(root, "export default { checks: ['node checks.mjs'], publish: 'npm', ci: { workflow: 'release.yml' } };\n", { "package.json": JSON.stringify({ ...manifest, publishConfig: { registry: registry.registryUrl } }) });
+      const github = isolateGithub();
+      // Act
+      const blocked = await runCreateVersion({ repositoryRoot: root, argv: ["--bump", "patch"] });
+      const blockedHead = runGit(["rev-parse", "HEAD"], root);
+      const blockedTags = runGit(["tag", "--list"], remote);
+      const dispatchedWhileBlocked = vi.mocked(github.dispatch).mock.calls.length;
+      const skipped = await runCreateVersion({ repositoryRoot: root, argv: ["--bump", "patch", "--skip-unpublished"] });
+      // Assert
+      expect(blocked).toBe(1);
+      expect(blockedHead).toBe(configuredSha);
+      expect(blockedTags).toBe("v1.2.3");
+      expect(dispatchedWhileBlocked).toBe(0);
+      expect(skipped).toBe(0);
+      expect(JSON.parse(runGit(["show", "main:package.json"], remote)).version).toBe("1.2.4");
+      expect(github.dispatch).toHaveBeenCalledTimes(1);
+      expect(registry.publications).toEqual([]);
+    } finally {
+      await registry.close();
+    }
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+
+  it.each([
+    { createdWith: ["--local"], committedExecution: "local", mismatchedResume: [], matchingResume: ["--local"] },
+    { createdWith: [], committedExecution: "ci", mismatchedResume: ["--local"], matchingResume: [] },
+  ])("should keep the committed Vercel execution mode $committedExecution when resuming a release whose push failed", async ({ createdWith, committedExecution, mismatchedResume, matchingResume }) => {
+    // Arrange
+    const { root, remote } = createCiProject();
+    const configuredSha = commitProjectConfig(root, "export default { checks: ['node checks.mjs'], ci: { workflow: 'release.yml', deployment: 'vercel' } };\n");
+    const github = isolateGithub();
+    runGit(["config", "remote.origin.pushurl", path.join(root, "..", "missing-origin.git")], root);
+    const created = await runCreateVersion({ repositoryRoot: root, argv: [...createdWith, "--bump", "patch"] });
+    const releaseSha = runGit(["rev-parse", "HEAD"], root);
+    runGit(["config", "--unset", "remote.origin.pushurl"], root);
+    // Act
+    const mismatched = await runCreateVersion({ repositoryRoot: root, argv: mismatchedResume });
+    const remoteAfterMismatch = runGit(["rev-parse", "main"], remote);
+    const dispatchesAfterMismatch = vi.mocked(github.dispatch).mock.calls.length;
+    const resumed = await runCreateVersion({ repositoryRoot: root, argv: matchingResume });
+    // Assert
+    expect(created).toBe(1);
+    expect(JSON.parse(runGit(["show", "HEAD:.beez-rp/release.json"], root))).toEqual({ version: "1.2.4", execution: committedExecution });
+    expect(mismatched).toBe(1);
+    expect(remoteAfterMismatch).toBe(configuredSha);
+    expect(dispatchesAfterMismatch).toBe(0);
+    expect(resumed).toBe(0);
+    expect(runGit(["rev-parse", "main"], remote)).toBe(releaseSha);
+    expect(JSON.parse(runGit(["show", "main:.beez-rp/release.json"], remote))).toEqual({ version: "1.2.4", execution: committedExecution });
+    expect(github.dispatch).toHaveBeenCalledTimes(committedExecution === "ci" ? 1 : 0);
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+
+  it("should reject browser-authenticated JSR publication before creating the CI release commit or tag", async () => {
+    // Arrange
+    const { root, remote } = createCiProject();
+    const configuredSha = commitProjectConfig(root, "export default { checks: ['node checks.mjs'], publish: 'jsr', ci: { workflow: 'release.yml' } };\n", { "jsr.json": JSON.stringify({ name: "@fixture/ci-app", version: "1.2.3", exports: "./checks.mjs" }) });
+    const github = isolateGithub();
+    // Act
+    const status = await runCreateVersion({ repositoryRoot: root, argv: ["--bump", "patch"] });
+    // Assert
+    expect(status).toBe(1);
+    expect(runGit(["rev-parse", "HEAD"], root)).toBe(configuredSha);
+    expect(runGit(["rev-parse", "main"], remote)).toBe(configuredSha);
+    expect(runGit(["tag", "--list"], remote)).toBe("v1.2.3");
+    expect(github.preflight).not.toHaveBeenCalled();
+    expect(github.dispatch).not.toHaveBeenCalled();
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+
+  it("should leave OIDC and token registry authentication to the worker while rejecting browser authentication", () => {
+    // Arrange
+    const browserJsr = resolveCreateVersionConfig({ publish: "jsr" });
+    const oidcJsr = resolveCreateVersionConfig({ publish: "jsr", publication: { authentication: "oidc" } });
+    const tokenJsr = resolveCreateVersionConfig({ publish: "jsr", publication: { authentication: "token" } });
+    // Act and Assert
+    expect(() => assertCiCompatiblePublication(browserJsr)).toThrow(/no puede publicar desde GitHub Actions/);
+    expect(() => assertCiCompatiblePublication(oidcJsr)).not.toThrow();
+    expect(() => assertCiCompatiblePublication(tokenJsr)).not.toThrow();
+    expect(() => assertCiCompatiblePublication(resolveCreateVersionConfig({ publish: "npm" }))).not.toThrow();
+  });
 });

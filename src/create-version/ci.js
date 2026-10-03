@@ -8,14 +8,16 @@ import path from "node:path";
 import {
   CI_COMMIT_SHA_PATTERN, CI_RELEASE_ENVIRONMENT, CI_RUNTIME_ENVIRONMENT, CI_SETUP_CHOICE,
   CI_WORKFLOW_DIRECTORY, DEFAULT_CI_WORKFLOW, DISPATCH_CI_RELEASE_STEP, RELEASE_EXECUTION,
-  CI_MIGRATION_ENVIRONMENT_PATTERN, CI_VERCEL_CONFIG_FILE, CI_VERCEL_DEPLOYMENT,
+  CI_MIGRATION_ENVIRONMENT_PATTERN, CI_RELEASE_METADATA_FILE, CI_VERCEL_CONFIG_FILE, CI_VERCEL_DEPLOYMENT,
 } from "../constants/ci-release.js";
-import { MAIN_BRANCH, MIGRATION_STATUS, NPM_AUTH_STATUS, NPM_LOOKUP_STATUS, PACKAGE_MANIFEST_FILE, RELEASE_MODE, RELEASE_REMOTE, RELEASE_STEP, REMOTE_MAIN_REF } from "../constants/create-version.js";
+import { BROWSER_AUTHENTICATION } from "../constants/registry.js";
+import { CREATE_VERSION_FLAG, MAIN_BRANCH, MIGRATION_STATUS, NPM_AUTH_STATUS, NPM_LOOKUP_STATUS, PACKAGE_MANIFEST_FILE, RELEASE_MODE, RELEASE_REMOTE, RELEASE_STEP, REMOTE_MAIN_REF } from "../constants/create-version.js";
 import { RELEASE_TAG_PREFIX } from "../constants/versions.js";
 import { compareReleaseVersions, findHighestStableVersion, isStableReleaseVersion, toReleaseTag } from "../versions.js";
 import { print, select } from "../terminal-ui.js";
 import { ReleaseStepError } from "./errors.js";
 import { assertSafeCiPath } from "./ci-setup.js";
+import { isRegistryProvider } from "./registry-config.js";
 
 /**
  * Selects the execution location without ever dispatching again inside a CI runtime.
@@ -49,6 +51,47 @@ export async function chooseReleaseExecution(config, options) {
     defaultIndex: null,
   });
   return choice === CI_SETUP_CHOICE.cancel ? null : { execution: choice === CI_SETUP_CHOICE.configure ? RELEASE_EXECUTION.ci : RELEASE_EXECUTION.local, setup: choice === CI_SETUP_CHOICE.configure };
+}
+
+/**
+ * Rejects registry authentication that a non-interactive GitHub Actions worker can never complete,
+ * before the immutable release commit and tag exist. OIDC stays allowed: only the worker can prove it.
+ * @param {import("./config.js").ResolvedCreateVersionConfig} config - Project configuration.
+ * @returns {void}
+ * @throws {ReleaseStepError} When the registry publication authorizes from a browser.
+ */
+export function assertCiCompatiblePublication(config) {
+  if (!isRegistryProvider(config.publish) || config.publication?.authentication !== BROWSER_AUTHENTICATION) return;
+  throw new ReleaseStepError(
+    `${config.publish} con publication.authentication "${BROWSER_AUTHENTICATION}" no puede publicar desde GitHub Actions: el worker no es interactivo.`,
+    `Configurá publication.authentication "oidc" (con el paquete vinculado al repositorio) o "token" con su secret, o usá --${CREATE_VERSION_FLAG.local}; no se creó la versión ni el tag.`
+  );
+}
+
+/**
+ * Rejects resuming a pending release in a location different from the one committed in its
+ * release metadata: the Vercel build gate already decides from that committed mode.
+ * @param {import("./process.js").GitReader} reader - Git reader of the checkout whose HEAD is the release commit.
+ * @param {string} version - Version of the pending release.
+ * @param {"local" | "ci"} execution - Location selected for this run.
+ * @returns {Promise<void>}
+ * @throws {ReleaseStepError} When the committed metadata belongs to this version and names another location, or is unreadable.
+ */
+export async function assertResumeExecutionMatches(reader, version, execution) {
+  const committedMetadata = await reader.tryGit(["show", `HEAD:${CI_RELEASE_METADATA_FILE}`]);
+  if (committedMetadata === null) return;
+  let metadata;
+  try {
+    metadata = JSON.parse(committedMetadata);
+  } catch (error) {
+    throw new ReleaseStepError(`${CI_RELEASE_METADATA_FILE} del commit de release ${version} no es JSON válido.`, "Corregilo con un commit de release nuevo; no se subió ni publicó nada.", { cause: error });
+  }
+  if (metadata?.version !== version || metadata.execution === execution) return;
+  const resumeFlag = metadata.execution === RELEASE_EXECUTION.local ? `--${CREATE_VERSION_FLAG.local}` : `--${CREATE_VERSION_FLAG.ci} (o --${CREATE_VERSION_FLAG.retryCi} ${toReleaseTag(version)} si el tag ya está en origin)`;
+  throw new ReleaseStepError(
+    `El release ${version} se creó para ejecutarse en ${metadata.execution} (${CI_RELEASE_METADATA_FILE}), pero esta ejecución eligió ${execution}.`,
+    `Retomalo con ${resumeFlag}: el deploy de Vercel depende del modo commiteado; no se subió ni publicó nada.`
+  );
 }
 
 /**
