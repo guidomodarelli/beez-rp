@@ -8,16 +8,16 @@ import path from "node:path";
 import {
   CI_COMMIT_SHA_PATTERN, CI_RELEASE_ENVIRONMENT, CI_RUNTIME_DISABLED_VALUES, CI_RUNTIME_ENVIRONMENT, CI_SETUP_CHOICE,
   CI_WORKFLOW_DIRECTORY, DEFAULT_CI_WORKFLOW, DISPATCH_CI_RELEASE_STEP, RELEASE_EXECUTION,
-  CI_MIGRATION_ENVIRONMENT_PATTERN, CI_RELEASE_METADATA_FILE, CI_VERCEL_CONFIG_FILE, CI_VERCEL_DEPLOYMENT, CI_WORKFLOW_DRIFT_PREVIEW_LINES,
+  CI_MIGRATION_ENVIRONMENT_PATTERN, CI_NODE_VERSION_PIN_PATTERN, CI_RELEASE_METADATA_FILE, CI_VERCEL_CONFIG_FILE, CI_VERCEL_DEPLOYMENT, CI_WORKFLOW_DRIFT_PREVIEW_LINES,
 } from "../constants/ci-release.js";
-import { BROWSER_AUTHENTICATION, NPM_OIDC_MINIMUM_VERSION, NPM_REGISTRY_PROVIDER, OIDC_AUTHENTICATION } from "../constants/registry.js";
+import { BROWSER_AUTHENTICATION, NPM_OIDC_MINIMUM_NODE_VERSION, NPM_OIDC_MINIMUM_VERSION, NPM_REGISTRY_PROVIDER, OIDC_AUTHENTICATION } from "../constants/registry.js";
 import { PACKAGE_MANAGER } from "../constants/package-manager.js";
-import { CREATE_VERSION_FLAG, MAIN_BRANCH, MIGRATION_STATUS, NPM_AUTH_STATUS, NPM_LOOKUP_STATUS, PACKAGE_MANIFEST_FILE, RELEASE_MODE, RELEASE_REMOTE, RELEASE_STEP, REMOTE_MAIN_REF } from "../constants/create-version.js";
+import { CREATE_VERSION_FLAG, MAIN_BRANCH, MIGRATION_STATUS, NPM_AUTH_STATUS, NPM_LOOKUP_STATUS, PACKAGE_MANIFEST_FILE, PINNED_NODE_VERSION_FILE, RELEASE_MODE, RELEASE_REMOTE, RELEASE_STEP, REMOTE_MAIN_REF } from "../constants/create-version.js";
 import { RELEASE_TAG_PREFIX } from "../constants/versions.js";
 import { compareReleaseVersions, findHighestStableVersion, isStableReleaseVersion, parseReleaseVersion, toReleaseTag } from "../versions.js";
 import { print, select } from "../terminal-ui.js";
 import { ReleaseStepError } from "./errors.js";
-import { assertSafeCiPath, extractPinnedPackageManagerVersion, renderCiReleaseWorkflow } from "./ci-setup.js";
+import { assertSafeCiPath, describeCiNodeVersion, extractPinnedPackageManagerVersion, renderCiReleaseWorkflow } from "./ci-setup.js";
 import { runCaptured } from "./process.js";
 import { isRegistryProvider } from "./registry-config.js";
 
@@ -68,10 +68,11 @@ export async function chooseReleaseExecution(config, options) {
 }
 
 /**
- * Tells whether `npm install --global npm@<pin>` can install at least the given stable version.
+ * Tells whether a pin installed by the worker (`npm install --global npm@<pin>` or setup-node's
+ * Node.js version) can resolve to at least the given stable version.
  * A partial pin such as `11` resolves to the newest matching release, so it reaches any minimum
  * that shares its leading components; a prerelease pin is below its own `X.Y.Z` release.
- * @param {string} pinnedVersion - Version accepted by `CI_PACKAGE_MANAGER_VERSION_PATTERN`, such as `10.9.0`, `11` or `11.6.0-rc.1`.
+ * @param {string} pinnedVersion - Version accepted by `CI_PACKAGE_MANAGER_VERSION_PATTERN` or `CI_NODE_VERSION_PIN_PATTERN`, such as `10.9.0`, `11` or `11.6.0-rc.1`.
  * @param {string} minimumVersion - Stable `X.Y.Z` minimum.
  * @returns {boolean} True when the pinned npm can satisfy the minimum.
  */
@@ -86,16 +87,36 @@ function canPinnedVersionReach(pinnedVersion, minimumVersion) {
 }
 
 /**
+ * Rejects the Node.js runtime the generated workflow selects when it is provably older than npm
+ * trusted publishing requires, whatever package manager installs dependencies. Aliases such as
+ * `lts/*` cannot be resolved locally, so only the worker can judge them.
+ * @param {string} repositoryRoot - Project root whose `.nvmrc`, or the local Node.js major, selects the worker's runtime.
+ * @returns {void}
+ * @throws {ReleaseStepError} When the selected Node.js cannot reach the npm OIDC minimum.
+ */
+function assertCiNodeSupportsNpmOidc(repositoryRoot) {
+  const nodeVersion = describeCiNodeVersion(repositoryRoot);
+  if (!CI_NODE_VERSION_PIN_PATTERN.test(nodeVersion.version) || canPinnedVersionReach(nodeVersion.version, NPM_OIDC_MINIMUM_NODE_VERSION)) return;
+  const runtimeSource = nodeVersion.pinnedFile ? `${nodeVersion.pinnedFile} fija Node ${nodeVersion.version}` : `Sin ${PINNED_NODE_VERSION_FILE}, el workflow usa Node ${nodeVersion.version} (el major de este Node.js)`;
+  throw new ReleaseStepError(
+    `${runtimeSource} en el worker de CI, pero la publicación npm con publication.authentication "${OIDC_AUTHENTICATION}" requiere Node >= ${NPM_OIDC_MINIMUM_NODE_VERSION}; el worker la rechazaría después de subir el tag.`,
+    `Subí ${PINNED_NODE_VERSION_FILE} a ${NPM_OIDC_MINIMUM_NODE_VERSION} o superior en un commit propio (regenerá el workflow si ya existe), configurá publication.authentication "token" con su secret o usá --${CREATE_VERSION_FLAG.local}; no se creó, subió ni reenvió ningún release.`
+  );
+}
+
+/**
  * Rejects registry authentication that a non-interactive GitHub Actions worker can never complete,
  * before the immutable release commit and tag exist (or before a retry dispatches them again).
- * OIDC stays allowed, since only the worker can prove it, except when the npm version pinned by
- * `packageManager`, which the worker installs, cannot perform npm trusted publishing: the worker
- * would reject it only after the release was pushed. The pin is never raised silently because that
- * would change the client that runs `npm ci` against the committed lockfile.
+ * OIDC stays allowed, since only the worker can prove it, except when the runtime the generated
+ * workflow sets up provably cannot perform npm trusted publishing: the worker would reject it only
+ * after the release was pushed. The Node.js runtime is checked for every package manager. With npm,
+ * the version pinned by `packageManager` is checked too and never raised silently, because that
+ * would change the client that runs `npm ci` against the committed lockfile; other package managers
+ * get a capable npm installed by the workflow only for publication.
  * @param {import("./config.js").ResolvedCreateVersionConfig} config - Project configuration.
- * @param {string} repositoryRoot - Project root whose `package.json` pins the worker's package manager.
+ * @param {string} repositoryRoot - Project root whose `package.json` and `.nvmrc` pin the worker's runtime.
  * @returns {void}
- * @throws {ReleaseStepError} When the registry publication authorizes from a browser, or uses npm OIDC with an npm pin below the trusted publishing minimum.
+ * @throws {ReleaseStepError} When the registry publication authorizes from a browser, or uses npm OIDC with a Node.js or npm pin below the trusted publishing minimum.
  */
 export function assertCiCompatiblePublication(config, repositoryRoot) {
   if (!isRegistryProvider(config.publish)) return;
@@ -105,7 +126,9 @@ export function assertCiCompatiblePublication(config, repositoryRoot) {
       `Configurá publication.authentication "oidc" (con el paquete vinculado al repositorio) o "token" con su secret, o usá --${CREATE_VERSION_FLAG.local}; no se creó la versión ni el tag.`
     );
   }
-  if (config.publish !== NPM_REGISTRY_PROVIDER || config.publication?.authentication !== OIDC_AUTHENTICATION || config.commands.packageManager !== PACKAGE_MANAGER.npm) return;
+  if (config.publish !== NPM_REGISTRY_PROVIDER || config.publication?.authentication !== OIDC_AUTHENTICATION) return;
+  assertCiNodeSupportsNpmOidc(repositoryRoot);
+  if (config.commands.packageManager !== PACKAGE_MANAGER.npm) return;
   const manifestPath = path.join(repositoryRoot, PACKAGE_MANIFEST_FILE);
   if (!existsSync(manifestPath)) return;
   let manifest;

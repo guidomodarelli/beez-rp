@@ -13,10 +13,11 @@ import {
   CI_VERCEL_CONFIG_FILE, CI_VERCEL_GATE_FILE, CI_VERCEL_GATE_TEMPLATE, CI_VERCEL_IGNORE_PLACEHOLDER, CI_VERCEL_WORKER_WRITTEN_PATHS,
   CI_DENO_JSR_CLIENT, CI_DENO_VERSION,
 } from "../constants/ci-release.js";
-import { CREATE_VERSION_CONFIG_FILES, PACKAGE_MANIFEST_FILE, PINNED_NODE_VERSION_FILE } from "../constants/create-version.js";
+import { CREATE_VERSION_CONFIG_FILES, PACKAGE_MANIFEST_FILE, PINNED_NODE_VERSION_FILE, VERSION_PREFIX_PATTERN } from "../constants/create-version.js";
+import { PACKAGE_MANAGER } from "../constants/package-manager.js";
 import { ReleaseStepError } from "./errors.js";
 import { runCaptured } from "./process.js";
-import { GITHUB_REGISTRY_TOKEN_VARIABLE, JSR_REGISTRY_PROVIDER, OIDC_AUTHENTICATION, TOKEN_AUTHENTICATION } from "../constants/registry.js";
+import { GITHUB_REGISTRY_TOKEN_VARIABLE, JSR_REGISTRY_PROVIDER, NPM_OIDC_MINIMUM_VERSION, NPM_REGISTRY_PROVIDER, OIDC_AUTHENTICATION, TOKEN_AUTHENTICATION } from "../constants/registry.js";
 import { GIT_LITERAL_PATHSPEC_PREFIX } from "../constants/version-files.js";
 
 /**
@@ -57,6 +58,30 @@ export function extractPinnedPackageManagerVersion(manifest) {
 }
 
 /**
+ * Describes the Node.js version the generated workflow asks `actions/setup-node` for: the
+ * `.nvmrc` pin when the project has one, otherwise the major of the Node.js running setup.
+ * @param {string} repositoryRoot - Project checkout.
+ * @returns {{ pinnedFile: string | null, version: string }} Pin file the workflow reads (or `null`) and its version without a `v` prefix.
+ */
+export function describeCiNodeVersion(repositoryRoot) {
+  const pinnedPath = path.join(repositoryRoot, PINNED_NODE_VERSION_FILE);
+  if (!existsSync(pinnedPath)) return { pinnedFile: null, version: process.versions.node.split(".")[0] };
+  return { pinnedFile: PINNED_NODE_VERSION_FILE, version: readFileSync(pinnedPath, "utf8").trim().replace(VERSION_PREFIX_PATTERN, "") };
+}
+
+/**
+ * Tells whether the worker publishes to npm through OIDC with a package manager other than npm.
+ * Publication still runs the npm CLI, whose Node-bundled version predates trusted publishing on
+ * most runtimes, so the workflow installs a capable npm used only to publish: the project's own
+ * package manager keeps installing dependencies from its lockfile.
+ * @param {ResolvedCreateVersionConfig} config - Release hooks and package manager.
+ * @returns {boolean} True when the generated workflow must install the npm trusted publishing client.
+ */
+export function requiresCiNpmOidcClient(config) {
+  return config.publish === NPM_REGISTRY_PROVIDER && config.publication?.authentication === OIDC_AUTHENTICATION && config.commands.packageManager !== PACKAGE_MANAGER.npm;
+}
+
+/**
  * Renders a workflow that installs the project's package manager and finishes a pinned release.
  * @param {string} repositoryRoot - Project checkout.
  * @param {ResolvedCreateVersionConfig} config - Release hooks and package manager.
@@ -66,9 +91,11 @@ export function renderCiReleaseWorkflow(repositoryRoot, config) {
   const manifest = JSON.parse(readFileSync(path.join(repositoryRoot, PACKAGE_MANIFEST_FILE), "utf8"));
   const manager = config.commands.packageManager;
   const pinnedVersion = extractPinnedPackageManagerVersion(manifest);
+  const nodeVersion = describeCiNodeVersion(repositoryRoot);
   const nodeSetup = [
     "      - name: Configurar Node.js", "        uses: actions/setup-node@v4", "        with:",
-    existsSync(path.join(repositoryRoot, PINNED_NODE_VERSION_FILE)) ? `          node-version-file: '${PINNED_NODE_VERSION_FILE}'` : `          node-version: '${process.versions.node.split(".")[0]}'`,
+    nodeVersion.pinnedFile ? `          node-version-file: '${nodeVersion.pinnedFile}'` : `          node-version: '${nodeVersion.version}'`,
+    ...(requiresCiNpmOidcClient(config) ? ["      - name: Configurar npm para trusted publishing", `        run: npm install --global npm@${NPM_OIDC_MINIMUM_VERSION}`] : []),
   ].join("\n");
   let packageSetup;
   if (manager === "pnpm") {

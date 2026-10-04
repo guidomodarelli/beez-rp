@@ -45,6 +45,9 @@ export const CI_TEMPLATE_PLACEHOLDER = Object.freeze({ node: "__NODE_SETUP__", i
 /** Version pin formats safe to place in generated package manager setup commands. */
 export const CI_PACKAGE_MANAGER_VERSION_PATTERN = /^(?:pnpm|npm|yarn|bun)@([0-9]+(?:\.[0-9]+){0,2}(?:-[a-zA-Z0-9.-]+)?)(?:\+sha\d+\.[a-fA-F0-9]+)?$/u;
 
+/** Numeric Node.js pins (`22`, `22.14`, `v22.14.0` without its `v`) that setup-node resolves to a comparable release; aliases such as `lts/*` stay unverifiable. */
+export const CI_NODE_VERSION_PIN_PATTERN = /^[0-9]+(?:\.[0-9]+){0,2}(?:-[a-zA-Z0-9.-]+)?$/u;
+
 /** Maximum external diagnostic length displayed by the CLI, in characters. */
 export const CI_DIAGNOSTIC_LIMIT = 800;
 

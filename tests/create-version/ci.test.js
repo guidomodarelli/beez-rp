@@ -809,6 +809,84 @@ describe("CI preparation invariants shared with local releases", () => {
   });
 
   it.each([
+    { packageManager: "pnpm@10.12.1", nvmrc: "22.13", authentication: "oidc", accepted: false },
+    { packageManager: "pnpm@10.12.1", nvmrc: "v22.13.0\n", authentication: "oidc", accepted: false },
+    { packageManager: "yarn@4.9.2", nvmrc: "20", authentication: "oidc", accepted: false },
+    { packageManager: "bun@1.2.15", nvmrc: "22.14.0-rc.1", authentication: "oidc", accepted: false },
+    { packageManager: "npm@11.5.1", nvmrc: "22.13.1", authentication: "oidc", accepted: false },
+    { packageManager: "pnpm@10.12.1", nvmrc: "22", authentication: "oidc", accepted: true },
+    { packageManager: "pnpm@10.12.1", nvmrc: "22.14.0", authentication: "oidc", accepted: true },
+    { packageManager: "yarn@4.9.2", nvmrc: "24", authentication: "oidc", accepted: true },
+    { packageManager: "pnpm@10.12.1", nvmrc: "lts/*", authentication: "oidc", accepted: true },
+    { packageManager: "pnpm@10.12.1", nvmrc: null, authentication: "oidc", accepted: true },
+    { packageManager: "pnpm@10.12.1", nvmrc: "22.13", authentication: "token", accepted: true },
+  ])("should accept the worker's Node $nvmrc with $packageManager and $authentication npm publication only when it can publish: $accepted", async ({ packageManager, nvmrc, authentication, accepted }) => {
+    // Arrange
+    const root = createTemporaryDirectory("beez-rp-ci-node-pin-");
+    writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "fixture-node-pin", version: "1.0.0", packageManager }));
+    if (nvmrc !== null) writeFileSync(path.join(root, ".nvmrc"), nvmrc);
+    writeFileSync(path.join(root, "beez-rp.config.mjs"), `export default { publish: 'npm', publication: { authentication: '${authentication}' } };\n`);
+    const config = await loadCreateVersionConfig(root);
+    // Act
+    let rejectionMessage = null;
+    try {
+      assertCiCompatiblePublication(config, root);
+    } catch (error) {
+      rejectionMessage = error instanceof Error ? error.message : String(error);
+    }
+    // Assert
+    expect(rejectionMessage === null).toBe(accepted);
+    expect(/requiere Node >= 22\.14\.0/u.test(rejectionMessage ?? "")).toBe(!accepted);
+  });
+
+  it.each([
+    { packageManager: "pnpm@10.12.1", authentication: "oidc", installsNpmClient: true },
+    { packageManager: "yarn@4.9.2", authentication: "oidc", installsNpmClient: true },
+    { packageManager: "bun@1.2.15", authentication: "oidc", installsNpmClient: true },
+    { packageManager: "npm@11.5.1", authentication: "oidc", installsNpmClient: false },
+    { packageManager: "pnpm@10.12.1", authentication: "token", installsNpmClient: false },
+  ])("should install the npm trusted publishing client after Node.js for $packageManager with $authentication npm publication: $installsNpmClient", async ({ packageManager, authentication, installsNpmClient }) => {
+    // Arrange
+    const root = createTemporaryDirectory("beez-rp-ci-npm-client-");
+    writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "fixture-npm-client", version: "1.0.0", packageManager }));
+    writeFileSync(path.join(root, "beez-rp.config.mjs"), `export default { publish: 'npm', publication: { authentication: '${authentication}' }, ci: { workflow: 'release.yml' } };\n`);
+    const config = await loadCreateVersionConfig(root);
+    // Act
+    const workflow = renderCiReleaseWorkflow(root, config);
+    const stepNames = [...readWorkflowEnvironmentScopes(workflow).stepEnvironments.keys()];
+    // Assert
+    const clientStepIndex = stepNames.indexOf("Configurar npm para trusted publishing");
+    expect(clientStepIndex).toBe(installsNpmClient ? stepNames.indexOf("Configurar Node.js") + 1 : -1);
+    expect(workflow.includes("npm install --global npm@11.5.1")).toBe(installsNpmClient || packageManager === "npm@11.5.1");
+  });
+
+  it.each([
+    { argv: ["--bump", "patch"], regenerateWorkflow: false },
+    { argv: ["--setup-ci", "--bump", "patch"], regenerateWorkflow: true },
+  ])("should reject OIDC npm publication from a pnpm project whose .nvmrc predates trusted publishing before creating the CI release for $argv", async ({ argv, regenerateWorkflow }) => {
+    // Arrange
+    const registry = await startFixtureNpmRegistry({ users: { "fixture-owner-token": "fixture-owner" }, packages: { "fixture-ci-app": { maintainers: ["fixture-owner"], versions: ["1.2.3"] } } });
+    try {
+      const { root, remote } = createCiProject();
+      const manifest = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
+      const lowNodeSha = commitProjectConfig(root, "export default { checks: ['node checks.mjs'], publish: 'npm', publication: { authentication: 'oidc' }, ci: { workflow: 'release.yml' } };\n", { "package.json": JSON.stringify({ ...manifest, packageManager: "pnpm@10.12.1", publishConfig: { registry: registry.registryUrl } }), ".nvmrc": "22.13\n" });
+      const configuredSha = regenerateWorkflow ? commitGeneratedWorkflow(root) : lowNodeSha;
+      const github = isolateGithub();
+      // Act
+      const status = await runCreateVersion({ repositoryRoot: root, argv });
+      // Assert
+      expect(status).toBe(1);
+      expect(runGit(["rev-parse", "HEAD"], root)).toBe(configuredSha);
+      expect(runGit(["rev-parse", "main"], remote)).toBe(configuredSha);
+      expect(runGit(["tag", "--list"], remote)).toBe("v1.2.3");
+      expect(github.preflight).not.toHaveBeenCalled();
+      expect(github.dispatch).not.toHaveBeenCalled();
+    } finally {
+      await registry.close();
+    }
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+
+  it.each([
     { argv: ["--bump", "patch"], regenerateWorkflow: false },
     { argv: ["--setup-ci", "--bump", "patch"], regenerateWorkflow: true },
   ])("should reject OIDC npm publication pinned below the trusted publishing minimum before creating the CI release for $argv", async ({ argv, regenerateWorkflow }) => {
