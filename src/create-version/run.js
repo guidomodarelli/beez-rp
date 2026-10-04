@@ -1515,7 +1515,8 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
     try {
       const release = await readCiReleaseIdentity(reader, options.ciRelease, true);
       state.lastRelease = await findLastRelease(reader, "HEAD^");
-      // A retry of a failed deployment must not repeat a custom publisher that already finished: the registry cannot prove it.
+      // A retry of a failed deployment, or a duplicate dispatch queued behind the concurrency group, must not
+      // repeat a custom publisher that already finished: the registry cannot prove it.
       const completedPublication = config.ci && requiresCiPublicationHistory(config) ? await findCompletedCiPublication(config.ci.workflow, release) : null;
       if (completedPublication) print(`${ICON.info} El publisher personalizado de ${release.tag} ya terminó en el intento ${completedPublication.attempt} de ${completedPublication.url}; no se repite.`);
       plan = buildCiWorkerPlan(state, capabilities, release.version, config.ci?.deployment === CI_VERCEL_DEPLOYMENT, completedPublication !== null);

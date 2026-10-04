@@ -178,8 +178,11 @@ export const CI_RELEASE_RUN_TITLE_PREFIX = "beez-rp release";
 /** Generated workflow step that runs `--ci-release`; its success proves checks, preparation and publication finished. */
 export const CI_RELEASE_WORKER_STEP_NAME = "Checks y publicación del release";
 
-/** Environment the worker reads to query its own GitHub Actions history (set by Actions, plus the bound job token). */
-export const CI_ACTIONS_HISTORY_ENVIRONMENT = Object.freeze({ apiUrl: "GITHUB_API_URL", repository: "GITHUB_REPOSITORY", token: "GITHUB_TOKEN" });
+/**
+ * Environment the worker reads to query its own GitHub Actions history (set by Actions, plus the bound
+ * job token); the run id and attempt identify the attempt executing the worker, excluded from that history.
+ */
+export const CI_ACTIONS_HISTORY_ENVIRONMENT = Object.freeze({ apiUrl: "GITHUB_API_URL", repository: "GITHUB_REPOSITORY", token: "GITHUB_TOKEN", runId: "GITHUB_RUN_ID", runAttempt: "GITHUB_RUN_ATTEMPT" });
 
 /** GitHub REST API used when the runner does not provide `GITHUB_API_URL`. */
 export const CI_DEFAULT_GITHUB_API_URL = "https://api.github.com";
