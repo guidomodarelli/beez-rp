@@ -14,6 +14,12 @@ export const BUILD_DECISION = Object.freeze({
 /** Git revision whose `package.json` holds the previous version. */
 export const PREVIOUS_REVISION = "HEAD^";
 
+/** Git revision being deployed. */
+export const CURRENT_REVISION = "HEAD";
+
+/** `git diff --quiet` status reporting that the compared path changed between both revisions. */
+export const GIT_DIFF_CHANGED_STATUS = 1;
+
 /** Manifest that holds the version. */
 export const PACKAGE_MANIFEST_FILE = "package.json";
 

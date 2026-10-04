@@ -7,14 +7,22 @@
  * or build-metadata version skip the build. When the previous version cannot
  * be read there is nothing to compare, so a stable version builds.
  *
+ * A release delegated to CI is skipped only on the commit that changes
+ * `.beez-rp/release.json` against its first parent, the same commit scoping the
+ * generated `.beez-rp/vercel-ignore-build.mjs` applies (that template stays
+ * dependency-free, so it inlines the check). Later commits keep the metadata
+ * untouched and fall through to the version rule; without a readable parent
+ * (shallow clone) the release commit cannot be told apart, so the version rule
+ * decides as well.
+ *
  * @module build-gate
  */
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
-import { PACKAGE_MANIFEST_FILE, PREVIOUS_REVISION } from "./constants/build-gate.js";
+import { CURRENT_REVISION, GIT_DIFF_CHANGED_STATUS, PACKAGE_MANIFEST_FILE, PREVIOUS_REVISION } from "./constants/build-gate.js";
 import { isStableReleaseVersion, listAllowedVersionsAfter } from "./versions.js";
 import { CI_RELEASE_METADATA_FILE, RELEASE_EXECUTION } from "./constants/ci-release.js";
 
@@ -74,6 +82,24 @@ function readVersion(readManifest) {
 }
 
 /**
+ * Tells whether the deployed commit is the one that wrote the CI release
+ * metadata, comparing it against its first parent. A missing parent (first
+ * commit or shallow clone) or any Git failure counts as "not the release
+ * commit", so the caller falls back to the version rule.
+ *
+ * @param {string} repositoryRoot - Checkout whose `HEAD` is being deployed.
+ * @returns {boolean} Whether `HEAD` changed the release metadata.
+ */
+function isReleaseMetadataCommit(repositoryRoot) {
+  const metadataDiff = spawnSync("git", ["diff", "--quiet", PREVIOUS_REVISION, CURRENT_REVISION, "--", CI_RELEASE_METADATA_FILE], {
+    cwd: repositoryRoot,
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  return metadataDiff.status === GIT_DIFF_CHANGED_STATUS;
+}
+
+/**
  * Reads the previous and the current `package.json` versions of a Git
  * checkout and decides whether it is built.
  *
@@ -93,7 +119,8 @@ export function decideBuildForCheckout(repositoryRoot) {
   if (existsSync(metadataPath)) {
     try {
       const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
-      if (metadata.version === currentVersion && metadata.execution === RELEASE_EXECUTION.ci) return { shouldBuild: false, reason: `Release ${currentVersion} is delegated to CI. Production deployment waits for its checks. Skipping build.` };
+      const isDelegatedRelease = metadata.version === currentVersion && metadata.execution === RELEASE_EXECUTION.ci;
+      if (isDelegatedRelease && isReleaseMetadataCommit(repositoryRoot)) return { shouldBuild: false, reason: `Release ${currentVersion} is delegated to CI. Production deployment waits for its checks. Skipping build.` };
     } catch {
       return { shouldBuild: false, reason: "CI release metadata could not be read. Skipping build." };
     }

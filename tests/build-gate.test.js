@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { decideBuild } from "../src/build-gate.js";
 import {
@@ -72,6 +72,21 @@ function createRepositoryWithVersions(versions) {
 }
 
 /**
+ * Commits a release that bumps `package.json` and writes the CI release metadata in the same commit.
+ *
+ * @param {string} repositoryRoot - Repository.
+ * @param {string} version - Released `package.json` version.
+ * @param {{ version: string, execution: string }} metadata - Contents of `.beez-rp/release.json`.
+ */
+function commitRelease(repositoryRoot, version, metadata) {
+  mkdirSync(path.join(repositoryRoot, ".beez-rp"), { recursive: true });
+  writeFileSync(path.join(repositoryRoot, "package.json"), `${JSON.stringify({ name: "fixture", version }, null, 2)}\n`);
+  writeFileSync(path.join(repositoryRoot, ".beez-rp/release.json"), JSON.stringify(metadata));
+  runGit(["add", "-A"], repositoryRoot);
+  runGit(["commit", "--quiet", "-m", `chore(release): ${version}`], repositoryRoot);
+}
+
+/**
  * Runs `beez-rp ignore-build` in a checkout.
  *
  * @param {string} repositoryRoot - Checkout being deployed.
@@ -125,16 +140,46 @@ describe("build decision", () => {
 
 describe("beez-rp ignore-build", () => {
   it("should defer only the exact CI release while keeping ordinary local build decisions", () => {
+    // Arrange, Act and Assert
+    for (const { metadata, expectedDecision } of [
+      { metadata: { version: "1.2.4", execution: "ci" }, expectedDecision: "SKIP" },
+      { metadata: { version: "1.2.4", execution: "local" }, expectedDecision: "BUILD" },
+      { metadata: { version: "1.2.3", execution: "ci" }, expectedDecision: "BUILD" },
+    ]) {
+      const root = createRepositoryWithVersions(["1.2.3"]);
+      commitRelease(root, "1.2.4", metadata);
+      expect(runCli(root).lines.at(-1)).toBe(expectedDecision);
+    }
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+
+  it("should skip only the commit that wrote the CI release metadata and let later commits reach the version rule", () => {
     // Arrange
-    const root = createRepositoryWithVersions(["1.2.3", "1.2.4"]);
-    mkdirSync(path.join(root, ".beez-rp"));
-    // Act and Assert
-    writeFileSync(path.join(root, ".beez-rp/release.json"), JSON.stringify({ version: "1.2.4", execution: "ci" }));
-    expect(runCli(root).lines.at(-1)).toBe("SKIP");
-    writeFileSync(path.join(root, ".beez-rp/release.json"), JSON.stringify({ version: "1.2.4", execution: "local" }));
-    expect(runCli(root).lines.at(-1)).toBe("BUILD");
-    writeFileSync(path.join(root, ".beez-rp/release.json"), JSON.stringify({ version: "1.2.3", execution: "ci" }));
-    expect(runCli(root).lines.at(-1)).toBe("BUILD");
+    const root = createRepositoryWithVersions(["1.2.3"]);
+    commitRelease(root, "1.2.4", { version: "1.2.4", execution: "ci" });
+    // Act
+    const releaseGate = runCli(root);
+    writeFileSync(path.join(root, "feature.txt"), "Follow-up change without a version bump\n");
+    runGit(["add", "feature.txt"], root);
+    runGit(["commit", "--quiet", "-m", "fix: follow-up change"], root);
+    const laterCommitGate = runCli(root);
+    // Assert
+    expect(releaseGate.lines).toEqual([expect.stringContaining("delegated to CI"), "SKIP"]);
+    expect(laterCommitGate.exitCode).toBe(0);
+    expect(laterCommitGate.lines).toEqual(["Version did not change. Skipping build.", "SKIP"]);
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+
+  it("should let the version rule decide a CI release deployed from a shallow clone without its parent", () => {
+    // Arrange
+    const root = createRepositoryWithVersions(["1.2.3"]);
+    commitRelease(root, "1.2.4", { version: "1.2.4", execution: "ci" });
+    const shallowCheckout = path.join(mkdtempSync(path.join(os.tmpdir(), "beez-rp-gate-shallow-")), "checkout");
+    temporaryDirectories.push(path.dirname(shallowCheckout));
+    runGit(["clone", "--quiet", "--depth", "1", pathToFileURL(root).href, shallowCheckout], root);
+    // Act
+    const { exitCode, lines } = runCli(shallowCheckout);
+    // Assert
+    expect(exitCode).toBe(0);
+    expect(lines).toEqual(["Previous package version could not be compared. Building stable 1.2.4.", "BUILD"]);
   }, GIT_FIXTURE_TEST_TIMEOUT_MS);
 
   it(
