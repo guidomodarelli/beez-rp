@@ -7,7 +7,7 @@ import {
   CI_DIAGNOSTIC_LIMIT, CI_DISPATCH_STATUS, CI_FAILURE_CODE, CI_GITHUB_TOKEN_VARIABLES, CI_ORGANIZATION_BINDING_PAGE_SIZE,
   CI_ORGANIZATION_BINDING_RESOURCE, CI_RELEASE_RUN_TITLE_PREFIX, CI_RUN_LOOKUP_LIMIT, CI_WORKFLOW_DIRECTORY,
 } from "../constants/ci-release.js";
-import { GITHUB_REPOSITORY_PATTERN, MAIN_BRANCH, RELEASE_REMOTE } from "../constants/create-version.js";
+import { GITHUB_REPOSITORY_PATTERN, MAIN_BRANCH, RELEASE_REMOTE, REMOTE_MAIN_REF } from "../constants/create-version.js";
 import { CiReleaseError } from "./errors.js";
 import { runCaptured } from "./process.js";
 
@@ -106,6 +106,23 @@ export function createGithubWorkflowClient(repositoryRoot, capture = runCaptured
     if (contained.status !== 0) throw new CiReleaseError(CI_FAILURE_CODE.preflight, `${release.tag} no contiene ${workflowPath}; el release solo se ejecuta con el workflow de su propio tag, no con el de ${MAIN_BRANCH}.`, `No se envió ninguna ejecución. Publicá ${release.tag} con --local, o traé el tag con git fetch ${RELEASE_REMOTE} tag ${release.tag} si falta localmente y volvé a correr ${retryCommand}.`);
   }
 
+  /**
+   * Requires the workflow file to exist on the default branch as well: GitHub only triggers
+   * `workflow_dispatch` for workflows present on the default branch, even when `--ref <tag>` selects
+   * the definition stored in the tag, so a workflow renamed or deleted on `main` after the release can
+   * no longer be dispatched under its old name. Reads `origin/main` as last fetched by the release flow.
+   * @param {string} workflow - Workflow filename.
+   * @param {CiReleaseIdentity} release - Existing immutable release.
+   * @param {string} retryCommand - Recovery command preserving the tag.
+   * @returns {Promise<void>} Resolves when the default branch carries the workflow.
+   * @throws {CiReleaseError} When the default branch has no such workflow; nothing is dispatched.
+   */
+  async function assertWorkflowOnDefaultBranch(workflow, release, retryCommand) {
+    const workflowPath = `${CI_WORKFLOW_DIRECTORY}/${workflow}`;
+    const contained = await capture("git", ["cat-file", "-e", `refs/remotes/${REMOTE_MAIN_REF}:${workflowPath}`], { cwd: repositoryRoot });
+    if (contained.status !== 0) throw new CiReleaseError(CI_FAILURE_CODE.preflight, `${REMOTE_MAIN_REF} no contiene ${workflowPath}: GitHub solo dispara workflow_dispatch para workflows que existen en la rama por defecto (${MAIN_BRANCH}), aunque ${release.tag} conserve el suyo.`, `No se envió ninguna ejecución. Restaurá ${workflowPath} con ese nombre en ${MAIN_BRANCH} y volvé a correr ${retryCommand}, o publicá ${release.tag} con --local.`);
+  }
+
   return {
     /**
      * Checks GitHub CLI, authentication, default branch and configured worker credentials.
@@ -159,6 +176,7 @@ export function createGithubWorkflowClient(repositoryRoot, capture = runCaptured
       const existing = await findAcceptedRun(workflow, release, retryCommand);
       if (existing) return { status: CI_DISPATCH_STATUS.existing, url: existing.url };
       await assertWorkflowInReleaseTag(workflow, release, retryCommand);
+      await assertWorkflowOnDefaultBranch(workflow, release, retryCommand);
       const dispatched = await github(["workflow", "run", workflow, "--repo", repository, "--ref", release.tag, "-f", `version=${release.version}`, "-f", `tag=${release.tag}`, "-f", `sha=${release.sha}`]);
       if (dispatched.status !== 0) {
         let accepted = null;

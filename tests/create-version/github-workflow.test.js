@@ -10,10 +10,10 @@ afterEach(() => vi.unstubAllEnvs());
 
 /**
  * Simulates external CLI responses while retaining a publication request counter.
- * @param {{ runStatus?: string, conclusion?: string | null, dispatchExit?: number, lookupExit?: number, acceptedAfterDispatch?: boolean, secrets?: string[], variables?: string[], inOrganization?: boolean, organizationSecrets?: string[], organizationVariables?: string[], organizationExit?: number, diagnostic?: string, workflowInTag?: boolean }} [options] - External service outcomes.
+ * @param {{ runStatus?: string, conclusion?: string | null, dispatchExit?: number, lookupExit?: number, acceptedAfterDispatch?: boolean, secrets?: string[], variables?: string[], inOrganization?: boolean, organizationSecrets?: string[], organizationVariables?: string[], organizationExit?: number, diagnostic?: string, workflowInTag?: boolean, workflowOnDefaultBranch?: boolean }} [options] - External service outcomes.
  * @returns {{ client: import("../../src/create-version/github-workflow.js").GithubWorkflowClient, submissions: () => number, organizationLookups: () => number, dispatchedArguments: () => string[][] }} Real adapter and observed requests.
  */
-function createGithubFixture({ runStatus, conclusion = null, dispatchExit = 0, lookupExit = 0, acceptedAfterDispatch = false, secrets = [], variables = [], inOrganization = false, organizationSecrets = [], organizationVariables = [], organizationExit = 0, diagnostic = "Upstream unavailable", workflowInTag = true } = {}) {
+function createGithubFixture({ runStatus, conclusion = null, dispatchExit = 0, lookupExit = 0, acceptedAfterDispatch = false, secrets = [], variables = [], inOrganization = false, organizationSecrets = [], organizationVariables = [], organizationExit = 0, diagnostic = "Upstream unavailable", workflowInTag = true, workflowOnDefaultBranch = true } = {}) {
   let submissions = 0;
   /** @type {string[][]} */
   const dispatched = [];
@@ -21,7 +21,10 @@ function createGithubFixture({ runStatus, conclusion = null, dispatchExit = 0, l
   const releaseSha = "a".repeat(40);
   /** @type {typeof import("../../src/create-version/process.js").runCaptured} */
   const capture = async (command, args) => {
-    if (command === "git" && args[0] === "cat-file") return { status: workflowInTag ? 0 : 1, stdout: "", stderr: workflowInTag ? "" : "fatal: path does not exist" };
+    if (command === "git" && args[0] === "cat-file") {
+      const contained = args[2].startsWith("refs/tags/") ? workflowInTag : workflowOnDefaultBranch;
+      return { status: contained ? 0 : 1, stdout: "", stderr: contained ? "" : "fatal: path does not exist" };
+    }
     if (command === "git") return { status: 0, stdout: "git@github.com:fixture/app.git", stderr: "" };
     if (args[0] === "repo") return { status: 0, stdout: JSON.stringify({ defaultBranchRef: { name: "main" }, isInOrganization: inOrganization }), stderr: "" };
     if (args[0] === "secret" || args[0] === "variable") return { status: 0, stdout: JSON.stringify((args[0] === "secret" ? secrets : variables).map((name) => ({ name }))), stderr: "" };
@@ -60,6 +63,17 @@ describe("GitHub workflow acceptance", () => {
     const result = client.dispatch("release.yml", { version: "1.2.4", tag: "v1.2.4", sha: "a".repeat(40) }, "pnpm cv --retry-ci v1.2.4");
     // Assert
     await expect(result).rejects.toMatchObject({ code: "ci-preflight-failed", message: expect.stringContaining("v1.2.4 no contiene .github/workflows/release.yml"), hint: expect.stringContaining("--retry-ci v1.2.4") });
+    expect(submissions()).toBe(0);
+  });
+
+  it("should not dispatch a release whose workflow no longer exists on the default branch", async () => {
+    // Arrange
+    const { client, submissions } = createGithubFixture({ workflowOnDefaultBranch: false });
+    await client.preflight("release.yml", [], []);
+    // Act
+    const result = client.dispatch("release.yml", { version: "1.2.4", tag: "v1.2.4", sha: "a".repeat(40) }, "pnpm cv --retry-ci v1.2.4");
+    // Assert
+    await expect(result).rejects.toMatchObject({ code: "ci-preflight-failed", message: expect.stringContaining("origin/main no contiene .github/workflows/release.yml"), hint: expect.stringContaining("Restaurá .github/workflows/release.yml con ese nombre en main") });
     expect(submissions()).toBe(0);
   });
 
