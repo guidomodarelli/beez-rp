@@ -106,6 +106,12 @@ export const CI_DISPATCH_STATUS = Object.freeze({ submitted: "submitted", existi
 /** Early-build metadata; its version and the commit that changes it scope the decision to exactly one release commit. */
 export const CI_RELEASE_METADATA_FILE = ".beez-rp/release.json";
 
+/**
+ * Git trailer of the release commit naming where it was prepared (`local` or `ci`), so a resume after a
+ * failed push keeps that location for every release, not only those whose Vercel metadata records it.
+ */
+export const RELEASE_EXECUTION_TRAILER = "Beez-Rp-Execution";
+
 /** Vercel project configuration used to offer deployment setup for applications. */
 export const CI_VERCEL_CONFIG_FILE = "vercel.json";
 

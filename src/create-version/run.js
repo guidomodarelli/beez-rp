@@ -93,6 +93,7 @@ import { CI_DISPATCH_STATUS, CI_GIT_HOOKS_OPTION, CI_VERCEL_DEPLOYMENT, CI_WORKF
 import { appendCiDispatch, assertCiCompatiblePublication, assertCiInstallLockfileCommitted, assertCiWorkflowFile, assertGeneratedCiWorkflowCurrent, assertResumeExecutionMatches, buildCiWorkerPlan, chooseReleaseExecution, defaultCiReleaseConfig, readCiReleaseIdentity, readCommittedCiWorkflow } from "./ci.js";
 import { assertCiSetupFilesUnchanged, describeCiEnvironment, prepareCiReleaseMetadata, prepareCiSetupFiles } from "./ci-setup.js";
 import { createGithubWorkflowClient } from "./github-workflow.js";
+import { formatReleaseExecutionTrailer } from "./release-execution.js";
 import { findLastRelease } from "./state.js";
 
 /**
@@ -866,10 +867,11 @@ export async function assertReleaseFilesMatchHead(context, filePaths) {
  * @param {ReleaseFileUpdate[]} releaseFiles - Files of the release commit, with their bytes before the release.
  * @param {string} subject - Subject of the release commit.
  * @param {readonly import("./changelog.js").PreservedReleaseFile[]} [preservedFiles] - Manually maintained files to stage without rewriting or restoring their bytes.
+ * @param {readonly string[]} [trailers] - Trailer lines (`Key: value`) appended as the last paragraph of the commit message.
  * @returns {Promise<void>}
  * @throws {ReleaseStepError} When writing, staging or committing fails, or the commit differs from the prepared tree.
  */
-export async function commitReleaseFiles(context, releaseFiles, subject, preservedFiles = []) {
+export async function commitReleaseFiles(context, releaseFiles, subject, preservedFiles = [], trailers = []) {
   assertPreservedFilesUnchanged(context, preservedFiles);
   // The index before staging, so a rollback puts it back exactly (a CHANGELOG.md the user staged stays staged).
   const indexTree = await context.reader.tryGit(["write-tree"]);
@@ -889,7 +891,8 @@ export async function commitReleaseFiles(context, releaseFiles, subject, preserv
     await runGitStep(context, ["add", "--", ...[...releaseFiles, ...preservedFiles].map(({ filePath }) => toLiteralPathspec(filePath))], "No se pudo stagear package.json, CHANGELOG.md y versionFiles", "Revisá git status.");
     // What the commit must hold: a hook that changes or stages anything else makes it differ.
     preparedTree = await context.reader.git(["write-tree"]);
-    await runGitStep(context, ["commit", "--quiet", "-m", subject], "El commit de versión falló", "Corregí el error (por ejemplo, un hook pre-commit que lo rechaza).");
+    const messageArguments = trailers.length > 0 ? ["-m", subject, "-m", trailers.join("\n")] : ["-m", subject];
+    await runGitStep(context, ["commit", "--quiet", ...messageArguments], "El commit de versión falló", "Corregí el error (por ejemplo, un hook pre-commit que lo rechaza).");
   } catch (error) {
     const failure =
       error instanceof ReleaseStepError
@@ -970,15 +973,18 @@ async function bumpVersionStep(context) {
 
   assertCiSetupFilesUnchanged(context.repositoryRoot, context.ciSetupFiles ?? []);
 
+  const execution = context.execution ?? RELEASE_EXECUTION.local;
   /** @type {ReleaseFileUpdate[]} */
   const releaseFiles = [
     { filePath: PACKAGE_MANIFEST_FILE, originalBytes: manifest.originalBytes, content: rewriteManifestVersion(context, PACKAGE_MANIFEST_FILE, manifest.text, nextRelease.version) },
     ...(await prepareVersionFileUpdates(context, context.config.versionFiles, nextRelease.version)),
     ...(context.config.publish === JSR_REGISTRY_PROVIDER ? await prepareJsrVersionUpdates(context, context.repositoryRoot, context.config.publication, nextRelease.version) : []),
     ...(context.ciSetupFiles ?? []),
-    ...(context.config.ci?.deployment === CI_VERCEL_DEPLOYMENT ? [prepareCiReleaseMetadata(context.repositoryRoot, nextRelease.version, context.execution ?? RELEASE_EXECUTION.local)] : []),
+    ...(context.config.ci?.deployment === CI_VERCEL_DEPLOYMENT ? [prepareCiReleaseMetadata(context.repositoryRoot, nextRelease.version, execution)] : []),
   ];
-  await commitReleaseFiles(context, releaseFiles, nextRelease.version, context.changelogFiles);
+  // Every release of a CI-capable project records where it was prepared, so a resume after a failed push cannot switch modes.
+  const executionTrailers = context.config.ci || execution === RELEASE_EXECUTION.ci ? [formatReleaseExecutionTrailer(execution)] : [];
+  await commitReleaseFiles(context, releaseFiles, nextRelease.version, context.changelogFiles, executionTrailers);
 
   const tag = toReleaseTag(nextRelease.version);
   await runGitStep(context, ["tag", "-a", tag, "-m", nextRelease.version], `No se pudo crear el tag ${tag}`, `Si ya existe, revisalo con git show ${tag}.`);

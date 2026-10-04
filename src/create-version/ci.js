@@ -8,7 +8,7 @@ import path from "node:path";
 import {
   CI_COMMIT_SHA_PATTERN, CI_RELEASE_ENVIRONMENT, CI_RUNTIME_DISABLED_VALUES, CI_RUNTIME_ENVIRONMENT, CI_SETUP_CHOICE,
   CI_WORKFLOW_DIRECTORY, DEFAULT_CI_WORKFLOW, DISPATCH_CI_RELEASE_STEP, RELEASE_EXECUTION,
-  CI_MIGRATION_ENVIRONMENT_PATTERN, CI_NODE_VERSION_PIN_PATTERN, CI_RELEASE_METADATA_FILE, CI_VERCEL_CONFIG_FILE, CI_VERCEL_DEPLOYMENT, CI_WORKFLOW_DRIFT_PREVIEW_LINES,
+  CI_MIGRATION_ENVIRONMENT_PATTERN, CI_NODE_VERSION_PIN_PATTERN, CI_RELEASE_METADATA_FILE, CI_VERCEL_CONFIG_FILE, RELEASE_EXECUTION_TRAILER, CI_VERCEL_DEPLOYMENT, CI_WORKFLOW_DRIFT_PREVIEW_LINES,
 } from "../constants/ci-release.js";
 import { BROWSER_AUTHENTICATION, NPM_OIDC_MINIMUM_NODE_VERSION, NPM_OIDC_MINIMUM_VERSION, NPM_REGISTRY_PROVIDER, OIDC_AUTHENTICATION } from "../constants/registry.js";
 import { LOCKFILE_PACKAGE_MANAGERS, PACKAGE_MANAGER } from "../constants/package-manager.js";
@@ -19,6 +19,7 @@ import { print, select } from "../terminal-ui.js";
 import { ReleaseStepError } from "./errors.js";
 import { assertSafeCiPath, describeCiNodeVersion, extractPinnedPackageManagerVersion, renderCiReleaseWorkflow } from "./ci-setup.js";
 import { runCaptured } from "./process.js";
+import { readReleaseExecutionTrailer } from "./release-execution.js";
 import { isRegistryProvider } from "./registry-config.js";
 import { findNpmOidcRegistryProblem, resolveRegistry, selectProjectRegistry } from "./registry.js";
 
@@ -189,28 +190,34 @@ async function assertCiNpmOidcRegistry(config, manifest, repositoryRoot) {
 }
 
 /**
- * Rejects resuming a pending release in a location different from the one committed in its
- * release metadata: the Vercel build gate already decides from that committed mode.
+ * Rejects resuming a pending release in a location different from the one it was prepared in: the
+ * Vercel build gate decides from the committed release metadata, and a CI preparation skipped the
+ * checks and migrations that a local resume (which only pushes and publishes) would never run.
+ * The Vercel metadata wins when it names this version; otherwise the release commit trailer decides.
+ * Release commits without either mark (created before they existed) are accepted as before.
  * @param {import("./process.js").GitReader} reader - Git reader of the checkout whose HEAD is the release commit.
  * @param {string} version - Version of the pending release.
  * @param {"local" | "ci"} execution - Location selected for this run.
  * @returns {Promise<void>}
- * @throws {ReleaseStepError} When the committed metadata belongs to this version and names another location, or is unreadable.
+ * @throws {ReleaseStepError} When the committed mark belongs to this version and names another location, or is unreadable.
  */
 export async function assertResumeExecutionMatches(reader, version, execution) {
   const committedMetadata = await reader.tryGit(["show", `HEAD:${CI_RELEASE_METADATA_FILE}`]);
-  if (committedMetadata === null) return;
-  let metadata;
-  try {
-    metadata = JSON.parse(committedMetadata);
-  } catch (error) {
-    throw new ReleaseStepError(`${CI_RELEASE_METADATA_FILE} del commit de release ${version} no es JSON válido.`, "Corregilo con un commit de release nuevo; no se subió ni publicó nada.", { cause: error });
+  let metadata = null;
+  if (committedMetadata !== null) {
+    try {
+      metadata = JSON.parse(committedMetadata);
+    } catch (error) {
+      throw new ReleaseStepError(`${CI_RELEASE_METADATA_FILE} del commit de release ${version} no es JSON válido.`, "Corregilo con un commit de release nuevo; no se subió ni publicó nada.", { cause: error });
+    }
   }
-  if (metadata?.version !== version || metadata.execution === execution) return;
-  const resumeFlag = metadata.execution === RELEASE_EXECUTION.local ? `--${CREATE_VERSION_FLAG.local}` : `--${CREATE_VERSION_FLAG.ci} (o --${CREATE_VERSION_FLAG.retryCi} ${toReleaseTag(version)} si el tag ya está en origin)`;
+  const recordedInMetadata = metadata?.version === version;
+  const committedExecution = recordedInMetadata ? metadata.execution : await readReleaseExecutionTrailer(reader, version);
+  if (committedExecution === null || committedExecution === execution) return;
+  const resumeFlag = committedExecution === RELEASE_EXECUTION.local ? `--${CREATE_VERSION_FLAG.local}` : `--${CREATE_VERSION_FLAG.ci} (o --${CREATE_VERSION_FLAG.retryCi} ${toReleaseTag(version)} si el tag ya está en origin)`;
   throw new ReleaseStepError(
-    `El release ${version} se creó para ejecutarse en ${metadata.execution} (${CI_RELEASE_METADATA_FILE}), pero esta ejecución eligió ${execution}.`,
-    `Retomalo con ${resumeFlag}: el deploy de Vercel depende del modo commiteado; no se subió ni publicó nada.`
+    `El release ${version} se creó para ejecutarse en ${committedExecution} (${recordedInMetadata ? CI_RELEASE_METADATA_FILE : `trailer ${RELEASE_EXECUTION_TRAILER} del commit`}), pero esta ejecución eligió ${execution}.`,
+    `Retomalo con ${resumeFlag}: los checks, las migraciones y el deploy dependen del modo con que se preparó el commit; no se subió ni publicó nada.`
   );
 }
 

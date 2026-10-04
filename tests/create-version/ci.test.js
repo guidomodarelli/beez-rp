@@ -10,7 +10,9 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { loadCreateVersionConfig, resolveCreateVersionConfig } from "../../src/create-version/config.js";
-import { assertCiCompatiblePublication, assertCiInstallLockfileCommitted, assertGeneratedCiWorkflowCurrent, chooseReleaseExecution } from "../../src/create-version/ci.js";
+import { assertCiCompatiblePublication, assertCiInstallLockfileCommitted, assertGeneratedCiWorkflowCurrent, assertResumeExecutionMatches, chooseReleaseExecution } from "../../src/create-version/ci.js";
+import { createGitReader } from "../../src/create-version/process.js";
+import { decideBuildForCheckout } from "../../src/build-gate.js";
 import { CiReleaseError } from "../../src/create-version/errors.js";
 import * as githubWorkflow from "../../src/create-version/github-workflow.js";
 import { parseReleaseArguments } from "../../src/create-version/plan.js";
@@ -861,6 +863,55 @@ describe("CI preparation invariants shared with local releases", () => {
     expect(runGit(["rev-parse", "main"], remote)).toBe(releaseSha);
     expect(JSON.parse(runGit(["show", "main:.beez-rp/release.json"], remote))).toEqual({ version: "1.2.4", execution: committedExecution });
     expect(github.dispatch).toHaveBeenCalledTimes(committedExecution === "ci" ? 1 : 0);
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+
+  it.each([
+    { createdWith: ["--local"], committedExecution: "local", mismatchedResume: [], matchingResume: ["--local"] },
+    { createdWith: [], committedExecution: "ci", mismatchedResume: ["--local"], matchingResume: [] },
+  ])("should keep the execution mode $committedExecution of a non-Vercel release whose push failed without letting the Vercel gate skip it", async ({ createdWith, committedExecution, mismatchedResume, matchingResume }) => {
+    // Arrange
+    const { root, remote } = createCiProject();
+    const configuredSha = commitProjectConfig(root, "export default { checks: ['node checks.mjs'], ci: { workflow: 'release.yml' } };\n");
+    const github = isolateGithub();
+    runGit(["config", "remote.origin.pushurl", path.join(root, "..", "missing-origin.git")], root);
+    const created = await runCreateVersion({ repositoryRoot: root, argv: [...createdWith, "--bump", "patch"] });
+    const releaseSha = runGit(["rev-parse", "HEAD"], root);
+    runGit(["config", "--unset", "remote.origin.pushurl"], root);
+    // Act
+    const mismatched = await runCreateVersion({ repositoryRoot: root, argv: mismatchedResume });
+    const remoteAfterMismatch = runGit(["rev-parse", "main"], remote);
+    const dispatchesAfterMismatch = vi.mocked(github.dispatch).mock.calls.length;
+    const resumed = await runCreateVersion({ repositoryRoot: root, argv: matchingResume });
+    // Assert
+    expect(created).toBe(1);
+    expect(runGit(["log", "-1", "--format=%(trailers:key=Beez-Rp-Execution,valueonly=true)", releaseSha], root)).toBe(committedExecution);
+    expect(existsSync(path.join(root, ".beez-rp/release.json"))).toBe(false);
+    expect(mismatched).toBe(1);
+    expect(remoteAfterMismatch).toBe(configuredSha);
+    expect(dispatchesAfterMismatch).toBe(0);
+    expect(resumed).toBe(0);
+    expect(runGit(["rev-parse", "main"], remote)).toBe(releaseSha);
+    expect(github.dispatch).toHaveBeenCalledTimes(committedExecution === "ci" ? 1 : 0);
+    expect(decideBuildForCheckout(root).shouldBuild).toBe(true);
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+
+  it.each([
+    { label: "no trailer", message: ["-m", "1.2.4"], resumeExecution: "local", expectedOutcome: "accepted" },
+    { label: "ci trailer", message: ["-m", "1.2.4", "-m", "Beez-Rp-Execution: ci"], resumeExecution: "local", expectedOutcome: "--ci" },
+    { label: "local trailer", message: ["-m", "1.2.4", "-m", "Beez-Rp-Execution: local"], resumeExecution: "ci", expectedOutcome: "--local" },
+    { label: "unknown trailer", message: ["-m", "1.2.4", "-m", "Beez-Rp-Execution: remote"], resumeExecution: "local", expectedOutcome: "Beez-Rp-Execution: remote" },
+  ])("should resolve a pending release commit with $label against a $resumeExecution resume", async ({ message, resumeExecution, expectedOutcome }) => {
+    // Arrange
+    const { root } = createCiProject();
+    runGit(["commit", "--quiet", "--allow-empty", ...message], root);
+    const reader = createGitReader(root);
+    // Act
+    const outcome = await assertResumeExecutionMatches(reader, "1.2.4", /** @type {"local" | "ci"} */ (resumeExecution)).then(
+      () => "accepted",
+      (error) => `${error.message} ${error.hint}`
+    );
+    // Assert
+    expect(outcome).toContain(expectedOutcome);
   }, GIT_FIXTURE_TEST_TIMEOUT_MS);
 
   it("should reject browser-authenticated JSR publication before creating the CI release commit or tag", async () => {
