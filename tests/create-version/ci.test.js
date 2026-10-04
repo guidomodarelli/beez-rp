@@ -1271,7 +1271,9 @@ describe("CI preparation invariants shared with local releases", () => {
     { packageManager: "pnpm@10.12.1", nvmrc: "22", authentication: "oidc", accepted: true },
     { packageManager: "pnpm@10.12.1", nvmrc: "22.14.0", authentication: "oidc", accepted: true },
     { packageManager: "yarn@4.9.2", nvmrc: "24", authentication: "oidc", accepted: true },
-    { packageManager: "pnpm@10.12.1", nvmrc: "lts/*", authentication: "oidc", accepted: true },
+    { packageManager: "pnpm@10.12.1", nvmrc: "lts/*", authentication: "oidc", accepted: false },
+    { packageManager: "npm@11.5.1", nvmrc: "lts/iron\n", authentication: "oidc", accepted: false },
+    { packageManager: "pnpm@10.12.1", nvmrc: "lts/iron", authentication: "token", accepted: true },
     { packageManager: "pnpm@10.12.1", nvmrc: null, authentication: "oidc", accepted: true },
     { packageManager: "pnpm@10.12.1", nvmrc: "22.13", authentication: "token", accepted: true },
   ])("should accept the worker's Node $nvmrc with $packageManager and $authentication npm publication only when it can publish: $accepted", async ({ packageManager, nvmrc, authentication, accepted }) => {

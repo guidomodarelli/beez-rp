@@ -90,16 +90,23 @@ function canPinnedVersionReach(pinnedVersion, minimumVersion) {
 }
 
 /**
- * Rejects the Node.js runtime the generated workflow selects when it is provably older than npm
- * trusted publishing requires, whatever package manager installs dependencies. Aliases such as
- * `lts/*` cannot be resolved locally, so only the worker can judge them.
+ * Rejects the Node.js runtime the generated workflow selects when it is older than npm trusted
+ * publishing requires, whatever package manager installs dependencies. Aliases such as `lts/*` or
+ * `lts/iron` cannot be resolved locally and may select a runtime below the minimum (`lts/iron` is
+ * Node 20), which the worker would only reject after the tag was pushed, so they are rejected too.
  * @param {string} repositoryRoot - Project root whose `.nvmrc` committed at HEAD, or the local Node.js major, selects the worker's runtime.
  * @returns {Promise<void>}
- * @throws {ReleaseStepError} When the selected Node.js cannot reach the npm OIDC minimum.
+ * @throws {ReleaseStepError} When the selected Node.js is an unverifiable alias or cannot reach the npm OIDC minimum.
  */
 async function assertCiNodeSupportsNpmOidc(repositoryRoot) {
   const nodeVersion = await describeCiNodeVersion(repositoryRoot);
-  if (!CI_NODE_VERSION_PIN_PATTERN.test(nodeVersion.version) || canPinnedVersionReach(nodeVersion.version, NPM_OIDC_MINIMUM_NODE_VERSION)) return;
+  if (!CI_NODE_VERSION_PIN_PATTERN.test(nodeVersion.version)) {
+    throw new ReleaseStepError(
+      `${nodeVersion.pinnedFile ?? PINNED_NODE_VERSION_FILE} fija el alias de Node "${nodeVersion.version}" en el worker de CI, que no se puede verificar antes del release, pero la publicación npm con publication.authentication "${OIDC_AUTHENTICATION}" requiere Node >= ${NPM_OIDC_MINIMUM_NODE_VERSION}; el worker la rechazaría después de subir el tag si el alias resuelve a una versión anterior.`,
+      `Fijá ${PINNED_NODE_VERSION_FILE} a una versión numérica ${NPM_OIDC_MINIMUM_NODE_VERSION} o superior (por ejemplo 24) en un commit propio (regenerá el workflow si ya existe), configurá publication.authentication "token" con su secret o usá --${CREATE_VERSION_FLAG.local}; no se creó, subió ni reenvió ningún release.`
+    );
+  }
+  if (canPinnedVersionReach(nodeVersion.version, NPM_OIDC_MINIMUM_NODE_VERSION)) return;
   const runtimeSource = nodeVersion.pinnedFile ? `${nodeVersion.pinnedFile} fija Node ${nodeVersion.version}` : `Sin ${PINNED_NODE_VERSION_FILE}, el workflow usa Node ${nodeVersion.version} (el major de este Node.js)`;
   throw new ReleaseStepError(
     `${runtimeSource} en el worker de CI, pero la publicación npm con publication.authentication "${OIDC_AUTHENTICATION}" requiere Node >= ${NPM_OIDC_MINIMUM_NODE_VERSION}; el worker la rechazaría después de subir el tag.`,
