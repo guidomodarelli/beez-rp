@@ -10,7 +10,7 @@ import {
   CI_WORKFLOW_DIRECTORY, DEFAULT_CI_WORKFLOW, DISPATCH_CI_RELEASE_STEP, RELEASE_EXECUTION,
   CI_MIGRATION_ENVIRONMENT_PATTERN, CI_NODE_VERSION_PIN_PATTERN, CI_RELEASE_METADATA_FILE, CI_VERCEL_CONFIG_FILE, RELEASE_EXECUTION_TRAILER, CI_VERCEL_DEPLOYMENT, CI_WORKFLOW_DRIFT_PREVIEW_LINES,
 } from "../constants/ci-release.js";
-import { BROWSER_AUTHENTICATION, NPM_OIDC_MINIMUM_NODE_VERSION, NPM_OIDC_MINIMUM_VERSION, NPM_REGISTRY_PROVIDER, OIDC_AUTHENTICATION } from "../constants/registry.js";
+import { BROWSER_AUTHENTICATION, GITHUB_PACKAGES_REGISTRY_URL, GITHUB_REGISTRY_PROVIDER, GITHUB_REGISTRY_TOKEN_VARIABLE, JSR_REGISTRY_PROVIDER, NPM_OIDC_MINIMUM_NODE_VERSION, NPM_OIDC_MINIMUM_VERSION, NPM_REGISTRY_PROVIDER, OIDC_AUTHENTICATION, REGISTRY_TOKEN_VARIABLES, TOKEN_AUTHENTICATION } from "../constants/registry.js";
 import { LOCKFILE_PACKAGE_MANAGERS, PACKAGE_MANAGER } from "../constants/package-manager.js";
 import { CREATE_VERSION_FLAG, DEFAULT_NPM_REGISTRY_URL, MAIN_BRANCH, MIGRATION_STATUS, NPM_AUTH_STATUS, NPM_LOOKUP_STATUS, PACKAGE_MANIFEST_FILE, PINNED_NODE_VERSION_FILE, RELEASE_MODE, RELEASE_REMOTE, RELEASE_STEP, REMOTE_MAIN_REF } from "../constants/create-version.js";
 import { RELEASE_TAG_PREFIX } from "../constants/versions.js";
@@ -118,10 +118,12 @@ async function assertCiNodeSupportsNpmOidc(repositoryRoot) {
  * project and other package managers get a capable npm installed by the workflow for publication
  * (see `requiresCiNpmOidcClient`), after `npm ci` in the unpinned npm case. The effective npm
  * destination is resolved as well, since trusted publishing only exists on the public npm registry.
+ * A token publication named `GITHUB_TOKEN` gets the built-in Actions token injected by the generated
+ * workflow, which only GitHub Packages accepts, so its effective destination is resolved too.
  * @param {import("./config.js").ResolvedCreateVersionConfig} config - Project configuration.
  * @param {string} repositoryRoot - Project root whose `package.json`, `.nvmrc` and npm config pin the worker's runtime and destination.
  * @returns {Promise<void>}
- * @throws {ReleaseStepError} When the registry publication authorizes from a browser, or uses npm OIDC with a Node.js or npm pin below the trusted publishing minimum or a registry other than the public npm one.
+ * @throws {ReleaseStepError} When the registry publication authorizes from a browser, uses npm OIDC with a Node.js or npm pin below the trusted publishing minimum or a registry other than the public npm one, or names `GITHUB_TOKEN` as the token of a destination other than GitHub Packages.
  */
 export async function assertCiCompatiblePublication(config, repositoryRoot) {
   if (!isRegistryProvider(config.publish)) return;
@@ -131,18 +133,36 @@ export async function assertCiCompatiblePublication(config, repositoryRoot) {
       `Configurá publication.authentication "oidc" (con el paquete vinculado al repositorio) o "token" con su secret, o usá --${CREATE_VERSION_FLAG.local}; no se creó la versión ni el tag.`
     );
   }
-  if (config.publish !== NPM_REGISTRY_PROVIDER || config.publication?.authentication !== OIDC_AUTHENTICATION) return;
-  await assertCiNodeSupportsNpmOidc(repositoryRoot);
-  const manifestPath = path.join(repositoryRoot, PACKAGE_MANIFEST_FILE);
-  if (!existsSync(manifestPath)) return;
-  let manifest;
-  try {
-    manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-  } catch (error) {
-    throw new ReleaseStepError(`No se pudo leer ${PACKAGE_MANIFEST_FILE} para comprobar la publicación npm del worker de CI.`, `Corregí ${PACKAGE_MANIFEST_FILE}; no se creó, subió ni reenvió ningún release.`, { cause: error });
+  const publishesWithNpmOidc = config.publish === NPM_REGISTRY_PROVIDER && config.publication?.authentication === OIDC_AUTHENTICATION;
+  const publishesWithBuiltInGithubToken = config.publication?.authentication === TOKEN_AUTHENTICATION && config.publication.tokenEnv === GITHUB_REGISTRY_TOKEN_VARIABLE;
+  if (!publishesWithNpmOidc && !publishesWithBuiltInGithubToken) return;
+  if (publishesWithNpmOidc) await assertCiNodeSupportsNpmOidc(repositoryRoot);
+  const manifest = readCiPublicationManifest(repositoryRoot);
+  if (publishesWithBuiltInGithubToken) {
+    // JSR reads its identity from its own manifest; npm-protocol destinations need package.json to resolve.
+    if (manifest === null && config.publish !== JSR_REGISTRY_PROVIDER) return;
+    await assertCiBuiltInGithubTokenRegistry(config, manifest ?? {}, repositoryRoot);
+    return;
   }
+  if (manifest === null) return;
   if (config.commands.packageManager === PACKAGE_MANAGER.npm) assertCiNpmPinSupportsOidc(manifest);
   await assertCiNpmOidcRegistry(config, manifest, repositoryRoot);
+}
+
+/**
+ * Reads the project manifest that routes the worker's publication.
+ * @param {string} repositoryRoot - Project root.
+ * @returns {Record<string, unknown> | null} Parsed `package.json`, or `null` when the project has none.
+ * @throws {ReleaseStepError} When `package.json` exists but cannot be read or parsed.
+ */
+function readCiPublicationManifest(repositoryRoot) {
+  const manifestPath = path.join(repositoryRoot, PACKAGE_MANIFEST_FILE);
+  if (!existsSync(manifestPath)) return null;
+  try {
+    return JSON.parse(readFileSync(manifestPath, "utf8"));
+  } catch (error) {
+    throw new ReleaseStepError(`No se pudo leer ${PACKAGE_MANIFEST_FILE} para comprobar la publicación del worker de CI.`, `Corregí ${PACKAGE_MANIFEST_FILE}; no se creó, subió ni reenvió ningún release.`, { cause: error });
+  }
 }
 
 /**
@@ -163,8 +183,29 @@ function assertCiNpmPinSupportsOidc(manifest) {
 
 /**
  * Resolves the destination the worker publishes to (`publication.registryUrl`, `publishConfig` or
- * npm's project config, as the worker does) and rejects it when npm trusted publishing cannot
- * reach it, before the immutable release commit and tag exist.
+ * npm's project config, as the worker does) before the immutable release commit and tag exist.
+ * @param {import("./config.js").ResolvedCreateVersionConfig} config - Configuration publishing to a registry.
+ * @param {Record<string, unknown>} manifest - Parsed project `package.json`.
+ * @param {string} repositoryRoot - Project root whose npm configuration routes the publication.
+ * @param {string} publicationDescription - Publication being checked, used in the error message.
+ * @returns {Promise<import("./registry.js").SelectedRegistry>} Effective destination.
+ * @throws {ReleaseStepError} When the destination cannot be resolved.
+ */
+async function resolveCiPublicationRegistry(config, manifest, repositoryRoot, publicationDescription) {
+  try {
+    return await resolveRegistry(selectProjectRegistry(config), manifest, repositoryRoot);
+  } catch (error) {
+    throw new ReleaseStepError(
+      `No se pudo resolver el registry de ${publicationDescription} para comprobarlo antes del release en CI: ${error instanceof Error ? error.message : String(error)}.`,
+      `Corregí publication.registryUrl, publishConfig o la configuración de npm del proyecto; no se creó, subió ni reenvió ningún release.`,
+      { cause: error }
+    );
+  }
+}
+
+/**
+ * Rejects an npm trusted publishing destination other than the public npm registry, before the
+ * immutable release commit and tag exist.
  * @param {import("./config.js").ResolvedCreateVersionConfig} config - Configuration publishing to npm through OIDC.
  * @param {Record<string, unknown>} manifest - Parsed project `package.json`.
  * @param {string} repositoryRoot - Project root whose npm configuration routes the publication.
@@ -172,21 +213,32 @@ function assertCiNpmPinSupportsOidc(manifest) {
  * @throws {ReleaseStepError} When the destination cannot be resolved or is not the public npm registry.
  */
 async function assertCiNpmOidcRegistry(config, manifest, repositoryRoot) {
-  let registry;
-  try {
-    registry = await resolveRegistry(selectProjectRegistry(config), manifest, repositoryRoot);
-  } catch (error) {
-    throw new ReleaseStepError(
-      `No se pudo resolver el registry de la publicación npm con publication.authentication "${OIDC_AUTHENTICATION}" para comprobarlo antes del release en CI: ${error instanceof Error ? error.message : String(error)}.`,
-      `Corregí publication.registryUrl, publishConfig o la configuración de npm del proyecto; no se creó, subió ni reenvió ningún release.`,
-      { cause: error }
-    );
-  }
+  const registry = await resolveCiPublicationRegistry(config, manifest, repositoryRoot, `la publicación npm con publication.authentication "${OIDC_AUTHENTICATION}"`);
   const registryProblem = findNpmOidcRegistryProblem(registry);
   if (registryProblem === null) return;
   throw new ReleaseStepError(
     `La publicación npm con publication.authentication "${OIDC_AUTHENTICATION}" apunta a ${registry.registryUrl} (${registry.label}): ${registryProblem}; el worker la rechazaría después de subir el tag.`,
     `Publicá en ${DEFAULT_NPM_REGISTRY_URL} (quitá publication.registryUrl, publishConfig.registry o el registry del .npmrc del proyecto), configurá publication.authentication "token" con su secret o usá --${CREATE_VERSION_FLAG.local}; no se creó, subió ni reenvió ningún release.`
+  );
+}
+
+/**
+ * Rejects `GITHUB_TOKEN` as the publication token of a destination other than GitHub Packages: the
+ * generated workflow binds that reserved name to the built-in Actions token (`github.token`) without
+ * requiring a stored secret, and any other registry would reject it only after the tag was pushed.
+ * Declaring `GITHUB_TOKEN` in `ci.secrets` to install private GitHub Packages dependencies is unaffected.
+ * @param {import("./config.js").ResolvedCreateVersionConfig} config - Configuration publishing with token `GITHUB_TOKEN`.
+ * @param {Record<string, unknown>} manifest - Parsed project `package.json`.
+ * @param {string} repositoryRoot - Project root whose npm configuration routes the publication.
+ * @returns {Promise<void>}
+ * @throws {ReleaseStepError} When the destination cannot be resolved or is not GitHub Packages.
+ */
+async function assertCiBuiltInGithubTokenRegistry(config, manifest, repositoryRoot) {
+  const registry = await resolveCiPublicationRegistry(config, manifest, repositoryRoot, `la publicación con publication.tokenEnv "${GITHUB_REGISTRY_TOKEN_VARIABLE}"`);
+  if (registry.provider === GITHUB_REGISTRY_PROVIDER) return;
+  throw new ReleaseStepError(
+    `La publicación con publication.tokenEnv "${GITHUB_REGISTRY_TOKEN_VARIABLE}" apunta a ${registry.registryUrl} (${registry.label}), pero el workflow de CI entrega en ${GITHUB_REGISTRY_TOKEN_VARIABLE} el token integrado de Actions, que solo acepta GitHub Packages (${GITHUB_PACKAGES_REGISTRY_URL}); el worker fallaría después de subir el tag.`,
+    `Guardá el token de ${registry.label} como secret con otro nombre y configuralo en publication.tokenEnv (por ejemplo "${REGISTRY_TOKEN_VARIABLES[registry.provider]}"), publicá en GitHub Packages o usá --${CREATE_VERSION_FLAG.local}; no se creó, subió ni reenvió ningún release.`
   );
 }
 

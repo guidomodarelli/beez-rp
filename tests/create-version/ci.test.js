@@ -1276,6 +1276,51 @@ describe("CI preparation invariants shared with local releases", () => {
   });
 
   it.each([
+    { scenario: "the default npm registry", publish: "npm", packageName: "fixture-github-token", publishConfig: null, publication: { tokenEnv: "GITHUB_TOKEN" }, ciSecrets: [], extraFiles: {}, rejectedRegistryLabel: "npm" },
+    { scenario: "publication.registryUrl on a private host", publish: "npm", packageName: "fixture-github-token", publishConfig: null, publication: { registryUrl: "https://npm.example.test/", tokenEnv: "GITHUB_TOKEN" }, ciSecrets: [], extraFiles: {}, rejectedRegistryLabel: "npm" },
+    { scenario: "publishConfig.registry on a GitLab project", publish: "npm", packageName: "@fixture/github-token", publishConfig: { registry: "https://gitlab.example.test/api/v4/projects/42/packages/npm/" }, publication: { tokenEnv: "GITHUB_TOKEN" }, ciSecrets: [], extraFiles: {}, rejectedRegistryLabel: "GitLab" },
+    { scenario: "JSR", publish: "jsr", packageName: "fixture-github-token", publishConfig: null, publication: { authentication: "token", tokenEnv: "GITHUB_TOKEN" }, ciSecrets: [], extraFiles: { "jsr.json": JSON.stringify({ name: "@fixture/github-token", version: "1.0.0", exports: "./mod.js" }) }, rejectedRegistryLabel: "JSR" },
+    { scenario: "publishConfig.registry on GitHub Packages", publish: "npm", packageName: "@fixture/github-token", publishConfig: { registry: "https://npm.pkg.github.com/" }, publication: { tokenEnv: "GITHUB_TOKEN" }, ciSecrets: [], extraFiles: {}, rejectedRegistryLabel: null },
+    { scenario: "the GitHub Packages provider", publish: "github", packageName: "@fixture/github-token", publishConfig: null, publication: {}, ciSecrets: [], extraFiles: {}, rejectedRegistryLabel: null },
+    { scenario: "the default npm registry with GITHUB_TOKEN only for private dependencies", publish: "npm", packageName: "fixture-github-token", publishConfig: null, publication: {}, ciSecrets: ["GITHUB_TOKEN"], extraFiles: {}, rejectedRegistryLabel: null },
+  ])("should reject the built-in GITHUB_TOKEN as the publication token of $scenario before creating the CI release unless GitHub Packages receives it", async ({ publish, packageName, publishConfig, publication, ciSecrets, extraFiles, rejectedRegistryLabel }) => {
+    // Arrange
+    const root = createTemporaryDirectory("beez-rp-ci-github-token-");
+    writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: packageName, version: "1.0.0", packageManager: "npm@11.5.1", ...(publishConfig ? { publishConfig } : {}) }));
+    for (const [relativePath, content] of Object.entries(extraFiles)) writeFileSync(path.join(root, relativePath), content);
+    writeFileSync(path.join(root, "beez-rp.config.mjs"), `export default { publish: '${publish}', publication: ${JSON.stringify(publication)}, ci: ${JSON.stringify({ workflow: "release.yml", secrets: ciSecrets })} };\n`);
+    const config = await loadCreateVersionConfig(root);
+    commitFixtureRepository(root);
+    // Act
+    let rejectionMessage = null;
+    try {
+      await assertCiCompatiblePublication(config, root);
+    } catch (error) {
+      rejectionMessage = error instanceof Error ? `${error.message} ${error instanceof ReleaseStepError ? error.hint : ""}` : String(error);
+    }
+    // Assert
+    expect(rejectionMessage === null).toBe(rejectedRegistryLabel === null);
+    expect(rejectionMessage?.includes(`(${rejectedRegistryLabel}), pero el workflow de CI entrega en GITHUB_TOKEN el token integrado de Actions`) ?? false).toBe(rejectedRegistryLabel !== null);
+    expect(rejectionMessage?.includes("Guardá el token") ?? false).toBe(rejectedRegistryLabel !== null);
+  });
+
+  it("should reject npm publication with the built-in GITHUB_TOKEN before creating the CI release commit or tag", async () => {
+    // Arrange
+    const { root, remote } = createCiProject();
+    const configuredSha = commitProjectConfig(root, "export default { checks: ['node checks.mjs'], publish: 'npm', publication: { tokenEnv: 'GITHUB_TOKEN' }, ci: { workflow: 'release.yml' } };\n");
+    const github = isolateGithub();
+    // Act
+    const status = await runCreateVersion({ repositoryRoot: root, argv: ["--bump", "patch"] });
+    // Assert
+    expect(status).toBe(1);
+    expect(runGit(["rev-parse", "HEAD"], root)).toBe(configuredSha);
+    expect(runGit(["rev-parse", "main"], remote)).toBe(configuredSha);
+    expect(runGit(["tag", "--list"], remote)).toBe("v1.2.3");
+    expect(github.preflight).not.toHaveBeenCalled();
+    expect(github.dispatch).not.toHaveBeenCalled();
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+
+  it.each([
     { packageManager: "pnpm@10.12.1", authentication: "oidc", installsNpmClient: true },
     { packageManager: "yarn@4.9.2", authentication: "oidc", installsNpmClient: true },
     { packageManager: "bun@1.2.15", authentication: "oidc", installsNpmClient: true },
