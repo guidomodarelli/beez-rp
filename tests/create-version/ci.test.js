@@ -168,6 +168,21 @@ describe("release location and configuration", () => {
     expect(unscopedSteps).toEqual(expect.arrayContaining(["Instalar dependencias", "Checks y publicación del release"]));
   });
 
+  it("should pull the Vercel production environment only after release checks and right before the production build", () => {
+    // Arrange
+    const root = createTemporaryDirectory("beez-rp-ci-vercel-order-");
+    writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "fixture-vercel-app", version: "1.0.0", packageManager: "npm@11.11.1" }));
+    const config = resolveCreateVersionConfig({ checks: ["node checks.mjs"], ci: { workflow: "release.yml", deployment: "vercel" } });
+    // Act
+    const stepNames = [...readWorkflowEnvironmentScopes(renderCiReleaseWorkflow(root, config)).stepEnvironments.keys()];
+    // Assert
+    const releaseStepIndex = stepNames.indexOf("Checks y publicación del release");
+    const pullStepIndex = stepNames.indexOf("Obtener entorno de producción");
+    expect(releaseStepIndex).toBeGreaterThanOrEqual(0);
+    expect(pullStepIndex).toBe(releaseStepIndex + 1);
+    expect(stepNames.slice(pullStepIndex + 1)).toEqual(["Construir artefacto de producción", "Desplegar producción después de los checks"]);
+  });
+
   it("should keep explicitly declared Vercel credentials step-scoped and deduplicated", () => {
     // Arrange
     const root = createTemporaryDirectory("beez-rp-ci-vercel-declared-");
