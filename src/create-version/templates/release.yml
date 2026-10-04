@@ -35,9 +35,10 @@ __RELEASE_ENVIRONMENT__
       - name: Checkout del release
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag }}
+          ref: refs/tags/${{ inputs.tag }}
           fetch-depth: 0
           persist-credentials: true
+__RELEASE_IDENTITY_CHECK__
 __NODE_SETUP__
 __DENO_SETUP__
 __PACKAGE_SETUP__

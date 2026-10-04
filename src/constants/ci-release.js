@@ -30,6 +30,15 @@ export const CI_COMMIT_SHA_PATTERN = /^[a-f0-9]{40,64}$/u;
 /** Worker inputs exposed through environment variables instead of shell interpolation. */
 export const CI_RELEASE_ENVIRONMENT = Object.freeze({ version: "BEEZ_RP_RELEASE_VERSION", sha: "BEEZ_RP_RELEASE_SHA" });
 
+/** Environment variable carrying the dispatched release tag into generated workflow steps. */
+export const CI_RELEASE_TAG_ENVIRONMENT = "RELEASE_TAG";
+
+/** Step that authenticates the dispatched tag, commit and `origin/main` ancestry before any project code runs. */
+export const CI_RELEASE_IDENTITY_STEP_NAME = "Verificar identidad del release";
+
+/** POSIX ERE equivalent of `RELEASE_VERSION_PATTERN` for the dependency-free identity step (Bash has no `\d`). */
+export const CI_RELEASE_VERSION_SHELL_PATTERN = "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$";
+
 /** Environment signals that prevent a CI worker from dispatching another workflow. */
 export const CI_RUNTIME_ENVIRONMENT = Object.freeze(["CI", "GITHUB_ACTIONS", "GITLAB_CI"]);
 
@@ -40,7 +49,7 @@ export const CI_RUNTIME_DISABLED_VALUES = Object.freeze(["", "0", "false", "no",
 export const CI_RELEASE_TEMPLATE_FILE = "./templates/release.yml";
 
 /** Placeholders owned by the release workflow template. */
-export const CI_TEMPLATE_PLACEHOLDER = Object.freeze({ node: "__NODE_SETUP__", install: "__PACKAGE_SETUP__", environment: "__RELEASE_ENVIRONMENT__", permissions: "__RELEASE_PERMISSIONS__", command: "__RELEASE_COMMAND__", deploymentSetup: "__DEPLOYMENT_SETUP__", deployment: "__DEPLOYMENT_STEP__", deno: "__DENO_SETUP__" });
+export const CI_TEMPLATE_PLACEHOLDER = Object.freeze({ node: "__NODE_SETUP__", install: "__PACKAGE_SETUP__", environment: "__RELEASE_ENVIRONMENT__", permissions: "__RELEASE_PERMISSIONS__", command: "__RELEASE_COMMAND__", deploymentSetup: "__DEPLOYMENT_SETUP__", deployment: "__DEPLOYMENT_STEP__", deno: "__DENO_SETUP__", identity: "__RELEASE_IDENTITY_CHECK__" });
 
 /** Version pin formats safe to place in generated package manager setup commands. */
 export const CI_PACKAGE_MANAGER_VERSION_PATTERN = /^(?:pnpm|npm|yarn|bun)@([0-9]+(?:\.[0-9]+){0,2}(?:-[a-zA-Z0-9.-]+)?)(?:\+sha\d+\.[a-fA-F0-9]+)?$/u;
@@ -116,7 +125,7 @@ export const CI_VERCEL_WORKER_WRITTEN_PATHS = Object.freeze([".env", ".vercel"])
 export const CI_MIGRATION_ENVIRONMENT_PATTERN = /\b[A-Z][A-Z0-9_]*(?:URL|TOKEN|KEY|SECRET|PASSWORD)\b/gu;
 
 /** Bindings owned by the worker protocol and unavailable for user overrides. */
-export const CI_RESERVED_ENVIRONMENT_NAMES = Object.freeze(["RELEASE_TAG", "HUSKY", ...Object.values(CI_RELEASE_ENVIRONMENT)]);
+export const CI_RESERVED_ENVIRONMENT_NAMES = Object.freeze([CI_RELEASE_TAG_ENVIRONMENT, "HUSKY", ...Object.values(CI_RELEASE_ENVIRONMENT)]);
 
 /** Generated Vercel gate; it runs before dependencies are installed. */
 export const CI_VERCEL_GATE_FILE = ".beez-rp/vercel-ignore-build.mjs";

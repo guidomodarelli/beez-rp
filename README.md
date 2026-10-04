@@ -79,7 +79,7 @@ export default {
 
 En **CI**, el proceso local verifica el CHANGELOG manual, el estado de Git, `gh` y las credenciales del worker; elige la versión, hace el bump, crea commit + tag, hace push y dispara el workflow. Omite checks, migraciones, preparación, publicación y hooks de Git locales: esas validaciones se ejecutan en el worker. La terminal informa **enviado a CI**, no publicado.
 
-El worker hace checkout del tag exacto y comprueba su versión y SHA antes de ejecutar checks, migraciones, preparación y publicación. Usa `--ci-release vX.Y.Z`; nunca vuelve a hacer bump ni push. Un check fallido corta el release. Una versión que el registry ya confirma publicada no se vuelve a publicar. Tampoco se ejecuta un tag anterior a la versión vigente en `origin/main`.
+El worker hace checkout del tag exacto y, antes de configurar herramientas o instalar dependencias (es decir, antes de ejecutar código del proyecto con los secrets y el permiso OIDC del job), un paso que solo usa Git rechaza el release si `tag` no es `v<version>` estable, si no apunta exactamente al `sha` enviado o si ese commit no está en `origin/main`. Después vuelve a comprobar su versión y SHA antes de ejecutar checks, migraciones, preparación y publicación. Usa `--ci-release vX.Y.Z`; nunca vuelve a hacer bump ni push. Un check fallido corta el release. Una versión que el registry ya confirma publicada no se vuelve a publicar. Tampoco se ejecuta un tag anterior a la versión vigente en `origin/main`.
 
 En **Local**, se conserva el flujo completo en la máquina actual, incluidos sus hooks. Se puede elegir por flag:
 

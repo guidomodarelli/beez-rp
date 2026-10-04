@@ -15,6 +15,7 @@ import {
 } from "../constants/ci-release.js";
 import { CREATE_VERSION_CONFIG_FILES, PACKAGE_MANIFEST_FILE, PINNED_NODE_VERSION_FILE, VERSION_PREFIX_PATTERN } from "../constants/create-version.js";
 import { PACKAGE_MANAGER } from "../constants/package-manager.js";
+import { renderCiReleaseIdentityStep } from "./ci-release-identity-step.js";
 import { ReleaseStepError } from "./errors.js";
 import { runCaptured } from "./process.js";
 import { GITHUB_REGISTRY_TOKEN_VARIABLE, JSR_REGISTRY_PROVIDER, NPM_OIDC_MINIMUM_VERSION, NPM_REGISTRY_PROVIDER, OIDC_AUTHENTICATION, TOKEN_AUTHENTICATION } from "../constants/registry.js";
@@ -129,6 +130,7 @@ export function renderCiReleaseWorkflow(repositoryRoot, config) {
   const deployment = config.ci?.deployment === CI_VERCEL_DEPLOYMENT ? ["      - name: Obtener entorno de producción", "        env:", vercelEnvironment, "        run: |", '          vercel pull --yes --environment=production --token="$VERCEL_TOKEN"', "          cp .vercel/.env.production.local .env","      - name: Construir artefacto de producción", "        env:", vercelEnvironment, '        run: vercel build --prod --token="$VERCEL_TOKEN"', "      - name: Desplegar producción después de los checks", "        env:", vercelEnvironment, '        run: vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN"'].join("\n") : "";
   const deno = config.publication.jsrClient === CI_DENO_JSR_CLIENT && config.publish === JSR_REGISTRY_PROVIDER ? ["      - name: Configurar Deno para JSR", "        uses: denoland/setup-deno@v2", "        with:", `          deno-version: '${CI_DENO_VERSION}'`].join("\n") : "";
   return readFileSync(new URL(CI_RELEASE_TEMPLATE_FILE, import.meta.url), "utf8")
+    .replace(CI_TEMPLATE_PLACEHOLDER.identity, () => renderCiReleaseIdentityStep())
     .replace(CI_TEMPLATE_PLACEHOLDER.node, nodeSetup)
     .replace(CI_TEMPLATE_PLACEHOLDER.install, packageSetup)
     .replace(CI_TEMPLATE_PLACEHOLDER.environment, bindings.join("\n"))
