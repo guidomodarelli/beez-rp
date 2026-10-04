@@ -8,7 +8,7 @@ import path from "node:path";
 import {
   CI_COMMIT_SHA_PATTERN, CI_RELEASE_ENVIRONMENT, CI_RUNTIME_DISABLED_VALUES, CI_RUNTIME_ENVIRONMENT, CI_SETUP_CHOICE,
   CI_WORKFLOW_DIRECTORY, DEFAULT_CI_WORKFLOW, DISPATCH_CI_RELEASE_STEP, RELEASE_EXECUTION,
-  CI_MIGRATION_ENVIRONMENT_PATTERN, CI_RELEASE_METADATA_FILE, CI_VERCEL_CONFIG_FILE, CI_VERCEL_DEPLOYMENT,
+  CI_MIGRATION_ENVIRONMENT_PATTERN, CI_RELEASE_METADATA_FILE, CI_VERCEL_CONFIG_FILE, CI_VERCEL_DEPLOYMENT, CI_WORKFLOW_DRIFT_PREVIEW_LINES,
 } from "../constants/ci-release.js";
 import { BROWSER_AUTHENTICATION } from "../constants/registry.js";
 import { CREATE_VERSION_FLAG, MAIN_BRANCH, MIGRATION_STATUS, NPM_AUTH_STATUS, NPM_LOOKUP_STATUS, PACKAGE_MANIFEST_FILE, RELEASE_MODE, RELEASE_REMOTE, RELEASE_STEP, REMOTE_MAIN_REF } from "../constants/create-version.js";
@@ -16,7 +16,8 @@ import { RELEASE_TAG_PREFIX } from "../constants/versions.js";
 import { compareReleaseVersions, findHighestStableVersion, isStableReleaseVersion, toReleaseTag } from "../versions.js";
 import { print, select } from "../terminal-ui.js";
 import { ReleaseStepError } from "./errors.js";
-import { assertSafeCiPath } from "./ci-setup.js";
+import { assertSafeCiPath, renderCiReleaseWorkflow } from "./ci-setup.js";
+import { runCaptured } from "./process.js";
 import { isRegistryProvider } from "./registry-config.js";
 
 /**
@@ -117,6 +118,40 @@ export function assertCiWorkflowFile(repositoryRoot, workflow) {
   assertSafeCiPath(repositoryRoot, `${CI_WORKFLOW_DIRECTORY}/${workflow}`);
   const workflowPath = path.join(repositoryRoot, CI_WORKFLOW_DIRECTORY, workflow);
   if (!existsSync(workflowPath) || !lstatSync(workflowPath).isFile()) throw new ReleaseStepError(`No existe un workflow regular en ${CI_WORKFLOW_DIRECTORY}/${workflow}.`, "Crealo y commitealo, o quitá ci.workflow y ejecutá --setup-ci; también podés elegir --local.");
+}
+
+/**
+ * Splits workflow content into comparable lines regardless of checkout line endings.
+ * @param {string} content - Workflow YAML.
+ * @returns {string[]} Lines without the trailing newline.
+ */
+function toWorkflowLines(content) {
+  return content.replace(/\r\n/gu, "\n").trimEnd().split("\n");
+}
+
+/**
+ * Rejects `--setup-ci` over an existing workflow whose committed content no longer matches what
+ * setup would generate for the current configuration (for example a new publication token binding).
+ * Regeneration is never automatic: the committed file may hold intentional manual edits, so the
+ * user decides between regenerating it and releasing with the customized workflow through `--ci`.
+ * @param {string} repositoryRoot - Project root.
+ * @param {import("./config.js").ResolvedCreateVersionConfig} config - Configuration with a validated `ci.workflow`.
+ * @returns {Promise<void>}
+ * @throws {ReleaseStepError} When the workflow is not committed at HEAD or differs from the rendered one.
+ */
+export async function assertGeneratedCiWorkflowCurrent(repositoryRoot, config) {
+  if (!config.ci) return;
+  const workflowPath = `${CI_WORKFLOW_DIRECTORY}/${config.ci.workflow}`;
+  assertCiWorkflowFile(repositoryRoot, config.ci.workflow);
+  const regenerateHint = `Regeneralo con --${CREATE_VERSION_FLAG.setupCi} después de borrarlo en un commit propio, o actualizalo y commitealo a mano; si lo personalizaste a propósito, usá --${CREATE_VERSION_FLAG.ci}. No se creó la versión ni el tag.`;
+  const committed = await runCaptured("git", ["show", `HEAD:${workflowPath}`], { cwd: repositoryRoot });
+  if (committed.status !== 0) throw new ReleaseStepError(`${workflowPath} existe pero no está commiteado en HEAD; el worker de CI no lo recibiría.`, regenerateHint);
+  const committedLines = toWorkflowLines(committed.stdout);
+  const renderedLines = toWorkflowLines(renderCiReleaseWorkflow(repositoryRoot, config));
+  if (committedLines.length === renderedLines.length && committedLines.every((line, index) => line === renderedLines[index])) return;
+  const missingLines = renderedLines.filter((line) => line.trim() !== "" && !committedLines.includes(line)).map((line) => line.trim());
+  const missingDetail = missingLines.length > 0 ? ` Líneas esperadas ausentes: ${missingLines.slice(0, CI_WORKFLOW_DRIFT_PREVIEW_LINES).join(" | ")}.` : "";
+  throw new ReleaseStepError(`${workflowPath} no coincide con el workflow que --${CREATE_VERSION_FLAG.setupCi} genera para la configuración actual; el worker podría fallar después de subir el tag.${missingDetail}`, regenerateHint);
 }
 
 /**

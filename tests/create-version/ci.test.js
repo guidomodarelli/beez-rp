@@ -9,8 +9,8 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { resolveCreateVersionConfig } from "../../src/create-version/config.js";
-import { assertCiCompatiblePublication, chooseReleaseExecution } from "../../src/create-version/ci.js";
+import { loadCreateVersionConfig, resolveCreateVersionConfig } from "../../src/create-version/config.js";
+import { assertCiCompatiblePublication, assertGeneratedCiWorkflowCurrent, chooseReleaseExecution } from "../../src/create-version/ci.js";
 import { CiReleaseError } from "../../src/create-version/errors.js";
 import * as githubWorkflow from "../../src/create-version/github-workflow.js";
 import { parseReleaseArguments } from "../../src/create-version/plan.js";
@@ -57,6 +57,25 @@ function createCiProject({ configured = true, failChecks = false, updateChangelo
   runGit(["commit", "--quiet", "-m", "feat: add feature"], root);
   runGit(["push", "--quiet", "origin", "main", "--tags"], root);
   return { root, remote, originalSha: runGit(["rev-parse", "HEAD"], root) };
+}
+
+/**
+ * Commits and pushes the workflow `--setup-ci` renders for the project's loaded configuration, so
+ * the fixture starts without drift (the default fixture workflow targets the default package manager).
+ * The configuration is loaded in a child process because ESM caches the project's config module per
+ * process, and the test may change that file before the release under test loads it.
+ * @param {string} root - Fixture checkout.
+ * @returns {string} Pushed commit SHA.
+ */
+function commitGeneratedWorkflow(root) {
+  const configLoader = pathToFileURL(path.resolve("src/create-version/config.js")).href;
+  const workflowRenderer = pathToFileURL(path.resolve("src/create-version/ci-setup.js")).href;
+  const rendered = spawnSync(process.execPath, ["--input-type=module", "-e", `import { loadCreateVersionConfig } from ${JSON.stringify(configLoader)}; import { renderCiReleaseWorkflow } from ${JSON.stringify(workflowRenderer)}; process.stdout.write(renderCiReleaseWorkflow(${JSON.stringify(root)}, await loadCreateVersionConfig(${JSON.stringify(root)})));`], { env: commandEnvironment(), encoding: "utf8" });
+  if (rendered.status !== 0) throw new Error(`commitGeneratedWorkflow failed to render ${root}: ${rendered.stderr}`);
+  writeFileSync(path.join(root, ".github/workflows/release.yml"), rendered.stdout);
+  runGit(["commit", "--quiet", "-am", "ci: regenerate release workflow"], root);
+  runGit(["push", "--quiet", "origin", "main"], root);
+  return runGit(["rev-parse", "HEAD"], root);
 }
 
 /**
@@ -416,6 +435,69 @@ describe("local CI preparation with real Git", () => {
     expect(runGit(["rev-parse", "HEAD"], root)).toBe(originalSha);
     expect(runGit(["rev-parse", "main"], remote)).toBe(originalSha);
     expect(existsSync(path.join(root, ".github/workflows/release.yml"))).toBe(false);
+    expect(github.dispatch).not.toHaveBeenCalled();
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+
+  it("should continue setup as an ordinary CI release when the existing generated workflow still matches the configuration", async () => {
+    // Arrange
+    const { root, remote } = createCiProject();
+    commitGeneratedWorkflow(root);
+    const committedWorkflow = runGit(["show", "HEAD:.github/workflows/release.yml"], root);
+    const github = isolateGithub();
+    // Act
+    const status = await runCreateVersion({ repositoryRoot: root, argv: ["--setup-ci", "--bump", "patch"] });
+    // Assert
+    expect(status).toBe(0);
+    expect(runGit(["rev-parse", "v1.2.4^{commit}"], remote)).toBe(runGit(["rev-parse", "HEAD"], root));
+    expect(runGit(["show", "HEAD:.github/workflows/release.yml"], root)).toBe(committedWorkflow);
+    expect(github.preflight).toHaveBeenCalledWith("release.yml", [], []);
+    expect(github.dispatch).toHaveBeenCalledOnce();
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+
+  it.each([
+    ["npm token publication", "publish: 'npm', ci: { workflow: 'release.yml' }", "NPM_TOKEN"],
+    ["a new worker secret", "ci: { workflow: 'release.yml', secrets: ['DATABASE_URL'] }", "DATABASE_URL"],
+  ])("should block setup before any commit, tag or dispatch when the committed workflow drifted after configuring %s", async (_change, configEntries, missingBinding) => {
+    // Arrange
+    const { root, remote } = createCiProject();
+    commitGeneratedWorkflow(root);
+    writeFileSync(path.join(root, "beez-rp.config.mjs"), `export default { checks: ['node checks.mjs'], ${configEntries} };\n`);
+    runGit(["commit", "--quiet", "-am", "chore: change release configuration"], root);
+    runGit(["push", "--quiet", "origin", "main"], root);
+    const configuredSha = runGit(["rev-parse", "HEAD"], root);
+    const github = isolateGithub();
+    // Act
+    const status = await runCreateVersion({ repositoryRoot: root, argv: ["--setup-ci", "--bump", "patch"] });
+    const directCheck = assertGeneratedCiWorkflowCurrent(root, await loadCreateVersionConfig(root));
+    // Assert
+    await expect(directCheck).rejects.toThrow(missingBinding);
+    await expect(directCheck).rejects.toMatchObject({ hint: expect.stringContaining("--setup-ci") });
+    expect(status).toBe(1);
+    expect(runGit(["rev-parse", "HEAD"], root)).toBe(configuredSha);
+    expect(runGit(["rev-parse", "main"], remote)).toBe(configuredSha);
+    expect(runGit(["tag", "--list"], remote)).toBe("v1.2.3");
+    expect(runGit(["status", "--porcelain"], root)).toBe("");
+    expect(github.preflight).not.toHaveBeenCalled();
+    expect(github.dispatch).not.toHaveBeenCalled();
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+
+  it("should block setup when the existing workflow is not committed and therefore unavailable to the worker", async () => {
+    // Arrange
+    const { root, remote, originalSha } = createCiProject();
+    runGit(["rm", "--quiet", "--cached", ".github/workflows/release.yml"], root);
+    runGit(["commit", "--quiet", "-m", "chore: untrack workflow"], root);
+    writeFileSync(path.join(root, ".gitignore"), "*.log\nnode_modules\n.github/\n");
+    runGit(["commit", "--quiet", "-am", "chore: ignore workflows"], root);
+    const untrackedSha = runGit(["rev-parse", "HEAD"], root);
+    const github = isolateGithub();
+    // Act
+    const status = await runCreateVersion({ repositoryRoot: root, argv: ["--setup-ci", "--bump", "patch"] });
+    // Assert
+    await expect(assertGeneratedCiWorkflowCurrent(root, await loadCreateVersionConfig(root))).rejects.toThrow(/no está commiteado/);
+    expect(status).toBe(1);
+    expect(runGit(["rev-parse", "HEAD"], root)).toBe(untrackedSha);
+    expect(runGit(["rev-parse", "main"], remote)).toBe(originalSha);
+    expect(github.preflight).not.toHaveBeenCalled();
     expect(github.dispatch).not.toHaveBeenCalled();
   }, GIT_FIXTURE_TEST_TIMEOUT_MS);
 

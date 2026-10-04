@@ -123,3 +123,6 @@ export const CI_VERCEL_GATE_TEMPLATE = "./templates/vercel-ignore-build.mjs";
 
 /** Template placeholder preserving the project's original ignoreCommand. */
 export const CI_VERCEL_IGNORE_PLACEHOLDER = "__ORIGINAL_IGNORE_COMMAND__";
+
+/** Rendered workflow lines quoted when a committed generated workflow drifted from the current configuration. */
+export const CI_WORKFLOW_DRIFT_PREVIEW_LINES = 3;

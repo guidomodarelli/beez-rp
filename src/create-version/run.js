@@ -90,7 +90,7 @@ import { checkRegistryAccess, lookupRegistryVersions, publishRegistryRelease, re
 import { prepareJsrVersionUpdates, readJsrManifest } from "./jsr.js";
 import { JSR_REGISTRY_PROVIDER, REGISTRY_LABELS } from "../constants/registry.js";
 import { CI_DISPATCH_STATUS, CI_GIT_HOOKS_OPTION, CI_VERCEL_DEPLOYMENT, CI_WORKFLOW_DIRECTORY, DISPATCH_CI_RELEASE_STEP, RELEASE_EXECUTION } from "../constants/ci-release.js";
-import { appendCiDispatch, assertCiCompatiblePublication, assertCiWorkflowFile, assertResumeExecutionMatches, buildCiWorkerPlan, chooseReleaseExecution, defaultCiReleaseConfig, readCiReleaseIdentity } from "./ci.js";
+import { appendCiDispatch, assertCiCompatiblePublication, assertCiWorkflowFile, assertGeneratedCiWorkflowCurrent, assertResumeExecutionMatches, buildCiWorkerPlan, chooseReleaseExecution, defaultCiReleaseConfig, readCiReleaseIdentity } from "./ci.js";
 import { assertCiSetupFilesUnchanged, describeCiEnvironment, prepareCiReleaseMetadata, prepareCiSetupFiles } from "./ci-setup.js";
 import { createGithubWorkflowClient } from "./github-workflow.js";
 import { findLastRelease } from "./state.js";
@@ -1427,7 +1427,16 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   }
   if (!selection) return 0;
   if (selection.setup && !config.ci) config = { ...config, ci: defaultCiReleaseConfig(repositoryRoot, config) };
-  if (selection.setup && ciWasConfigured && config.ci && existsSync(path.join(repositoryRoot, CI_WORKFLOW_DIRECTORY, config.ci.workflow))) selection = { ...selection, setup: false };
+  if (selection.setup && ciWasConfigured && config.ci && existsSync(path.join(repositoryRoot, CI_WORKFLOW_DIRECTORY, config.ci.workflow))) {
+    // An existing workflow turns setup into an ordinary CI release only while it still matches the current configuration.
+    try {
+      await assertGeneratedCiWorkflowCurrent(repositoryRoot, config);
+    } catch (error) {
+      print(`${ICON.failure} ${error instanceof Error ? error.message : String(error)}${error instanceof ReleaseStepError ? ` ${error.hint}` : ""}`);
+      return FAILURE_EXIT_CODE;
+    }
+    selection = { ...selection, setup: false };
+  }
   const isCiPreparation = selection.execution === RELEASE_EXECUTION.ci;
   // Rejected before diagnosing or bumping: a pushed tag could never be published by a non-interactive worker.
   if (isCiPreparation) {
