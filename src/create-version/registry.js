@@ -94,6 +94,18 @@ export async function lookupRegistryVersions(selection, manifest, repositoryRoot
 }
 
 /**
+ * Checks the destination of an npm-protocol OIDC publication: npm trusted publishing only exists on
+ * the public npm registry, so GitHub Packages, GitLab and any other endpoint can never accept it.
+ * Shared by the worker and by CI preparation, which must reject it before the release tag exists.
+ *
+ * @param {SelectedRegistry} registry - Resolved descriptor of a non-JSR provider.
+ * @returns {string | null} Blocking reason, or `null` when the destination is the public npm registry.
+ */
+export function findNpmOidcRegistryProblem(registry) {
+  return registry.provider !== NPM_REGISTRY_PROVIDER || new URL(registry.registryUrl).href !== DEFAULT_NPM_REGISTRY_URL ? "OIDC de npm requiere el registry público de npm" : null;
+}
+
+/**
  * Checks a configured OIDC runtime without making a token mandatory or claiming provider write access.
  *
  * @param {SelectedRegistry} registry - Resolved descriptor.
@@ -103,7 +115,8 @@ async function oidcEnvironmentProblem(registry) {
   const github = Boolean(process.env.ACTIONS_ID_TOKEN_REQUEST_URL && process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN);
   const gitlab = Boolean(process.env.GITLAB_CI && process.env.NPM_ID_TOKEN);
   if (registry.provider === JSR_REGISTRY_PROVIDER) return github ? null : "JSR con OIDC requiere GitHub Actions con id-token: write y el paquete vinculado al repositorio";
-  if (registry.provider !== NPM_REGISTRY_PROVIDER || new URL(registry.registryUrl).href !== DEFAULT_NPM_REGISTRY_URL) return "OIDC de npm requiere el registry público de npm";
+  const registryProblem = findNpmOidcRegistryProblem(registry);
+  if (registryProblem !== null) return registryProblem;
   if (!github && !gitlab) return "npm con OIDC requiere GitHub Actions o GitLab CI con sus credenciales OIDC configuradas";
   if (!isStableReleaseVersion(process.versions.node) || compareReleaseVersions(process.versions.node, NPM_OIDC_MINIMUM_NODE_VERSION) < 0) return `OIDC requiere Node >= ${NPM_OIDC_MINIMUM_NODE_VERSION}`;
   const result = USES_SHELL_FOR_PACKAGE_MANAGERS ? await runCaptured("npm --version", [], { shell: true }) : await runCaptured("npm", ["--version"]);

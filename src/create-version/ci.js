@@ -12,7 +12,7 @@ import {
 } from "../constants/ci-release.js";
 import { BROWSER_AUTHENTICATION, NPM_OIDC_MINIMUM_NODE_VERSION, NPM_OIDC_MINIMUM_VERSION, NPM_REGISTRY_PROVIDER, OIDC_AUTHENTICATION } from "../constants/registry.js";
 import { PACKAGE_MANAGER } from "../constants/package-manager.js";
-import { CREATE_VERSION_FLAG, MAIN_BRANCH, MIGRATION_STATUS, NPM_AUTH_STATUS, NPM_LOOKUP_STATUS, PACKAGE_MANIFEST_FILE, PINNED_NODE_VERSION_FILE, RELEASE_MODE, RELEASE_REMOTE, RELEASE_STEP, REMOTE_MAIN_REF } from "../constants/create-version.js";
+import { CREATE_VERSION_FLAG, DEFAULT_NPM_REGISTRY_URL, MAIN_BRANCH, MIGRATION_STATUS, NPM_AUTH_STATUS, NPM_LOOKUP_STATUS, PACKAGE_MANIFEST_FILE, PINNED_NODE_VERSION_FILE, RELEASE_MODE, RELEASE_REMOTE, RELEASE_STEP, REMOTE_MAIN_REF } from "../constants/create-version.js";
 import { RELEASE_TAG_PREFIX } from "../constants/versions.js";
 import { compareReleaseVersions, findHighestStableVersion, isStableReleaseVersion, parseReleaseVersion, toReleaseTag } from "../versions.js";
 import { print, select } from "../terminal-ui.js";
@@ -20,6 +20,7 @@ import { ReleaseStepError } from "./errors.js";
 import { assertSafeCiPath, describeCiNodeVersion, extractPinnedPackageManagerVersion, renderCiReleaseWorkflow } from "./ci-setup.js";
 import { runCaptured } from "./process.js";
 import { isRegistryProvider } from "./registry-config.js";
+import { findNpmOidcRegistryProblem, resolveRegistry, selectProjectRegistry } from "./registry.js";
 
 /**
  * Detects a CI runtime from its conventional environment signals, accepting values such as `1`,
@@ -113,13 +114,14 @@ function assertCiNodeSupportsNpmOidc(repositoryRoot) {
  * the version pinned by `packageManager` is checked too and never raised silently, because that
  * would change the client that runs `npm ci` against the committed lockfile; an unpinned npm
  * project and other package managers get a capable npm installed by the workflow for publication
- * (see `requiresCiNpmOidcClient`), after `npm ci` in the unpinned npm case.
+ * (see `requiresCiNpmOidcClient`), after `npm ci` in the unpinned npm case. The effective npm
+ * destination is resolved as well, since trusted publishing only exists on the public npm registry.
  * @param {import("./config.js").ResolvedCreateVersionConfig} config - Project configuration.
- * @param {string} repositoryRoot - Project root whose `package.json` and `.nvmrc` pin the worker's runtime.
- * @returns {void}
- * @throws {ReleaseStepError} When the registry publication authorizes from a browser, or uses npm OIDC with a Node.js or npm pin below the trusted publishing minimum.
+ * @param {string} repositoryRoot - Project root whose `package.json`, `.nvmrc` and npm config pin the worker's runtime and destination.
+ * @returns {Promise<void>}
+ * @throws {ReleaseStepError} When the registry publication authorizes from a browser, or uses npm OIDC with a Node.js or npm pin below the trusted publishing minimum or a registry other than the public npm one.
  */
-export function assertCiCompatiblePublication(config, repositoryRoot) {
+export async function assertCiCompatiblePublication(config, repositoryRoot) {
   if (!isRegistryProvider(config.publish)) return;
   if (config.publication?.authentication === BROWSER_AUTHENTICATION) {
     throw new ReleaseStepError(
@@ -129,20 +131,60 @@ export function assertCiCompatiblePublication(config, repositoryRoot) {
   }
   if (config.publish !== NPM_REGISTRY_PROVIDER || config.publication?.authentication !== OIDC_AUTHENTICATION) return;
   assertCiNodeSupportsNpmOidc(repositoryRoot);
-  if (config.commands.packageManager !== PACKAGE_MANAGER.npm) return;
   const manifestPath = path.join(repositoryRoot, PACKAGE_MANIFEST_FILE);
   if (!existsSync(manifestPath)) return;
   let manifest;
   try {
     manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
   } catch (error) {
-    throw new ReleaseStepError(`No se pudo leer ${PACKAGE_MANIFEST_FILE} para comprobar la versión de npm que instala el worker de CI.`, `Corregí ${PACKAGE_MANIFEST_FILE}; no se creó, subió ni reenvió ningún release.`, { cause: error });
+    throw new ReleaseStepError(`No se pudo leer ${PACKAGE_MANIFEST_FILE} para comprobar la publicación npm del worker de CI.`, `Corregí ${PACKAGE_MANIFEST_FILE}; no se creó, subió ni reenvió ningún release.`, { cause: error });
   }
+  if (config.commands.packageManager === PACKAGE_MANAGER.npm) assertCiNpmPinSupportsOidc(manifest);
+  await assertCiNpmOidcRegistry(config, manifest, repositoryRoot);
+}
+
+/**
+ * Rejects an npm `packageManager` pin below the trusted publishing minimum: the worker installs
+ * exactly that npm and runs `npm ci` with it, so it is never raised silently.
+ * @param {Record<string, unknown>} manifest - Parsed project `package.json`.
+ * @returns {void}
+ * @throws {ReleaseStepError} When the pinned npm cannot reach the npm OIDC minimum.
+ */
+function assertCiNpmPinSupportsOidc(manifest) {
   const pinnedNpmVersion = extractPinnedPackageManagerVersion(manifest);
   if (pinnedNpmVersion === null || canPinnedVersionReach(pinnedNpmVersion, NPM_OIDC_MINIMUM_VERSION)) return;
   throw new ReleaseStepError(
     `packageManager fija npm@${pinnedNpmVersion}, que el worker de CI instala, pero la publicación npm con publication.authentication "${OIDC_AUTHENTICATION}" requiere npm >= ${NPM_OIDC_MINIMUM_VERSION}; el worker la rechazaría después de subir el tag.`,
     `Subí packageManager a npm@${NPM_OIDC_MINIMUM_VERSION} o superior en un commit propio (regenerá el workflow si ya existe), configurá publication.authentication "token" con su secret o usá --${CREATE_VERSION_FLAG.local}; no se creó, subió ni reenvió ningún release.`
+  );
+}
+
+/**
+ * Resolves the destination the worker publishes to (`publication.registryUrl`, `publishConfig` or
+ * npm's project config, as the worker does) and rejects it when npm trusted publishing cannot
+ * reach it, before the immutable release commit and tag exist.
+ * @param {import("./config.js").ResolvedCreateVersionConfig} config - Configuration publishing to npm through OIDC.
+ * @param {Record<string, unknown>} manifest - Parsed project `package.json`.
+ * @param {string} repositoryRoot - Project root whose npm configuration routes the publication.
+ * @returns {Promise<void>}
+ * @throws {ReleaseStepError} When the destination cannot be resolved or is not the public npm registry.
+ */
+async function assertCiNpmOidcRegistry(config, manifest, repositoryRoot) {
+  let registry;
+  try {
+    registry = await resolveRegistry(selectProjectRegistry(config), manifest, repositoryRoot);
+  } catch (error) {
+    throw new ReleaseStepError(
+      `No se pudo resolver el registry de la publicación npm con publication.authentication "${OIDC_AUTHENTICATION}" para comprobarlo antes del release en CI: ${error instanceof Error ? error.message : String(error)}.`,
+      `Corregí publication.registryUrl, publishConfig o la configuración de npm del proyecto; no se creó, subió ni reenvió ningún release.`,
+      { cause: error }
+    );
+  }
+  const registryProblem = findNpmOidcRegistryProblem(registry);
+  if (registryProblem === null) return;
+  throw new ReleaseStepError(
+    `La publicación npm con publication.authentication "${OIDC_AUTHENTICATION}" apunta a ${registry.registryUrl} (${registry.label}): ${registryProblem}; el worker la rechazaría después de subir el tag.`,
+    `Publicá en ${DEFAULT_NPM_REGISTRY_URL} (quitá publication.registryUrl, publishConfig.registry o el registry del .npmrc del proyecto), configurá publication.authentication "token" con su secret o usá --${CREATE_VERSION_FLAG.local}; no se creó, subió ni reenvió ningún release.`
   );
 }
 

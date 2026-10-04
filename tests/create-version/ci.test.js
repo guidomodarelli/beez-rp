@@ -764,7 +764,7 @@ describe("CI preparation invariants shared with local releases", () => {
     expect(github.dispatch).not.toHaveBeenCalled();
   }, GIT_FIXTURE_TEST_TIMEOUT_MS);
 
-  it("should leave OIDC and token registry authentication to the worker while rejecting browser authentication", () => {
+  it("should leave OIDC and token registry authentication to the worker while rejecting browser authentication", async () => {
     // Arrange
     const browserJsr = resolveCreateVersionConfig({ publish: "jsr" });
     const oidcJsr = resolveCreateVersionConfig({ publish: "jsr", publication: { authentication: "oidc" } });
@@ -772,10 +772,10 @@ describe("CI preparation invariants shared with local releases", () => {
     // Act and Assert
     const root = createTemporaryDirectory("beez-rp-ci-auth-");
     // Act and Assert
-    expect(() => assertCiCompatiblePublication(browserJsr, root)).toThrow(/no puede publicar desde GitHub Actions/);
-    expect(() => assertCiCompatiblePublication(oidcJsr, root)).not.toThrow();
-    expect(() => assertCiCompatiblePublication(tokenJsr, root)).not.toThrow();
-    expect(() => assertCiCompatiblePublication(resolveCreateVersionConfig({ publish: "npm" }), root)).not.toThrow();
+    await expect(assertCiCompatiblePublication(browserJsr, root)).rejects.toThrow(/no puede publicar desde GitHub Actions/);
+    await expect(assertCiCompatiblePublication(oidcJsr, root)).resolves.toBeUndefined();
+    await expect(assertCiCompatiblePublication(tokenJsr, root)).resolves.toBeUndefined();
+    await expect(assertCiCompatiblePublication(resolveCreateVersionConfig({ publish: "npm" }), root)).resolves.toBeUndefined();
   });
 
   it.each([
@@ -799,7 +799,7 @@ describe("CI preparation invariants shared with local releases", () => {
     // Act
     let rejectionMessage = null;
     try {
-      assertCiCompatiblePublication(config, root);
+      await assertCiCompatiblePublication(config, root);
     } catch (error) {
       rejectionMessage = error instanceof Error ? error.message : String(error);
     }
@@ -830,13 +830,40 @@ describe("CI preparation invariants shared with local releases", () => {
     // Act
     let rejectionMessage = null;
     try {
-      assertCiCompatiblePublication(config, root);
+      await assertCiCompatiblePublication(config, root);
     } catch (error) {
       rejectionMessage = error instanceof Error ? error.message : String(error);
     }
     // Assert
     expect(rejectionMessage === null).toBe(accepted);
     expect(/requiere Node >= 22\.14\.0/u.test(rejectionMessage ?? "")).toBe(!accepted);
+  });
+
+  it.each([
+    { scenario: "publishConfig.registry on a private host", packageName: "fixture-npm-registry", publishConfig: { registry: "https://npm.example.test/" }, publication: {}, npmrc: null, authentication: "oidc", accepted: false },
+    { scenario: "publication.registryUrl on a private host", packageName: "fixture-npm-registry", publishConfig: null, publication: { registryUrl: "https://npm.example.test/" }, npmrc: null, authentication: "oidc", accepted: false },
+    { scenario: "publishConfig.registry on GitHub Packages", packageName: "@fixture/npm-registry", publishConfig: { registry: "https://npm.pkg.github.com/" }, publication: {}, npmrc: null, authentication: "oidc", accepted: false },
+    { scenario: "the project .npmrc registry on a private host", packageName: "fixture-npm-registry", publishConfig: null, publication: {}, npmrc: "registry=https://npm.example.test/\n", authentication: "oidc", accepted: false },
+    { scenario: "publication.registryUrl on the public npm registry", packageName: "fixture-npm-registry", publishConfig: null, publication: { registryUrl: "https://registry.npmjs.org" }, npmrc: null, authentication: "oidc", accepted: true },
+    { scenario: "the default npm registry", packageName: "fixture-npm-registry", publishConfig: null, publication: {}, npmrc: null, authentication: "oidc", accepted: true },
+    { scenario: "publishConfig.registry on a private host", packageName: "fixture-npm-registry", publishConfig: { registry: "https://npm.example.test/" }, publication: {}, npmrc: null, authentication: "token", accepted: true },
+  ])("should accept $authentication npm publication to $scenario before creating the CI release only when trusted publishing can reach it: $accepted", async ({ packageName, publishConfig, publication, npmrc, authentication, accepted }) => {
+    // Arrange
+    const root = createTemporaryDirectory("beez-rp-ci-npm-registry-");
+    writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: packageName, version: "1.0.0", packageManager: "npm@11.5.1", ...(publishConfig ? { publishConfig } : {}) }));
+    if (npmrc !== null) writeFileSync(path.join(root, ".npmrc"), npmrc);
+    writeFileSync(path.join(root, "beez-rp.config.mjs"), `export default { publish: 'npm', publication: ${JSON.stringify({ ...publication, authentication })} };\n`);
+    const config = await loadCreateVersionConfig(root);
+    // Act
+    let rejectionMessage = null;
+    try {
+      await assertCiCompatiblePublication(config, root);
+    } catch (error) {
+      rejectionMessage = error instanceof Error ? error.message : String(error);
+    }
+    // Assert
+    expect(rejectionMessage === null).toBe(accepted);
+    expect(/OIDC de npm requiere el registry público de npm/u.test(rejectionMessage ?? "")).toBe(!accepted);
   });
 
   it.each([
@@ -933,9 +960,9 @@ describe("CI preparation invariants shared with local releases", () => {
   }, GIT_FIXTURE_TEST_TIMEOUT_MS);
 
   it.each([
-    { packageManager: "npm@10.9.0", dispatched: false },
-    { packageManager: "npm@11.5.1", dispatched: true },
-  ])("should retry an OIDC npm release through CI only when the pinned $packageManager can publish it", async ({ packageManager, dispatched }) => {
+    { packageManager: "npm@10.9.0", rejectedBy: "the npm pin" },
+    { packageManager: "npm@11.5.1", rejectedBy: "the non-public registry" },
+  ])("should refuse to retry an OIDC npm release through CI with $packageManager because of $rejectedBy", async ({ packageManager }) => {
     // Arrange
     const registry = await startFixtureNpmRegistry({ users: { "fixture-owner-token": "fixture-owner" }, packages: { "fixture-ci-app": { maintainers: ["fixture-owner"], versions: ["1.2.3"] } } });
     try {
@@ -946,31 +973,36 @@ describe("CI preparation invariants shared with local releases", () => {
       // Act
       const status = await runCreateVersion({ repositoryRoot: root, argv: ["--retry-ci", "v1.2.3"] });
       // Assert
-      expect(status).toBe(dispatched ? 0 : 1);
+      expect(status).toBe(1);
       expect(runGit(["tag", "--list"], remote)).toBe("v1.2.3");
-      expect(github.preflight).toHaveBeenCalledTimes(dispatched ? 1 : 0);
-      expect(github.dispatch).toHaveBeenCalledTimes(dispatched ? 1 : 0);
+      expect(github.preflight).not.toHaveBeenCalled();
+      expect(github.dispatch).not.toHaveBeenCalled();
     } finally {
       await registry.close();
     }
   }, GIT_FIXTURE_TEST_TIMEOUT_MS);
 
-  it("should keep preparing an OIDC npm CI release when the pinned npm reaches the trusted publishing minimum", async () => {
+  it.each([
+    { argv: ["--bump", "patch"], regenerateWorkflow: false },
+    { argv: ["--setup-ci", "--bump", "patch"], regenerateWorkflow: true },
+  ])("should reject OIDC npm publication whose publishConfig.registry is not the public npm registry before creating the CI release for $argv", async ({ argv, regenerateWorkflow }) => {
     // Arrange
     const registry = await startFixtureNpmRegistry({ users: { "fixture-owner-token": "fixture-owner" }, packages: { "fixture-ci-app": { maintainers: ["fixture-owner"], versions: ["1.2.3"] } } });
     try {
       const { root, remote } = createCiProject();
       const manifest = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
-      commitProjectConfig(root, "export default { checks: ['node checks.mjs'], publish: 'npm', publication: { authentication: 'oidc' }, ci: { workflow: 'release.yml' } };\n", { "package.json": JSON.stringify({ ...manifest, packageManager: "npm@11.5.1", publishConfig: { registry: registry.registryUrl } }) });
-      const configuredSha = commitGeneratedWorkflow(root);
+      const privateRegistrySha = commitProjectConfig(root, "export default { checks: ['node checks.mjs'], publish: 'npm', publication: { authentication: 'oidc' }, ci: { workflow: 'release.yml' } };\n", { "package.json": JSON.stringify({ ...manifest, packageManager: "npm@11.5.1", publishConfig: { registry: registry.registryUrl } }) });
+      const configuredSha = regenerateWorkflow ? commitGeneratedWorkflow(root) : privateRegistrySha;
       const github = isolateGithub();
       // Act
-      const status = await runCreateVersion({ repositoryRoot: root, argv: ["--setup-ci", "--bump", "patch"] });
+      const status = await runCreateVersion({ repositoryRoot: root, argv });
       // Assert
-      expect(status).toBe(0);
-      expect(runGit(["rev-parse", "HEAD~1"], root)).toBe(configuredSha);
-      expect(runGit(["rev-parse", "v1.2.4^{commit}"], remote)).toBe(runGit(["rev-parse", "HEAD"], root));
-      expect(github.dispatch).toHaveBeenCalledOnce();
+      expect(status).toBe(1);
+      expect(runGit(["rev-parse", "HEAD"], root)).toBe(configuredSha);
+      expect(runGit(["rev-parse", "main"], remote)).toBe(configuredSha);
+      expect(runGit(["tag", "--list"], remote)).toBe("v1.2.3");
+      expect(github.preflight).not.toHaveBeenCalled();
+      expect(github.dispatch).not.toHaveBeenCalled();
       expect(registry.publications).toEqual([]);
     } finally {
       await registry.close();
