@@ -6,7 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { loadCreateVersionConfig, resolveCreateVersionConfig } from "../../src/create-version/config.js";
@@ -1469,5 +1469,101 @@ describe("CI preparation invariants shared with local releases", () => {
     } finally {
       await registry.close();
     }
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+});
+
+/**
+ * Pushes the release commit and tag `v1.2.4` of the fixture with the given configuration, then an
+ * ordinary commit on main that keeps the version but replaces the configuration and renames the workflow.
+ * @param {string} root - Fixture checkout created by {@link createCiProject}.
+ * @param {{ releaseConfig: string, laterConfig: string, laterWorkflow?: string }} options - Configuration stored in the tag and the one main moves to.
+ * @returns {{ releaseSha: string, mainSha: string }} Release commit and the later main commit.
+ */
+function pushReleaseThenChangeCiConfig(root, { releaseConfig, laterConfig, laterWorkflow }) {
+  const manifest = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
+  writeFileSync(path.join(root, "package.json"), JSON.stringify({ ...manifest, version: "1.2.4" }));
+  writeFileSync(path.join(root, "beez-rp.config.mjs"), releaseConfig);
+  runGit(["add", "-A"], root);
+  runGit(["commit", "--quiet", "-m", "1.2.4"], root);
+  runGit(["tag", "-a", "v1.2.4", "-m", "1.2.4"], root);
+  const releaseSha = runGit(["rev-parse", "HEAD"], root);
+  writeFileSync(path.join(root, "beez-rp.config.mjs"), laterConfig);
+  if (laterWorkflow) runGit(["mv", ".github/workflows/release.yml", `.github/workflows/${laterWorkflow}`], root);
+  runGit(["add", "-A"], root);
+  runGit(["commit", "--quiet", "-m", "ci: change the release workflow"], root);
+  runGit(["push", "--quiet", "origin", "main", "--tags"], root);
+  return { releaseSha, mainSha: runGit(["rev-parse", "HEAD"], root) };
+}
+
+/**
+ * Lists the temporary checkouts of release tags left inside the fixture's Git directory.
+ * @param {string} root - Fixture checkout.
+ * @returns {string[]} Leftover directory names; empty when every retry cleaned up.
+ */
+function listLeftoverReleaseTagCheckouts(root) {
+  return readdirSync(path.join(root, ".git")).filter((entryName) => entryName.startsWith("beez-rp-release-tag-config-"));
+}
+
+describe("CI retry resolves the configuration stored in the release tag", () => {
+  it("should preflight and dispatch the tagged workflow and bindings when main later renamed the workflow and changed its bindings", async () => {
+    // Arrange
+    const { root, remote } = createCiProject();
+    const { releaseSha, mainSha } = pushReleaseThenChangeCiConfig(root, {
+      releaseConfig: "export default { checks: ['node checks.mjs'], ci: { workflow: 'release.yml', secrets: ['RELEASE_DEPLOY_TOKEN'], variables: ['RELEASE_TARGET'] } };\n",
+      laterConfig: "export default { checks: ['node checks.mjs'], ci: { workflow: 'deploy.yml', secrets: ['MAIN_DEPLOY_TOKEN'], variables: ['MAIN_TARGET'] } };\n",
+      laterWorkflow: "deploy.yml",
+    });
+    const github = isolateGithub();
+    const indexBefore = runGit(["ls-files", "--stage"], root);
+    // Act
+    const status = await runCreateVersion({ repositoryRoot: root, argv: ["--retry-ci", "v1.2.4"] });
+    // Assert
+    expect(status).toBe(0);
+    expect(github.preflight).toHaveBeenCalledWith("release.yml", ["RELEASE_DEPLOY_TOKEN"], ["RELEASE_TARGET"]);
+    expect(github.dispatch).toHaveBeenCalledWith("release.yml", { version: "1.2.4", tag: "v1.2.4", sha: releaseSha }, "npm run create-version --retry-ci v1.2.4");
+    expect(runGit(["rev-parse", "HEAD"], root)).toBe(mainSha);
+    expect(runGit(["rev-parse", "main"], remote)).toBe(mainSha);
+    expect(runGit(["ls-files", "--stage"], root)).toBe(indexBefore);
+    expect(runGit(["status", "--porcelain"], root)).toBe("");
+    expect(listLeftoverReleaseTagCheckouts(root)).toEqual([]);
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+
+  it("should preview the tagged workflow without GitHub calls when the retry is a dry run", async () => {
+    // Arrange
+    const { root } = createCiProject();
+    pushReleaseThenChangeCiConfig(root, {
+      releaseConfig: "export default { checks: ['node checks.mjs'], ci: { workflow: 'release.yml' } };\n",
+      laterConfig: "export default { checks: ['node checks.mjs'], ci: { workflow: 'deploy.yml' } };\n",
+      laterWorkflow: "deploy.yml",
+    });
+    const github = isolateGithub();
+    const output = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    // Act
+    const status = await runCreateVersion({ repositoryRoot: root, argv: ["--retry-ci", "v1.2.4", "--dry-run"] });
+    // Assert
+    const printed = flattenOutput(output.mock.calls.map(([chunk]) => String(chunk)).join(""));
+    output.mockRestore();
+    expect(status).toBe(0);
+    expect(printed).toContain("se reenviaría v1.2.4 a release.yml");
+    expect(github.preflight).not.toHaveBeenCalled();
+    expect(github.dispatch).not.toHaveBeenCalled();
+    expect(listLeftoverReleaseTagCheckouts(root)).toEqual([]);
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+
+  it("should refuse to retry without GitHub calls when the tagged configuration did not prepare the release for CI", async () => {
+    // Arrange
+    const { root } = createCiProject();
+    pushReleaseThenChangeCiConfig(root, {
+      releaseConfig: "export default { checks: ['node checks.mjs'] };\n",
+      laterConfig: "export default { checks: ['node checks.mjs'], ci: { workflow: 'release.yml' } };\n",
+    });
+    const github = isolateGithub();
+    // Act
+    const status = await runCreateVersion({ repositoryRoot: root, argv: ["--retry-ci", "v1.2.4"] });
+    // Assert
+    expect(status).toBe(1);
+    expect(github.preflight).not.toHaveBeenCalled();
+    expect(github.dispatch).not.toHaveBeenCalled();
+    expect(listLeftoverReleaseTagCheckouts(root)).toEqual([]);
   }, GIT_FIXTURE_TEST_TIMEOUT_MS);
 });

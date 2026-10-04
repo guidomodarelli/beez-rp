@@ -91,9 +91,10 @@ import { prepareJsrVersionUpdates, readJsrManifest } from "./jsr.js";
 import { JSR_REGISTRY_PROVIDER, REGISTRY_LABELS } from "../constants/registry.js";
 import { CI_DISPATCH_STATUS, CI_GIT_HOOKS_OPTION, CI_VERCEL_DEPLOYMENT, CI_WORKER_CONFIGURATION_FILES, CI_WORKFLOW_DIRECTORY, DISPATCH_CI_RELEASE_STEP, RELEASE_EXECUTION } from "../constants/ci-release.js";
 import { findCompletedCiPublication, requiresCiPublicationHistory } from "./ci-publication-history.js";
-import { appendCiDispatch, assertCiCompatiblePublication, assertCiInstallLockfileCommitted, assertCiNodeVersionFileCommitted, assertCiWorkflowFile, assertGeneratedCiWorkflowCurrent, assertResumeExecutionMatches, buildCiWorkerPlan, chooseReleaseExecution, defaultCiReleaseConfig, isCommittedCiWorkflowGenerated, readCiReleaseIdentity, readCommittedCiWorkflow } from "./ci.js";
+import { appendCiDispatch, assertCiCompatiblePublication, assertCiInstallLockfileCommitted, assertCiNodeVersionFileCommitted, assertGeneratedCiWorkflowCurrent, assertResumeExecutionMatches, buildCiWorkerPlan, chooseReleaseExecution, defaultCiReleaseConfig, isCommittedCiWorkflowGenerated, readCiReleaseIdentity, readCommittedCiWorkflow } from "./ci.js";
 import { assertCiSetupFilesUnchanged, describeCiEnvironment, prepareCiReleaseMetadata, prepareCiSetupFiles } from "./ci-setup.js";
 import { createGithubWorkflowClient } from "./github-workflow.js";
+import { loadReleaseTagConfig } from "./release-tag-config.js";
 import { formatReleaseExecutionTrailer } from "./release-execution.js";
 import { findLastRelease } from "./state.js";
 
@@ -1527,13 +1528,17 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
 
   if (options.retryCi) {
     try {
-      if (!config.ci || !workflowClient) throw new ReleaseStepError("No hay un workflow configurado para reenviar el release.", "Configurá ci.workflow y volvé a ejecutar --retry-ci con el mismo tag.");
-      assertCiWorkflowFile(repositoryRoot, config.ci.workflow);
+      if (!workflowClient) throw new ReleaseStepError("No hay un workflow configurado para reenviar el release.", "Configurá ci.workflow y volvé a ejecutar --retry-ci con el mismo tag.");
       const release = await readCiReleaseIdentity(reader, options.retryCi);
-      if (options.dryRun) { print(`--dry-run: se reenviaría ${release.tag} a ${config.ci.workflow}; no se cambió nada.`); return 0; }
-      const environment = describeCiEnvironment(config);
-      await workflowClient.preflight(config.ci.workflow, environment.secrets, environment.variables);
-      const submitted = await workflowClient.dispatch(config.ci.workflow, release, `${config.commands.createVersion} --retry-ci ${release.tag}`);
+      // The worker runs the workflow and configuration stored in the tag: later commits on main that keep
+      // the version may rename the workflow or change its bindings, so both are resolved from the tag.
+      const releaseConfig = await loadReleaseTagConfig(repositoryRoot, release.tag);
+      if (!releaseConfig.ci) throw new ReleaseStepError(`${release.tag} no tiene ci.workflow en su configuración; ese release no se preparó para CI.`, `Publicá ${release.tag} con --local; no se envió ninguna ejecución.`);
+      const releaseWorkflow = releaseConfig.ci.workflow;
+      if (options.dryRun) { print(`--dry-run: se reenviaría ${release.tag} a ${releaseWorkflow}; no se cambió nada.`); return 0; }
+      const environment = describeCiEnvironment(releaseConfig);
+      await workflowClient.preflight(releaseWorkflow, environment.secrets, environment.variables);
+      const submitted = await workflowClient.dispatch(releaseWorkflow, release, `${config.commands.createVersion} --retry-ci ${release.tag}`);
       print(`${release.tag} ${submitted.status === CI_DISPATCH_STATUS.existing ? "ya tiene una ejecución activa o exitosa" : "enviado a CI"}: ${submitted.url ?? "revisá Actions"}. No se creó otra versión.`);
       return 0;
     } catch (error) {

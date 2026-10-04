@@ -109,6 +109,13 @@ export const CI_DENO_JSR_CLIENT = "deno";
 /** Observable acceptance outcomes returned by the workflow adapter. */
 export const CI_DISPATCH_STATUS = Object.freeze({ submitted: "submitted", existing: "existing" });
 
+/**
+ * Prefix of the temporary directory, created inside the repository's Git directory, where `--retry-ci`
+ * checks out the release tag to load the configuration stored in it; living under the checkout lets the
+ * tagged configuration resolve the project's installed dependencies while staying outside the working tree.
+ */
+export const CI_RELEASE_TAG_CONFIG_DIRECTORY_PREFIX = "beez-rp-release-tag-config-";
+
 /** Early-build metadata; its version and the commit that changes it scope the decision to exactly one release commit. */
 export const CI_RELEASE_METADATA_FILE = ".beez-rp/release.json";
 
