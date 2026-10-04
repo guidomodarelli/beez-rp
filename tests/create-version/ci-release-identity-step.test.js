@@ -11,7 +11,7 @@ import path from "node:path";
 import { resolveCreateVersionConfig } from "../../src/create-version/config.js";
 import { renderCiReleaseWorkflow } from "../../src/create-version/ci-setup.js";
 import { CI_RELEASE_IDENTITY_STEP_NAME } from "../../src/constants/ci-release.js";
-import { GIT_FIXTURE_TEST_TIMEOUT_MS, cleanupTemporaryDirectories, commandEnvironment, commitFixtureRepository, createTemporaryDirectory, runGit } from "./support/cli-harness.js";
+import { GIT_FIXTURE_TEST_TIMEOUT_MS, cleanupTemporaryDirectories, commandEnvironment, commitFixtureRepository, createTemporaryDirectory, resolveBashExecutable, runGit } from "./support/cli-harness.js";
 
 /** @typedef {{ worker: string, releaseSha: string, unmergedSha: string }} ReleaseOrigin */
 
@@ -99,7 +99,7 @@ function runIdentityScript(worker, script, checkoutRef, inputs) {
   runGit(["checkout", "--quiet", "--detach", checkoutRef], worker);
   const scriptPath = path.join(worker, "..", "identity.sh");
   writeFileSync(scriptPath, `${script}\n`);
-  return spawnSync("bash", [scriptPath], { cwd: worker, encoding: "utf8", env: commandEnvironment({ BEEZ_RP_RELEASE_VERSION: inputs.version, BEEZ_RP_RELEASE_SHA: inputs.sha, RELEASE_TAG: inputs.tag }) });
+  return spawnSync(resolveBashExecutable(), [scriptPath], { cwd: worker, encoding: "utf8", env: commandEnvironment({ BEEZ_RP_RELEASE_VERSION: inputs.version, BEEZ_RP_RELEASE_SHA: inputs.sha, RELEASE_TAG: inputs.tag }) });
 }
 
 afterEach(() => {

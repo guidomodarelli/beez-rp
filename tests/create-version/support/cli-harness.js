@@ -104,6 +104,24 @@ export function runGit(gitArguments, workingDirectory) {
 }
 
 /**
+ * Path from Git for Windows' `git --exec-path` (`<install>/mingw64/libexec/git-core`) to its Bash.
+ * `bash` on the Windows `PATH` usually resolves to WSL, which drops the backslashes of Windows
+ * paths and does not inherit the spawned environment.
+ */
+const GIT_FOR_WINDOWS_BASH_FROM_EXEC_PATH = ["..", "..", "..", "bin", "bash.exe"];
+
+/**
+ * Bash that runs scripts against the same Git the fixtures use: Git for Windows' Bash on Windows,
+ * `bash` from `PATH` elsewhere.
+ *
+ * @returns {string} Bash executable.
+ */
+export function resolveBashExecutable() {
+  if (process.platform !== "win32") return "bash";
+  return path.resolve(runGit(["--exec-path"], process.cwd()), ...GIT_FOR_WINDOWS_BASH_FROM_EXEC_PATH);
+}
+
+/**
  * Turns a fixture directory into a Git repository (when it is not one yet) and commits every file,
  * so code that reads HEAD, as the CI worker sees the release commit, finds the fixture content.
  *
