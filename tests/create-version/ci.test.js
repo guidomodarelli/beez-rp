@@ -10,7 +10,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { loadCreateVersionConfig, resolveCreateVersionConfig } from "../../src/create-version/config.js";
-import { assertCiCompatiblePublication, assertCiInstallLockfileCommitted, assertCiNodeVersionFileCommitted, assertGeneratedCiWorkflowCurrent, assertResumeExecutionMatches, chooseReleaseExecution } from "../../src/create-version/ci.js";
+import { assertCiCompatiblePublication, assertCiInstallLockfileCommitted, assertCiNodeVersionFileCommitted, assertGeneratedCiWorkflowCurrent, assertResumeExecutionMatches, chooseReleaseExecution, isCommittedCiWorkflowGenerated } from "../../src/create-version/ci.js";
 import { createGitReader } from "../../src/create-version/process.js";
 import { decideBuildForCheckout } from "../../src/build-gate.js";
 import { CiReleaseError, ReleaseStepError } from "../../src/create-version/errors.js";
@@ -763,6 +763,50 @@ describe("local CI preparation with real Git", () => {
     expect(runGit(["rev-parse", "v1.2.4^{commit}"], remote)).toBe(runGit(["rev-parse", "HEAD"], root));
     expect(runGit(["ls-tree", "--name-only", "HEAD", "notes.txt"], root)).toBe("");
     expect(readFileSync(path.join(root, "notes.txt"), "utf8")).toBe("Borrador local\n");
+    expect(github.dispatch).toHaveBeenCalledOnce();
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+
+  it.each([
+    ["the lockfile its frozen install needs was removed from HEAD", "lockfile"],
+    ["the .nvmrc on disk is ignored by Git instead of committed", "ignored-nvmrc"],
+  ])("should block an ordinary CI release with the committed generated workflow before any commit, tag or dispatch when %s", async (_scenario, missingInput) => {
+    // Arrange
+    const { root, remote } = createCiProject();
+    if (missingInput === "lockfile") {
+      runGit(["rm", "--quiet", "package-lock.json"], root);
+      runGit(["commit", "--quiet", "-m", "chore: drop the lockfile"], root);
+    } else {
+      writeFileSync(path.join(root, ".gitignore"), "*.log\nnode_modules\n.nvmrc\n");
+      runGit(["commit", "--quiet", "-am", "chore: ignore the Node.js pin"], root);
+    }
+    const generatedSha = commitGeneratedWorkflow(root);
+    if (missingInput === "ignored-nvmrc") writeFileSync(path.join(root, ".nvmrc"), "24\n");
+    const github = isolateGithub();
+    // Act
+    const status = await runCreateVersion({ repositoryRoot: root, argv: ["--ci", "--bump", "patch"] });
+    // Assert
+    expect(await isCommittedCiWorkflowGenerated(root, await loadCreateVersionConfig(root))).toBe(true);
+    expect(status).toBe(1);
+    expect(runGit(["rev-parse", "HEAD"], root)).toBe(generatedSha);
+    expect(runGit(["rev-parse", "main"], remote)).toBe(generatedSha);
+    expect(runGit(["tag", "--list"], remote)).toBe("v1.2.3");
+    expect(github.preflight).not.toHaveBeenCalled();
+    expect(github.dispatch).not.toHaveBeenCalled();
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+
+  it("should leave the install inputs of a customized committed workflow to the project during an ordinary CI release", async () => {
+    // Arrange
+    const { root, remote } = createCiProject();
+    runGit(["rm", "--quiet", "package-lock.json"], root);
+    runGit(["commit", "--quiet", "-m", "chore: drop the lockfile"], root);
+    runGit(["push", "--quiet", "origin", "main"], root);
+    const github = isolateGithub();
+    // Act
+    const status = await runCreateVersion({ repositoryRoot: root, argv: ["--ci", "--bump", "patch"] });
+    // Assert
+    expect(await isCommittedCiWorkflowGenerated(root, await loadCreateVersionConfig(root))).toBe(false);
+    expect(status).toBe(0);
+    expect(runGit(["rev-parse", "v1.2.4^{commit}"], remote)).toBe(runGit(["rev-parse", "HEAD"], root));
     expect(github.dispatch).toHaveBeenCalledOnce();
   }, GIT_FIXTURE_TEST_TIMEOUT_MS);
 

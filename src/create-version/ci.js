@@ -302,6 +302,34 @@ function toWorkflowLines(content) {
 }
 
 /**
+ * Tells whether two workflows have the same lines, regardless of checkout line endings.
+ * @param {string} committedContent - Workflow committed at HEAD.
+ * @param {string} renderedContent - Workflow setup renders for the current configuration.
+ * @returns {boolean} True when every line matches in order.
+ */
+function haveSameWorkflowLines(committedContent, renderedContent) {
+  const committedLines = toWorkflowLines(committedContent);
+  const renderedLines = toWorkflowLines(renderedContent);
+  return committedLines.length === renderedLines.length && committedLines.every((line, index) => line === renderedLines[index]);
+}
+
+/**
+ * Tells whether the configured workflow committed at HEAD is exactly the one setup renders for the
+ * current configuration, so an ordinary CI release knows it installs dependencies with a frozen
+ * lockfile and follows the committed `.nvmrc` like `--setup-ci` does. A missing, non-regular or
+ * customized workflow is not the generated one; its own checks stay with the release flow.
+ * @param {string} repositoryRoot - Project root.
+ * @param {import("./config.js").ResolvedCreateVersionConfig} config - Project configuration.
+ * @returns {Promise<boolean>} True when HEAD commits the generated workflow unchanged.
+ * @throws {ReleaseStepError} When Git cannot list or read HEAD.
+ */
+export async function isCommittedCiWorkflowGenerated(repositoryRoot, config) {
+  if (!config.ci) return false;
+  const committedWorkflow = await readCommittedRegularFile(repositoryRoot, `${CI_WORKFLOW_DIRECTORY}/${config.ci.workflow}`);
+  return committedWorkflow !== null && haveSameWorkflowLines(committedWorkflow, await renderCiReleaseWorkflow(repositoryRoot, config));
+}
+
+/**
  * Rejects `--setup-ci` over an existing workflow whose committed content no longer matches what
  * setup would generate for the current configuration (for example a new publication token binding).
  * Regeneration is never automatic: the committed file may hold intentional manual edits, so the
@@ -315,9 +343,11 @@ export async function assertGeneratedCiWorkflowCurrent(repositoryRoot, config) {
   if (!config.ci) return;
   const workflowPath = `${CI_WORKFLOW_DIRECTORY}/${config.ci.workflow}`;
   const regenerateHint = `Regeneralo con --${CREATE_VERSION_FLAG.setupCi} después de borrarlo en un commit propio, o actualizalo y commitealo a mano; si lo personalizaste a propósito, usá --${CREATE_VERSION_FLAG.ci}. No se creó la versión ni el tag.`;
-  const committedLines = toWorkflowLines(await readCommittedCiWorkflow(repositoryRoot, config.ci.workflow, regenerateHint));
-  const renderedLines = toWorkflowLines(await renderCiReleaseWorkflow(repositoryRoot, config));
-  if (committedLines.length === renderedLines.length && committedLines.every((line, index) => line === renderedLines[index])) return;
+  const committedWorkflow = await readCommittedCiWorkflow(repositoryRoot, config.ci.workflow, regenerateHint);
+  const renderedWorkflow = await renderCiReleaseWorkflow(repositoryRoot, config);
+  if (haveSameWorkflowLines(committedWorkflow, renderedWorkflow)) return;
+  const committedLines = toWorkflowLines(committedWorkflow);
+  const renderedLines = toWorkflowLines(renderedWorkflow);
   const missingLines = renderedLines.filter((line) => line.trim() !== "" && !committedLines.includes(line)).map((line) => line.trim());
   const missingDetail = missingLines.length > 0 ? ` Líneas esperadas ausentes: ${missingLines.slice(0, CI_WORKFLOW_DRIFT_PREVIEW_LINES).join(" | ")}.` : "";
   throw new ReleaseStepError(`${workflowPath} no coincide con el workflow que --${CREATE_VERSION_FLAG.setupCi} genera para la configuración actual; el worker podría fallar después de subir el tag.${missingDetail}`, regenerateHint);

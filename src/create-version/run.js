@@ -91,7 +91,7 @@ import { prepareJsrVersionUpdates, readJsrManifest } from "./jsr.js";
 import { JSR_REGISTRY_PROVIDER, REGISTRY_LABELS } from "../constants/registry.js";
 import { CI_DISPATCH_STATUS, CI_GIT_HOOKS_OPTION, CI_VERCEL_DEPLOYMENT, CI_WORKER_CONFIGURATION_FILES, CI_WORKFLOW_DIRECTORY, DISPATCH_CI_RELEASE_STEP, RELEASE_EXECUTION } from "../constants/ci-release.js";
 import { findCompletedCiPublication, requiresCiPublicationHistory } from "./ci-publication-history.js";
-import { appendCiDispatch, assertCiCompatiblePublication, assertCiInstallLockfileCommitted, assertCiNodeVersionFileCommitted, assertCiWorkflowFile, assertGeneratedCiWorkflowCurrent, assertResumeExecutionMatches, buildCiWorkerPlan, chooseReleaseExecution, defaultCiReleaseConfig, readCiReleaseIdentity, readCommittedCiWorkflow } from "./ci.js";
+import { appendCiDispatch, assertCiCompatiblePublication, assertCiInstallLockfileCommitted, assertCiNodeVersionFileCommitted, assertCiWorkflowFile, assertGeneratedCiWorkflowCurrent, assertResumeExecutionMatches, buildCiWorkerPlan, chooseReleaseExecution, defaultCiReleaseConfig, isCommittedCiWorkflowGenerated, readCiReleaseIdentity, readCommittedCiWorkflow } from "./ci.js";
 import { assertCiSetupFilesUnchanged, describeCiEnvironment, prepareCiReleaseMetadata, prepareCiSetupFiles } from "./ci-setup.js";
 import { createGithubWorkflowClient } from "./github-workflow.js";
 import { formatReleaseExecutionTrailer } from "./release-execution.js";
@@ -1435,7 +1435,7 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   if (!selection) return 0;
   if (selection.setup && !config.ci) config = { ...config, ci: defaultCiReleaseConfig(repositoryRoot, config) };
   // Setup either writes the generated workflow or keeps an existing one that still matches it; both install from the committed lockfile.
-  const usesGeneratedWorkflow = selection.setup;
+  const setsUpGeneratedWorkflow = selection.setup;
   if (selection.setup && ciWasConfigured && config.ci && existsSync(path.join(repositoryRoot, CI_WORKFLOW_DIRECTORY, config.ci.workflow))) {
     // An existing workflow turns setup into an ordinary CI release only while it still matches the current configuration.
     try {
@@ -1451,6 +1451,8 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   if (isCiPreparation) {
     try {
       await assertCiCompatiblePublication(config, repositoryRoot);
+      // An ordinary CI release with the generated workflow committed installs the same way; a retry reuses its tag's files.
+      const usesGeneratedWorkflow = setsUpGeneratedWorkflow || (!options.retryCi && await isCommittedCiWorkflowGenerated(repositoryRoot, config));
       if (usesGeneratedWorkflow) {
         await assertCiInstallLockfileCommitted(repositoryRoot, config.commands.packageManager);
         await assertCiNodeVersionFileCommitted(repositoryRoot);
