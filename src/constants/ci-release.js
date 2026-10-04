@@ -144,3 +144,27 @@ export const CI_VERCEL_IGNORE_PLACEHOLDER = "__ORIGINAL_IGNORE_COMMAND__";
 
 /** Rendered workflow lines quoted when a committed generated workflow drifted from the current configuration. */
 export const CI_WORKFLOW_DRIFT_PREVIEW_LINES = 3;
+
+/** Prefix of the `run-name` the generated workflow gives each dispatched release, followed by its tag and commit. */
+export const CI_RELEASE_RUN_TITLE_PREFIX = "beez-rp release";
+
+/** Generated workflow step that runs `--ci-release`; its success proves checks, preparation and publication finished. */
+export const CI_RELEASE_WORKER_STEP_NAME = "Checks y publicación del release";
+
+/** Environment the worker reads to query its own GitHub Actions history (set by Actions, plus the bound job token). */
+export const CI_ACTIONS_HISTORY_ENVIRONMENT = Object.freeze({ apiUrl: "GITHUB_API_URL", repository: "GITHUB_REPOSITORY", token: "GITHUB_TOKEN" });
+
+/** GitHub REST API used when the runner does not provide `GITHUB_API_URL`. */
+export const CI_DEFAULT_GITHUB_API_URL = "https://api.github.com";
+
+/** REST API version pinned for the worker's Actions history requests. */
+export const CI_GITHUB_API_VERSION = "2022-11-28";
+
+/** Page size of the worker's Actions history requests; one release has far fewer runs, attempts or jobs. */
+export const CI_ACTIONS_HISTORY_PAGE_SIZE = 100;
+
+/** Maximum wait for each Actions history request before the worker stops without publishing, in milliseconds. */
+export const CI_ACTIONS_HISTORY_TIMEOUT_MS = 30_000;
+
+/** Step conclusion GitHub Actions reports for a step that finished successfully. */
+export const CI_STEP_SUCCESS_CONCLUSION = "success";

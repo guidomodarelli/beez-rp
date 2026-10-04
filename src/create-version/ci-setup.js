@@ -15,6 +15,7 @@ import {
 } from "../constants/ci-release.js";
 import { CREATE_VERSION_CONFIG_FILES, PACKAGE_MANIFEST_FILE, PINNED_NODE_VERSION_FILE, VERSION_PREFIX_PATTERN } from "../constants/create-version.js";
 import { PACKAGE_MANAGER } from "../constants/package-manager.js";
+import { requiresCiPublicationHistory } from "./ci-publication-history.js";
 import { renderCiReleaseIdentityStep } from "./ci-release-identity-step.js";
 import { ReleaseStepError } from "./errors.js";
 import { runCaptured } from "./process.js";
@@ -114,12 +115,15 @@ export function renderCiReleaseWorkflow(repositoryRoot, config) {
     packageSetup = [...(pinnedVersion ? ["      - name: Configurar npm", `        run: npm install --global npm@${pinnedVersion}`] : []), "      - name: Instalar dependencias", "        run: npm ci", ...npmOidcClientSetup].join("\n");
   }
   const environment = describeCiEnvironment(config);
+  const readsPublicationHistory = requiresCiPublicationHistory(config);
   const bindings = [
     ...environment.secrets.filter((name) => !environment.deploymentSecrets.includes(name)).map((name) => `      ${name}: \${{ secrets.${name} }}`),
     ...environment.variables.map((name) => `      ${name}: \${{ vars.${name} }}`),
-    ...(environment.githubToken ? ["      GITHUB_TOKEN: ${{ github.token }}"] : []),
+    // The worker reads its own Actions history to skip a custom publisher that an earlier attempt finished.
+    ...(environment.githubToken || readsPublicationHistory ? ["      GITHUB_TOKEN: ${{ github.token }}"] : []),
   ];
   const permissions = [
+    ...(readsPublicationHistory ? ["  actions: read"] : []),
     ...(config.publication.authentication === OIDC_AUTHENTICATION ? ["  id-token: write"] : []),
     ...(environment.githubToken ? [`  packages: ${environment.githubTokenWrite ? "write" : "read"}`] : []),
   ].join("\n");

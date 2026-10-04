@@ -90,6 +90,7 @@ import { checkRegistryAccess, lookupRegistryVersions, publishRegistryRelease, re
 import { prepareJsrVersionUpdates, readJsrManifest } from "./jsr.js";
 import { JSR_REGISTRY_PROVIDER, REGISTRY_LABELS } from "../constants/registry.js";
 import { CI_DISPATCH_STATUS, CI_GIT_HOOKS_OPTION, CI_VERCEL_DEPLOYMENT, CI_WORKFLOW_DIRECTORY, DISPATCH_CI_RELEASE_STEP, RELEASE_EXECUTION } from "../constants/ci-release.js";
+import { findCompletedCiPublication, requiresCiPublicationHistory } from "./ci-publication-history.js";
 import { appendCiDispatch, assertCiCompatiblePublication, assertCiInstallLockfileCommitted, assertCiWorkflowFile, assertGeneratedCiWorkflowCurrent, assertResumeExecutionMatches, buildCiWorkerPlan, chooseReleaseExecution, defaultCiReleaseConfig, readCiReleaseIdentity, readCommittedCiWorkflow } from "./ci.js";
 import { assertCiSetupFilesUnchanged, describeCiEnvironment, prepareCiReleaseMetadata, prepareCiSetupFiles } from "./ci-setup.js";
 import { createGithubWorkflowClient } from "./github-workflow.js";
@@ -1506,7 +1507,10 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
     try {
       const release = await readCiReleaseIdentity(reader, options.ciRelease, true);
       state.lastRelease = await findLastRelease(reader, "HEAD^");
-      plan = buildCiWorkerPlan(state, capabilities, release.version, config.ci?.deployment === CI_VERCEL_DEPLOYMENT);
+      // A retry of a failed deployment must not repeat a custom publisher that already finished: the registry cannot prove it.
+      const completedPublication = config.ci && requiresCiPublicationHistory(config) ? await findCompletedCiPublication(config.ci.workflow, release) : null;
+      if (completedPublication) print(`${ICON.info} El publisher personalizado de ${release.tag} ya terminó en el intento ${completedPublication.attempt} de ${completedPublication.url}; no se repite.`);
+      plan = buildCiWorkerPlan(state, capabilities, release.version, config.ci?.deployment === CI_VERCEL_DEPLOYMENT, completedPublication !== null);
       plan.steps.unshift({ id: RELEASE_STEP.verifyChangelog, title: "Verificar el CHANGELOG del release recibido" });
     } catch (error) {
       print(`${ICON.failure} ${error instanceof Error ? error.message : String(error)}${error instanceof ReleaseStepError ? ` ${error.hint}` : ""}`);

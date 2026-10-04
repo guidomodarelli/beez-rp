@@ -5,7 +5,7 @@
 
 import {
   CI_DIAGNOSTIC_LIMIT, CI_DISPATCH_STATUS, CI_FAILURE_CODE, CI_GITHUB_TOKEN_VARIABLES, CI_ORGANIZATION_BINDING_PAGE_SIZE,
-  CI_ORGANIZATION_BINDING_RESOURCE, CI_RUN_LOOKUP_LIMIT, CI_WORKFLOW_DIRECTORY,
+  CI_ORGANIZATION_BINDING_RESOURCE, CI_RELEASE_RUN_TITLE_PREFIX, CI_RUN_LOOKUP_LIMIT, CI_WORKFLOW_DIRECTORY,
 } from "../constants/ci-release.js";
 import { GITHUB_REPOSITORY_PATTERN, MAIN_BRANCH, RELEASE_REMOTE } from "../constants/create-version.js";
 import { CiReleaseError } from "./errors.js";
@@ -20,6 +20,15 @@ import { runCaptured } from "./process.js";
  *   dispatch: (workflow: string, release: CiReleaseIdentity, retryCommand: string) => Promise<CiDispatchResult>,
  * }} GithubWorkflowClient
  */
+
+/**
+ * Builds the `run-name` the generated workflow gives a dispatched release, which identifies its runs.
+ * @param {CiReleaseIdentity} release - Dispatched release.
+ * @returns {string} Run title, such as `beez-rp release v1.2.4 <sha>`.
+ */
+export function formatCiReleaseRunTitle(release) {
+  return `${CI_RELEASE_RUN_TITLE_PREFIX} ${release.tag} ${release.sha}`;
+}
 
 /**
  * Redacts inherited GitHub credentials and bounds external command diagnostics.
@@ -64,7 +73,7 @@ export function createGithubWorkflowClient(repositoryRoot, capture = runCaptured
     const result = await github(["run", "list", "--repo", repository, "--workflow", workflow, "--event", "workflow_dispatch", "--limit", String(CI_RUN_LOOKUP_LIMIT), "--json", "displayTitle,status,conclusion,url"]);
     if (result.status !== 0) throw new CiReleaseError(CI_FAILURE_CODE.lookup, `No se pudo verificar si ${release.tag} ya tiene una ejecución de ${workflow}: ${safeDiagnostic(result.stderr)}`, `No se envió otra ejecución. Revisá Actions y retomá con ${retryCommand} cuando se pueda consultar el estado.`);
     const runs = JSON.parse(result.stdout);
-    return runs.find((/** @type {{ displayTitle: string, status: string, conclusion: string | null }} */ run) => run.displayTitle === `beez-rp release ${release.tag} ${release.sha}` && (run.status !== "completed" || run.conclusion === "success")) ?? null;
+    return runs.find((/** @type {{ displayTitle: string, status: string, conclusion: string | null }} */ run) => run.displayTitle === formatCiReleaseRunTitle(release) && (run.status !== "completed" || run.conclusion === "success")) ?? null;
   }
 
   /**

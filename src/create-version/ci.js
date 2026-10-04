@@ -349,16 +349,19 @@ export function appendCiDispatch(plan) {
  * re-runs the preparation when the workflow deploys afterwards: the retry starts from a fresh
  * checkout, so files or setup produced by `prepare` would otherwise be missing from the deployment.
  * @param {string} version - Existing release version.
+ * A custom publisher leaves no registry record, so its completion comes from the worker's Actions
+ * history (see `findCompletedCiPublication`) and is treated exactly like a confirmed registry publication.
  * @param {boolean} [deploymentFollows] - Whether the workflow deploys (for example to Vercel) after this worker finishes.
+ * @param {boolean} [customPublicationCompleted] - Whether an earlier run or attempt already finished the custom publisher.
  * @returns {import("./plan.js").ReleasePlan} Worker-only execution plan.
  */
-export function buildCiWorkerPlan(state, capabilities, version, deploymentFollows = false) {
+export function buildCiWorkerPlan(state, capabilities, version, deploymentFollows = false, customPublicationCompleted = false) {
   const blockers = [];
   if (state.workingTreeChanges.length > 0) blockers.push({ title: "CI necesita un checkout limpio del tag", details: state.workingTreeChanges });
   if (capabilities.checksMissing) blockers.push({ title: "Faltan checks para ejecutar el release en CI", details: ["Configurá checks o un script ci antes de publicar."] });
   if (state.npm?.status !== undefined && state.npm.status !== NPM_LOOKUP_STATUS.ok) blockers.push({ title: "No se pudo consultar el registry del release", details: [state.npm.reason ?? "Verificá las credenciales y la conexión del worker."] });
   if (state.npmAuth && state.npmAuth.status !== NPM_AUTH_STATUS.ok && state.npmAuth.status !== NPM_AUTH_STATUS.unknown) blockers.push({ title: "Las credenciales del worker no permiten publicar", details: [state.npmAuth.reason ?? "Configurá la credencial de publicación en Actions."] });
-  const alreadyPublished = state.npm?.publishedVersions.includes(version) ?? false;
+  const alreadyPublished = customPublicationCompleted || (state.npm?.publishedVersions.includes(version) ?? false);
   if (!alreadyPublished && state.migrations?.status === MIGRATION_STATUS.unknown) blockers.push({ title: "No se pudieron verificar las migraciones del release", details: [state.migrations.reason ?? "Configurá el entorno y la conexión de las migraciones en Actions."] });
   const highestPublished = findHighestStableVersion(state.npm?.publishedVersions ?? []);
   if (!alreadyPublished && highestPublished && compareReleaseVersions(version, highestPublished) < 0) blockers.push({ title: "El registry ya tiene una versión más nueva", details: [`${version} no se publicará sobre ${highestPublished}.`] });

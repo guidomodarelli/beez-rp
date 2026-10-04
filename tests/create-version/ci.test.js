@@ -19,7 +19,19 @@ import { parseReleaseArguments } from "../../src/create-version/plan.js";
 import { runCreateVersion } from "../../src/create-version/run.js";
 import { describeCiEnvironment, prepareCiSetupFiles, renderCiReleaseWorkflow } from "../../src/create-version/ci-setup.js";
 import { GIT_FIXTURE_TEST_TIMEOUT_MS, cleanupTemporaryDirectories, commandEnvironment, createTemporaryDirectory, flattenOutput, runCliAsync, runGit } from "./support/cli-harness.js";
+import { FIXTURE_GITHUB_REPOSITORY, FIXTURE_GITHUB_TOKEN, startFixtureGithubActionsApi } from "./support/fixture-github-actions-api.js";
 import { startFixtureNpmRegistry } from "./support/fixture-npm-registry.js";
+
+/** Project configuration whose custom publisher (logged like `prepare`) is followed by a Vercel deployment. */
+const CUSTOM_PUBLISHER_VERCEL_CONFIG = [
+  "import { appendFileSync } from 'node:fs'; import { join } from 'node:path';",
+  "export default {",
+  "  checks: ['node checks.mjs'],",
+  "  prepare: ({ version, repositoryRoot }) => appendFileSync(join(repositoryRoot, 'release.log'), `prepare:${version}\\n`),",
+  "  publish: ({ version, repositoryRoot }) => appendFileSync(join(repositoryRoot, 'release.log'), `publish:${version}\\n`),",
+  "  ci: { workflow: 'release.yml', deployment: 'vercel' },",
+  "};", "",
+].join("\n");
 
 /**
  * Creates a real checkout and a bare origin with one unreleased feature.
@@ -204,6 +216,23 @@ describe("release location and configuration", () => {
     const stepsWithVercelCredentials = [...stepEnvironments].filter(([, names]) => vercelSecrets.some((name) => names.includes(name)));
     expect(stepsWithVercelCredentials.length).toBe(3);
     for (const [, names] of stepsWithVercelCredentials) expect(names).toEqual(vercelSecrets);
+  });
+
+  it.each([
+    { publisher: "a custom function", publish: () => {}, readsHistory: true },
+    { publisher: "a registry", publish: "npm", readsHistory: false },
+  ])("should let the Vercel worker read its Actions history only when $publisher publishes", ({ publish, readsHistory }) => {
+    // Arrange
+    const root = createTemporaryDirectory("beez-rp-ci-vercel-history-");
+    writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "fixture-vercel-app", version: "1.0.0", packageManager: "npm@11.11.1" }));
+    const config = resolveCreateVersionConfig({ checks: ["node checks.mjs"], publish, publication: { authentication: "token" }, ci: { workflow: "release.yml", deployment: "vercel" } });
+    // Act
+    const workflow = renderCiReleaseWorkflow(root, config);
+    const { jobEnvironment, stepEnvironments } = readWorkflowEnvironmentScopes(workflow);
+    // Assert
+    expect(stepEnvironments.has("Checks y publicación del release")).toBe(true);
+    expect(workflow.split("\n").includes("  actions: read")).toBe(readsHistory);
+    expect(jobEnvironment.includes("GITHUB_TOKEN")).toBe(readsHistory);
   });
 
   it.each(["--ci-release", "--retry-ci"])("should reject invalid tags at the CLI boundary when using %s", (flag) => {
@@ -759,6 +788,58 @@ describe("pinned CI worker through the real CLI", () => {
       expect(registry.publications).toEqual([{ packageName: "fixture-ci-app", version: "1.2.4", user: "fixture-owner" }]);
     } finally {
       await registry.close();
+    }
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+
+  it.each([
+    { scenario: "an earlier run finished the release step", conclusions: [["failure"], ["success"]], expectedLog: ["checks", "prepare:1.2.4"] },
+    { scenario: "an earlier attempt of the current run finished the release step", conclusions: [["success", null]], expectedLog: ["checks", "prepare:1.2.4"] },
+    { scenario: "earlier attempts stopped before finishing the release step", conclusions: [["failure", "cancelled", null]], expectedLog: ["checks", "prepare:1.2.4", "publish:1.2.4"] },
+    { scenario: "this is the first attempt", conclusions: [[null]], expectedLog: ["checks", "prepare:1.2.4", "publish:1.2.4"] },
+  ])("should run a custom publisher before a Vercel deployment only when no earlier attempt finished it: $scenario", async ({ conclusions, expectedLog }) => {
+    // Arrange
+    const { root } = createCiProject();
+    commitProjectConfig(root, CUSTOM_PUBLISHER_VERCEL_CONFIG);
+    isolateGithub();
+    expect(await runCreateVersion({ repositoryRoot: root, argv: ["--bump", "patch"] })).toBe(0);
+    const sha = runGit(["rev-parse", "HEAD"], root);
+    runGit(["switch", "--quiet", "--detach", "v1.2.4"], root);
+    const otherRelease = { id: 7, title: `beez-rp release v1.2.3 ${"0".repeat(40)}`, headSha: "0".repeat(40), releaseStepConclusions: ["success"] };
+    const releaseRuns = conclusions.map((releaseStepConclusions, index) => ({ id: index + 10, title: `beez-rp release v1.2.4 ${sha}`, headSha: sha, releaseStepConclusions }));
+    const actionsApi = await startFixtureGithubActionsApi({ workflow: "release.yml", runs: [otherRelease, ...releaseRuns] });
+    try {
+      // Act
+      const worker = await runCliAsync(root, ["--ci-release", "v1.2.4"], { CI: "true", BEEZ_RP_RELEASE_VERSION: "1.2.4", BEEZ_RP_RELEASE_SHA: sha, GITHUB_API_URL: actionsApi.apiUrl, GITHUB_REPOSITORY: FIXTURE_GITHUB_REPOSITORY, GITHUB_TOKEN: FIXTURE_GITHUB_TOKEN });
+      // Assert
+      expect(worker.status, worker.output).toBe(0);
+      expect(readFileSync(path.join(root, "release.log"), "utf8").split("\n").filter(Boolean)).toEqual(expectedLog);
+      expect(actionsApi.requests.every((request) => request.authorization === `Bearer ${FIXTURE_GITHUB_TOKEN}`)).toBe(true);
+    } finally {
+      await actionsApi.close();
+    }
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+
+  it.each([
+    { scenario: "the job token cannot read Actions", failureStatus: 403, token: FIXTURE_GITHUB_TOKEN },
+    { scenario: "the workflow binds no job token", failureStatus: undefined, token: "" },
+  ])("should stop a custom publisher before a Vercel deployment without publishing when $scenario", async ({ failureStatus, token }) => {
+    // Arrange
+    const { root } = createCiProject();
+    commitProjectConfig(root, CUSTOM_PUBLISHER_VERCEL_CONFIG);
+    isolateGithub();
+    expect(await runCreateVersion({ repositoryRoot: root, argv: ["--bump", "patch"] })).toBe(0);
+    const sha = runGit(["rev-parse", "HEAD"], root);
+    runGit(["switch", "--quiet", "--detach", "v1.2.4"], root);
+    const actionsApi = await startFixtureGithubActionsApi({ workflow: "release.yml", failureStatus });
+    try {
+      // Act
+      const worker = await runCliAsync(root, ["--ci-release", "v1.2.4"], { CI: "true", BEEZ_RP_RELEASE_VERSION: "1.2.4", BEEZ_RP_RELEASE_SHA: sha, GITHUB_API_URL: actionsApi.apiUrl, GITHUB_REPOSITORY: FIXTURE_GITHUB_REPOSITORY, GITHUB_TOKEN: token });
+      // Assert
+      expect(worker.status, worker.output).toBe(1);
+      expect(flattenOutput(worker.output)).toContain('permissions "actions: read"');
+      expect(existsSync(path.join(root, "release.log"))).toBe(false);
+    } finally {
+      await actionsApi.close();
     }
   }, GIT_FIXTURE_TEST_TIMEOUT_MS);
 
