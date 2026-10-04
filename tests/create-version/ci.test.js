@@ -501,6 +501,32 @@ describe("local CI preparation with real Git", () => {
     expect(github.dispatch).not.toHaveBeenCalled();
   }, GIT_FIXTURE_TEST_TIMEOUT_MS);
 
+  it.each([
+    ["ignored by Git", ".github/\n", []],
+    ["untracked and set aside by --ignore-local-changes", "", ["--ignore-local-changes"]],
+  ])("should block an ordinary CI release before any commit, tag or dispatch when the configured workflow is %s", async (_scenario, ignoredPaths, extraArguments) => {
+    // Arrange
+    const { root, remote, originalSha } = createCiProject();
+    runGit(["rm", "--quiet", "--cached", ".github/workflows/release.yml"], root);
+    writeFileSync(path.join(root, ".gitignore"), `*.log\nnode_modules\n${ignoredPaths}`);
+    runGit(["add", ".gitignore"], root);
+    runGit(["commit", "--quiet", "-m", "chore: stop tracking the release workflow"], root);
+    runGit(["push", "--quiet", "origin", "main"], root);
+    const untrackedSha = runGit(["rev-parse", "HEAD"], root);
+    const github = isolateGithub();
+    // Act
+    const status = await runCreateVersion({ repositoryRoot: root, argv: ["--ci", "--bump", "patch", ...extraArguments] });
+    // Assert
+    expect(status).toBe(1);
+    expect(untrackedSha).not.toBe(originalSha);
+    expect(runGit(["rev-parse", "HEAD"], root)).toBe(untrackedSha);
+    expect(runGit(["rev-parse", "main"], remote)).toBe(untrackedSha);
+    expect(runGit(["tag", "--list"], remote)).toBe("v1.2.3");
+    expect(existsSync(path.join(root, ".github/workflows/release.yml"))).toBe(true);
+    expect(github.preflight).not.toHaveBeenCalled();
+    expect(github.dispatch).not.toHaveBeenCalled();
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+
   it("should preview setup without writes or GitHub calls when dry-run is requested", async () => {
     // Arrange
     const { root, originalSha } = createCiProject({ configured: false });

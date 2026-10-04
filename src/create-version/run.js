@@ -90,7 +90,7 @@ import { checkRegistryAccess, lookupRegistryVersions, publishRegistryRelease, re
 import { prepareJsrVersionUpdates, readJsrManifest } from "./jsr.js";
 import { JSR_REGISTRY_PROVIDER, REGISTRY_LABELS } from "../constants/registry.js";
 import { CI_DISPATCH_STATUS, CI_GIT_HOOKS_OPTION, CI_VERCEL_DEPLOYMENT, CI_WORKFLOW_DIRECTORY, DISPATCH_CI_RELEASE_STEP, RELEASE_EXECUTION } from "../constants/ci-release.js";
-import { appendCiDispatch, assertCiCompatiblePublication, assertCiWorkflowFile, assertGeneratedCiWorkflowCurrent, assertResumeExecutionMatches, buildCiWorkerPlan, chooseReleaseExecution, defaultCiReleaseConfig, readCiReleaseIdentity } from "./ci.js";
+import { appendCiDispatch, assertCiCompatiblePublication, assertCiWorkflowFile, assertGeneratedCiWorkflowCurrent, assertResumeExecutionMatches, buildCiWorkerPlan, chooseReleaseExecution, defaultCiReleaseConfig, readCiReleaseIdentity, readCommittedCiWorkflow } from "./ci.js";
 import { assertCiSetupFilesUnchanged, describeCiEnvironment, prepareCiReleaseMetadata, prepareCiSetupFiles } from "./ci-setup.js";
 import { createGithubWorkflowClient } from "./github-workflow.js";
 import { findLastRelease } from "./state.js";
@@ -1601,7 +1601,8 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
     try {
       if (selection.setup && plan.mode !== RELEASE_MODE.newRelease) throw new ReleaseStepError("La configuración automática de CI requiere un release nuevo.", "Completá el release pendiente con --local y después ejecutá --setup-ci.");
       if (selection.setup) ciSetupFiles = await prepareCiSetupFiles(repositoryRoot, config, !ciWasConfigured);
-      else assertCiWorkflowFile(repositoryRoot, config.ci.workflow);
+      // The release commit is built from HEAD and dispatched with --ref main: the workflow must already be committed.
+      else await readCommittedCiWorkflow(repositoryRoot, config.ci.workflow);
       const environment = describeCiEnvironment(config);
       await workflowClient.preflight(config.ci.workflow, environment.secrets, environment.variables);
       if (config.migrations && environment.secrets.length === 0) print(`${ICON.warning} El worker necesita las variables de las migraciones: declaralas en ci.secrets o ci.variables y configurá Actions antes de publicar.`);

@@ -162,6 +162,24 @@ export function assertCiWorkflowFile(repositoryRoot, workflow) {
 }
 
 /**
+ * Reads the configured workflow from HEAD after checking it is a regular file inside the project.
+ * `gh workflow run --ref main` only finds workflows contained in the pushed release commit, so a
+ * local file that is untracked, ignored or set aside by `--ignore-local-changes` is not enough.
+ * @param {string} repositoryRoot - Project root.
+ * @param {string} workflow - Validated workflow filename.
+ * @param {string} [missingHint] - Recovery hint shown when HEAD does not contain the workflow.
+ * @returns {Promise<string>} Workflow content committed at HEAD.
+ * @throws {ReleaseStepError} When the workflow is missing, a symlink or not committed at HEAD.
+ */
+export async function readCommittedCiWorkflow(repositoryRoot, workflow, missingHint = `Commitealo en un commit propio antes de crear el release, o elegí --${CREATE_VERSION_FLAG.local}. No se creó la versión ni el tag.`) {
+  assertCiWorkflowFile(repositoryRoot, workflow);
+  const workflowPath = `${CI_WORKFLOW_DIRECTORY}/${workflow}`;
+  const committed = await runCaptured("git", ["show", `HEAD:${workflowPath}`], { cwd: repositoryRoot });
+  if (committed.status !== 0) throw new ReleaseStepError(`${workflowPath} existe pero no está commiteado en HEAD; el worker de CI no lo recibiría.`, missingHint);
+  return committed.stdout;
+}
+
+/**
  * Splits workflow content into comparable lines regardless of checkout line endings.
  * @param {string} content - Workflow YAML.
  * @returns {string[]} Lines without the trailing newline.
@@ -183,11 +201,8 @@ function toWorkflowLines(content) {
 export async function assertGeneratedCiWorkflowCurrent(repositoryRoot, config) {
   if (!config.ci) return;
   const workflowPath = `${CI_WORKFLOW_DIRECTORY}/${config.ci.workflow}`;
-  assertCiWorkflowFile(repositoryRoot, config.ci.workflow);
   const regenerateHint = `Regeneralo con --${CREATE_VERSION_FLAG.setupCi} después de borrarlo en un commit propio, o actualizalo y commitealo a mano; si lo personalizaste a propósito, usá --${CREATE_VERSION_FLAG.ci}. No se creó la versión ni el tag.`;
-  const committed = await runCaptured("git", ["show", `HEAD:${workflowPath}`], { cwd: repositoryRoot });
-  if (committed.status !== 0) throw new ReleaseStepError(`${workflowPath} existe pero no está commiteado en HEAD; el worker de CI no lo recibiría.`, regenerateHint);
-  const committedLines = toWorkflowLines(committed.stdout);
+  const committedLines = toWorkflowLines(await readCommittedCiWorkflow(repositoryRoot, config.ci.workflow, regenerateHint));
   const renderedLines = toWorkflowLines(renderCiReleaseWorkflow(repositoryRoot, config));
   if (committedLines.length === renderedLines.length && committedLines.every((line, index) => line === renderedLines[index])) return;
   const missingLines = renderedLines.filter((line) => line.trim() !== "" && !committedLines.includes(line)).map((line) => line.trim());
