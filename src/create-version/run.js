@@ -1497,7 +1497,7 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
     try {
       const release = await readCiReleaseIdentity(reader, options.ciRelease, true);
       state.lastRelease = await findLastRelease(reader, "HEAD^");
-      plan = buildCiWorkerPlan(state, capabilities, release.version);
+      plan = buildCiWorkerPlan(state, capabilities, release.version, config.ci?.deployment === CI_VERCEL_DEPLOYMENT);
       plan.steps.unshift({ id: RELEASE_STEP.verifyChangelog, title: "Verificar el CHANGELOG del release recibido" });
     } catch (error) {
       print(`${ICON.failure} ${error instanceof Error ? error.message : String(error)}${error instanceof ReleaseStepError ? ` ${error.hint}` : ""}`);

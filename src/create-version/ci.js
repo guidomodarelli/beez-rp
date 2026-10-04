@@ -316,10 +316,14 @@ export function appendCiDispatch(plan) {
  * Plans checks and unfinished publication for a pinned worker; never bumps or pushes.
  * @param {import("./state.js").ReleaseSnapshot} state - Diagnosed worker checkout.
  * @param {import("./plan.js").ReleaseCapabilities} capabilities - Normal project hooks.
+ * A retry after the registry publication succeeded skips migrations and publication, but still
+ * re-runs the preparation when the workflow deploys afterwards: the retry starts from a fresh
+ * checkout, so files or setup produced by `prepare` would otherwise be missing from the deployment.
  * @param {string} version - Existing release version.
+ * @param {boolean} [deploymentFollows] - Whether the workflow deploys (for example to Vercel) after this worker finishes.
  * @returns {import("./plan.js").ReleasePlan} Worker-only execution plan.
  */
-export function buildCiWorkerPlan(state, capabilities, version) {
+export function buildCiWorkerPlan(state, capabilities, version, deploymentFollows = false) {
   const blockers = [];
   if (state.workingTreeChanges.length > 0) blockers.push({ title: "CI necesita un checkout limpio del tag", details: state.workingTreeChanges });
   if (capabilities.checksMissing) blockers.push({ title: "Faltan checks para ejecutar el release en CI", details: ["Configurá checks o un script ci antes de publicar."] });
@@ -332,10 +336,10 @@ export function buildCiWorkerPlan(state, capabilities, version) {
   const steps = [
     ...(capabilities.checks ? [{ id: RELEASE_STEP.runChecks, title: "Validar el release en CI" }] : []),
     ...(!alreadyPublished && state.migrations?.status === MIGRATION_STATUS.pending ? [{ id: RELEASE_STEP.applyMigrations, title: "Aplicar migraciones del release" }] : []),
-    ...(!alreadyPublished && capabilities.prepare ? [{ id: RELEASE_STEP.prepareRelease, title: "Preparar el release" }] : []),
+    ...((!alreadyPublished || deploymentFollows) && capabilities.prepare ? [{ id: RELEASE_STEP.prepareRelease, title: "Preparar el release" }] : []),
     ...(!alreadyPublished && capabilities.publish ? [{ id: RELEASE_STEP.publishRelease, title: capabilities.publishTitle }] : []),
   ];
-  if (alreadyPublished) print(`${toReleaseTag(version)} ya está publicado; CI verifica los checks sin repetir la publicación.`);
+  if (alreadyPublished) print(`${toReleaseTag(version)} ya está publicado; CI verifica los checks${deploymentFollows && capabilities.prepare ? " y vuelve a preparar el release para el despliegue" : ""} sin repetir la publicación.`);
   return { mode: blockers.length > 0 ? RELEASE_MODE.blocked : RELEASE_MODE.resume, pendingVersion: version, blockers, warnings: [], steps: blockers.length > 0 ? [] : steps };
 }
 

@@ -645,6 +645,43 @@ describe("pinned CI worker through the real CLI", () => {
     }
   }, GIT_FIXTURE_TEST_TIMEOUT_MS);
 
+  it.each([
+    { deployment: "vercel", retryLog: ["checks", "prepare:1.2.4"] },
+    { deployment: null, retryLog: ["checks"] },
+  ])("should re-run preparation without republishing on a worker retry only when the $deployment deployment follows", async ({ deployment, retryLog }) => {
+    // Arrange
+    const registry = await startFixtureNpmRegistry({ users: { "fixture-owner-token": "fixture-owner" }, packages: { "fixture-ci-app": { maintainers: ["fixture-owner"], versions: ["1.2.3"] } } });
+    try {
+      const { root } = createCiProject();
+      const manifest = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
+      commitProjectConfig(root, [
+        "import { appendFileSync } from 'node:fs'; import { join } from 'node:path';",
+        "export default {",
+        "  checks: ['node checks.mjs'],",
+        "  prepare: ({ version, repositoryRoot }) => appendFileSync(join(repositoryRoot, 'release.log'), `prepare:${version}\\n`),",
+        "  publish: 'npm',",
+        `  ci: { workflow: 'release.yml', deployment: ${JSON.stringify(deployment)} },`,
+        "};", "",
+      ].join("\n"), { "package.json": JSON.stringify({ ...manifest, publishConfig: { registry: registry.registryUrl } }) });
+      isolateGithub();
+      expect(await runCreateVersion({ repositoryRoot: root, argv: ["--bump", "patch"] })).toBe(0);
+      const sha = runGit(["rev-parse", "HEAD"], root);
+      runGit(["switch", "--quiet", "--detach", "v1.2.4"], root);
+      const environment = { CI: "true", NPM_TOKEN: "fixture-owner-token", BEEZ_RP_RELEASE_VERSION: "1.2.4", BEEZ_RP_RELEASE_SHA: sha };
+      const released = await runCliAsync(root, ["--ci-release", "v1.2.4"], environment);
+      writeFileSync(path.join(root, "release.log"), "");
+      // Act
+      const retried = await runCliAsync(root, ["--ci-release", "v1.2.4"], environment);
+      // Assert
+      expect(released.status, released.output).toBe(0);
+      expect(retried.status, retried.output).toBe(0);
+      expect(readFileSync(path.join(root, "release.log"), "utf8").split("\n").filter(Boolean)).toEqual(retryLog);
+      expect(registry.publications).toEqual([{ packageName: "fixture-ci-app", version: "1.2.4", user: "fixture-owner" }]);
+    } finally {
+      await registry.close();
+    }
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+
   it.each([false, true])("should execute checks and stop publication on failure when failChecks is %j", async (failChecks) => {
     // Arrange
     const { root, remote } = createCiProject({ failChecks });
