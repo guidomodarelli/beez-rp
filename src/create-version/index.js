@@ -9,6 +9,11 @@
  * @module create-version
  */
 
+/**
+ * @typedef {import("./config.js").CreateVersionConfig} CreateVersionConfig
+ * @typedef {import("./ci-config.js").CiReleaseConfig} CiReleaseConfig
+ */
+
 export {
   computeNpmIntegrity,
   computeSha256,
@@ -20,7 +25,8 @@ export {
   withArtifactOutsidePackageRoot,
 } from "./artifact.js";
 export { defineCreateVersionConfig, loadCreateVersionConfig, resolveCreateVersionConfig } from "./config.js";
-export { ReleaseStepError } from "./errors.js";
+export { CiReleaseError, ReleaseStepError } from "./errors.js";
+export { resolveCiReleaseConfig } from "./ci-config.js";
 export {
   buildNpmAuthConfigLine,
   buildNpmOwnerListArguments,

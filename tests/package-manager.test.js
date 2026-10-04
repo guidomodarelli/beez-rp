@@ -55,6 +55,7 @@ describe("detectPackageManager", () => {
     ["pnpm-lock.yaml", "pnpm"],
     ["yarn.lock", "yarn"],
     ["package-lock.json", "npm"],
+    ["npm-shrinkwrap.json", "npm"],
   ])("falls back to the %s lockfile", (lockfile, packageManager) => {
     const root = createProject({ "package.json": JSON.stringify({ name: "app" }), [lockfile]: "" });
 

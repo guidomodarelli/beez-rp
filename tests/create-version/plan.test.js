@@ -77,7 +77,7 @@ describe("create-version arguments", () => {
   );
 
   it("should parse spaced and inline flags and reject invalid combinations", () => {
-    expect(parseReleaseArguments(["--bump", "minor", "--dry-run", "--"])).toEqual({ bump: "minor", setVersion: null, dryRun: true, skipUnpublished: false, ignoreLocalChanges: false, acceptSuggested: false, help: false });
+    expect(parseReleaseArguments(["--bump", "minor", "--dry-run", "--"])).toEqual({ bump: "minor", setVersion: null, dryRun: true, skipUnpublished: false, ignoreLocalChanges: false, acceptSuggested: false, help: false, execution: null, setupCi: false, ciRelease: null, retryCi: null });
     expect(parseReleaseArguments(["--skip-unpublished"]).skipUnpublished).toBe(true);
     expect(parseReleaseArguments(["--ignore-local-changes"]).ignoreLocalChanges).toBe(true);
     expect(parseReleaseArguments(["-h"]).help).toBe(true);
@@ -226,6 +226,25 @@ describe("create-version plan", () => {
       expect(plan.blockers[0].title).toContain("--ignore-local-changes no aparta cambios de código ni de datos");
       expect(plan.blockers[0].details).toEqual([change, expect.stringContaining("commitealos en una rama o guardalos con git stash")]);
     }
+  });
+
+  it.each([
+    { name: "a modified lockfile", change: " M pnpm-lock.yaml" },
+    { name: "an untracked Node.js pin", change: "?? .nvmrc" },
+    { name: "a modified configured workflow", change: " M .github/workflows/release.yml" },
+    { name: "a rename into a lockfile", change: "R  notes.txt -> yarn.lock" },
+  ])("should block a CI preparation with --ignore-local-changes when the changes to set aside include $name", ({ change }) => {
+    const ciWorkerFiles = ["pnpm-lock.yaml", "yarn.lock", ".nvmrc", ".github/workflows/release.yml"];
+    const state = createMainState({ workingTreeChanges: [change, "?? notes.md", " M CHANGELOG.md"] });
+
+    const plan = buildReleasePlan(state, DEPLOYED_APP, { ignoreLocalChanges: true, ciWorkerFiles });
+    const localPlan = buildReleasePlan(state, DEPLOYED_APP, { ignoreLocalChanges: true });
+
+    expect(plan.mode).toBe(RELEASE_MODE.blocked);
+    expect(plan.steps).toEqual([]);
+    expect(plan.blockers[0].title).toContain("no aparta cambios en archivos que definen el worker de CI");
+    expect(plan.blockers[0].details).toEqual([change, expect.stringContaining("No se creó la versión ni el tag")]);
+    expect(localPlan.mode).toBe(RELEASE_MODE.newRelease);
   });
 
   it("should block resuming a release commit while the configuration has uncommitted changes, a rename included", () => {

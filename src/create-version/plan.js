@@ -18,6 +18,7 @@
  */
 
 import { parseArgs } from "node:util";
+import { RELEASE_EXECUTION } from "../constants/ci-release.js";
 
 import { CHANGELOG_FILE, CHANGELOG_UPDATE_REQUIRED_CODE } from "../constants/changelog.js";
 import {
@@ -82,12 +83,14 @@ import { describeNpmAuthProblem, describeNpmFirstPublicationWarning } from "./np
  * @typedef {{ id: string, title: string, detail?: string }} ReleasePlanStep
  * @typedef {{ code?: "changelog-update-required", title: string, details: string[] }} ReleaseBlocker
  * @typedef {{ mode: string, steps: ReleasePlanStep[], blockers: ReleaseBlocker[], warnings: string[], pendingVersion: string | null }} ReleasePlan
- * @typedef {{ bump: "patch" | "minor" | "major" | null, setVersion: string | null, dryRun: boolean, skipUnpublished: boolean, ignoreLocalChanges: boolean, acceptSuggested: boolean, help: boolean }} ReleaseOptions
+ * @typedef {{ bump: "patch" | "minor" | "major" | null, setVersion: string | null, dryRun: boolean, skipUnpublished: boolean, ignoreLocalChanges: boolean, acceptSuggested: boolean, help: boolean, execution?: "local" | "ci" | null, setupCi?: boolean, ciRelease?: string | null, retryCi?: string | null }} ReleaseOptions
  *   `acceptSuggested` takes the release type the commits suggest instead of asking.
  * @typedef {{ version: string, latestPublished: string | null, resumable: boolean, registryLabel?: string }} UnpublishedRelease
- * @typedef {{ skipUnpublished?: boolean, ignoreLocalChanges?: boolean }} PlanOptions
+ * @typedef {{ skipUnpublished?: boolean, ignoreLocalChanges?: boolean, ciWorkerFiles?: readonly string[] }} PlanOptions
  *   `skipUnpublished` plans a new release even when the last release is missing from npm.
  *   `ignoreLocalChanges` plans the release despite uncommitted changes, which the run sets aside.
+ *   `ciWorkerFiles` lists, only for CI preparation, the root-relative files the worker reads from the
+ *   release tag; `ignoreLocalChanges` cannot set changes to them aside.
  */
 
 /** Capabilities of a project without checks, preparation or publication. */
@@ -110,6 +113,11 @@ export const RELEASE_USAGE = [
   "  --skip-unpublished         Crea un release nuevo aunque el último release no esté en npm (lo saltea).",
   "  --ignore-local-changes     Publica aunque haya cambios sin commitear: se apartan (git stash) y se restauran al final.",
   "  --accept-suggested         Toma la versión sugerida por los commits sin preguntar (en un monorepo, la de cada paquete).",
+  "  --local                    Ejecuta todo el release en esta máquina.",
+  "  --ci                       Hace el bump y push local; ejecuta los checks y publica en CI.",
+  "  --setup-ci                 Crea release.yml y configura CI dentro del commit del bump.",
+  "  --ci-release vX.Y.Z         Ejecuta en CI el release ya creado, sin otro bump ni push.",
+  "  --retry-ci vX.Y.Z           Reenvía a CI un tag existente, sin crear otra versión.",
   "  --help                     Muestra esta ayuda.",
 ].join("\n");
 
@@ -144,6 +152,11 @@ export function parseReleaseArguments(argv) {
         [CREATE_VERSION_FLAG.skipUnpublished]: { type: "boolean", default: false },
         [CREATE_VERSION_FLAG.ignoreLocalChanges]: { type: "boolean", default: false },
         [CREATE_VERSION_FLAG.acceptSuggested]: { type: "boolean", default: false },
+        [CREATE_VERSION_FLAG.local]: { type: "boolean", default: false },
+        [CREATE_VERSION_FLAG.ci]: { type: "boolean", default: false },
+        [CREATE_VERSION_FLAG.setupCi]: { type: "boolean", default: false },
+        [CREATE_VERSION_FLAG.ciRelease]: { type: "string" },
+        [CREATE_VERSION_FLAG.retryCi]: { type: "string" },
         [CREATE_VERSION_FLAG.help]: { type: "boolean", short: CREATE_VERSION_FLAG.helpShort, default: false },
       },
     }));
@@ -166,6 +179,20 @@ export function parseReleaseArguments(argv) {
   if (values[CREATE_VERSION_FLAG.acceptSuggested] && (bump !== undefined || setVersion !== undefined)) {
     throw new Error("--accept-suggested elige la versión sugerida: no se combina con --bump ni con --set-version.");
   }
+  if (values[CREATE_VERSION_FLAG.local] && (values[CREATE_VERSION_FLAG.ci] || values[CREATE_VERSION_FLAG.setupCi] || values[CREATE_VERSION_FLAG.retryCi])) {
+    throw new Error("--local no se combina con --ci, --setup-ci ni --retry-ci.");
+  }
+  const ciRelease = /** @type {string | undefined} */ (values[CREATE_VERSION_FLAG.ciRelease]);
+  const retryCi = /** @type {string | undefined} */ (values[CREATE_VERSION_FLAG.retryCi]);
+  for (const [flag, value] of [[CREATE_VERSION_FLAG.ciRelease, ciRelease], [CREATE_VERSION_FLAG.retryCi, retryCi]]) {
+    if (value !== undefined) {
+      const version = value.replace(VERSION_PREFIX_PATTERN, "");
+      if (value !== value.trim() || !isStableReleaseVersion(version) || toReleaseTag(version) !== value) throw new Error(`--${flag} espera un tag estable vX.Y.Z, no un valor vacío ni una versión sin prefijo.`);
+    }
+  }
+  if ((ciRelease !== undefined || retryCi !== undefined) && (bump !== undefined || setVersion !== undefined || values[CREATE_VERSION_FLAG.acceptSuggested] || values[CREATE_VERSION_FLAG.setupCi] || values[CREATE_VERSION_FLAG.ignoreLocalChanges] || values[CREATE_VERSION_FLAG.skipUnpublished] || (ciRelease !== undefined && retryCi !== undefined) || (ciRelease !== undefined && values[CREATE_VERSION_FLAG.ci]))) {
+    throw new Error("--ci-release y --retry-ci trabajan sobre un tag existente: no se combinan con un bump, configuración de CI ni cambios locales.");
+  }
 
   return {
     bump: /** @type {ReleaseOptions["bump"]} */ (bump ?? null),
@@ -176,6 +203,10 @@ export function parseReleaseArguments(argv) {
     ignoreLocalChanges: Boolean(values[CREATE_VERSION_FLAG.ignoreLocalChanges]),
     acceptSuggested: Boolean(values[CREATE_VERSION_FLAG.acceptSuggested]),
     help: Boolean(values[CREATE_VERSION_FLAG.help]),
+    execution: values[CREATE_VERSION_FLAG.local] ? RELEASE_EXECUTION.local : values[CREATE_VERSION_FLAG.ci] || values[CREATE_VERSION_FLAG.setupCi] ? RELEASE_EXECUTION.ci : null,
+    setupCi: Boolean(values[CREATE_VERSION_FLAG.setupCi]),
+    ciRelease: ciRelease ?? null,
+    retryCi: retryCi ?? null,
   };
 }
 
@@ -385,6 +416,45 @@ export function codeChangesToSetAsideBlocker(codeChanges, commands) {
       ...codeChanges.slice(0, MAX_LISTED_ITEMS),
       `La configuración ya se cargó con esos cambios y puede depender de ellos: commitealos en una rama o guardalos con git stash, y volvé a correr ${commands.createVersion}.`,
     ],
+  };
+}
+
+/**
+ * Blocks a runnable CI preparation whose `--ignore-local-changes` would set aside changes to files
+ * that shape the worker (configuration, manifest, npm config, Node.js pin, lockfiles or workflow):
+ * the preparation and its preflight read them from the working tree, while the worker checks out
+ * the committed versions from the release tag, so the pushed tag could fail only in CI.
+ *
+ * @param {ReleasePlan} plan - Plan.
+ * @param {ReleaseState} state - Snapshot.
+ * @param {boolean} ignoreLocalChanges - Whether `--ignore-local-changes` was chosen.
+ * @param {readonly string[]} ciWorkerFiles - Root-relative files the worker reads from the tag; empty outside CI preparation.
+ * @param {ProjectCommands} commands - Project commands quoted by the hints.
+ * @returns {ReleasePlan} The same plan, or a blocked plan when a worker file would be set aside.
+ */
+function refuseToSetAsideCiWorkerChanges(plan, state, ignoreLocalChanges, ciWorkerFiles, commands) {
+  const workerChanges = ignoreLocalChanges && ciWorkerFiles.length > 0 && plan.steps.length > 0
+    ? listLocalChangesToSetAside(state, plan.mode).filter((line) => listPorcelainPaths(line).some((changedPath) => ciWorkerFiles.includes(changedPath)))
+    : [];
+
+  if (workerChanges.length === 0) {
+    return plan;
+  }
+
+  return {
+    mode: RELEASE_MODE.blocked,
+    steps: [],
+    blockers: [
+      {
+        title: `--${CREATE_VERSION_FLAG.ignoreLocalChanges} no aparta cambios en archivos que definen el worker de CI`,
+        details: [
+          ...workerChanges.slice(0, MAX_LISTED_ITEMS),
+          `La preparación los leería del working tree y el worker usaría los commiteados en el tag: commitealos en un commit propio o guardalos con git stash, y volvé a correr ${commands.createVersion}. No se creó la versión ni el tag.`,
+        ],
+      },
+    ],
+    warnings: [],
+    pendingVersion: null,
   };
 }
 
@@ -801,7 +871,8 @@ export function missingChecksBlocker(commands) {
 export function buildReleasePlan(state, capabilities = DEFAULT_CAPABILITIES, planOptions = {}) {
   const commands = capabilities.commands ?? DEFAULT_PROJECT_COMMANDS;
   const ignoreLocalChanges = planOptions.ignoreLocalChanges ?? false;
-  const plan = refuseToSetAsideCodeChanges(planRelease(state, capabilities, planOptions), state, ignoreLocalChanges, commands);
+  const codeSafePlan = refuseToSetAsideCodeChanges(planRelease(state, capabilities, planOptions), state, ignoreLocalChanges, commands);
+  const plan = refuseToSetAsideCiWorkerChanges(codeSafePlan, state, ignoreLocalChanges, planOptions.ciWorkerFiles ?? [], commands);
   return warnAboutSetAsideChanges(applyNpmAuth(plan, state.npmAuth, commands), state, ignoreLocalChanges);
 }
 

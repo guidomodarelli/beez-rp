@@ -104,6 +104,21 @@ export function runGit(gitArguments, workingDirectory) {
 }
 
 /**
+ * Turns a fixture directory into a Git repository (when it is not one yet) and commits every file,
+ * so code that reads HEAD, as the CI worker sees the release commit, finds the fixture content.
+ *
+ * @param {string} repositoryRoot - Fixture directory.
+ * @returns {string} Commit SHA at HEAD.
+ */
+export function commitFixtureRepository(repositoryRoot) {
+  runGit(["init", "--quiet", "--initial-branch=main"], repositoryRoot);
+  for (const [name, value] of [["user.name", "Release Fixture"], ["user.email", "release@example.test"], ["commit.gpgsign", "false"], ["core.autocrlf", "false"]]) runGit(["config", name, value], repositoryRoot);
+  runGit(["add", "-A"], repositoryRoot);
+  runGit(["commit", "--quiet", "--allow-empty", "-m", "fixture"], repositoryRoot);
+  return runGit(["rev-parse", "HEAD"], repositoryRoot);
+}
+
+/**
  * @param {string} repositoryRoot - Checkout used as working directory.
  * @param {string[]} commandArguments - Arguments after `create-version`.
  * @returns {{ status: number | null, output: string }} Exit code and combined output.
