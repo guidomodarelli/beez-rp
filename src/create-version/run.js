@@ -1441,7 +1441,7 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   // Rejected before diagnosing or bumping: a pushed tag could never be published by a non-interactive worker.
   if (isCiPreparation) {
     try {
-      assertCiCompatiblePublication(config);
+      assertCiCompatiblePublication(config, repositoryRoot);
     } catch (error) {
       print(`${ICON.failure} ${error instanceof Error ? error.message : String(error)}${error instanceof ReleaseStepError ? ` ${error.hint}` : ""}`);
       return FAILURE_EXIT_CODE;

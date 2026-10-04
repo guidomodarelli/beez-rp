@@ -3,20 +3,21 @@
  * @module create-version/ci
  */
 
-import { existsSync, lstatSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
 import path from "node:path";
 import {
   CI_COMMIT_SHA_PATTERN, CI_RELEASE_ENVIRONMENT, CI_RUNTIME_DISABLED_VALUES, CI_RUNTIME_ENVIRONMENT, CI_SETUP_CHOICE,
   CI_WORKFLOW_DIRECTORY, DEFAULT_CI_WORKFLOW, DISPATCH_CI_RELEASE_STEP, RELEASE_EXECUTION,
   CI_MIGRATION_ENVIRONMENT_PATTERN, CI_RELEASE_METADATA_FILE, CI_VERCEL_CONFIG_FILE, CI_VERCEL_DEPLOYMENT, CI_WORKFLOW_DRIFT_PREVIEW_LINES,
 } from "../constants/ci-release.js";
-import { BROWSER_AUTHENTICATION } from "../constants/registry.js";
+import { BROWSER_AUTHENTICATION, NPM_OIDC_MINIMUM_VERSION, NPM_REGISTRY_PROVIDER, OIDC_AUTHENTICATION } from "../constants/registry.js";
+import { PACKAGE_MANAGER } from "../constants/package-manager.js";
 import { CREATE_VERSION_FLAG, MAIN_BRANCH, MIGRATION_STATUS, NPM_AUTH_STATUS, NPM_LOOKUP_STATUS, PACKAGE_MANIFEST_FILE, RELEASE_MODE, RELEASE_REMOTE, RELEASE_STEP, REMOTE_MAIN_REF } from "../constants/create-version.js";
 import { RELEASE_TAG_PREFIX } from "../constants/versions.js";
-import { compareReleaseVersions, findHighestStableVersion, isStableReleaseVersion, toReleaseTag } from "../versions.js";
+import { compareReleaseVersions, findHighestStableVersion, isStableReleaseVersion, parseReleaseVersion, toReleaseTag } from "../versions.js";
 import { print, select } from "../terminal-ui.js";
 import { ReleaseStepError } from "./errors.js";
-import { assertSafeCiPath, renderCiReleaseWorkflow } from "./ci-setup.js";
+import { assertSafeCiPath, extractPinnedPackageManagerVersion, renderCiReleaseWorkflow } from "./ci-setup.js";
 import { runCaptured } from "./process.js";
 import { isRegistryProvider } from "./registry-config.js";
 
@@ -67,17 +68,57 @@ export async function chooseReleaseExecution(config, options) {
 }
 
 /**
- * Rejects registry authentication that a non-interactive GitHub Actions worker can never complete,
- * before the immutable release commit and tag exist. OIDC stays allowed: only the worker can prove it.
- * @param {import("./config.js").ResolvedCreateVersionConfig} config - Project configuration.
- * @returns {void}
- * @throws {ReleaseStepError} When the registry publication authorizes from a browser.
+ * Tells whether `npm install --global npm@<pin>` can install at least the given stable version.
+ * A partial pin such as `11` resolves to the newest matching release, so it reaches any minimum
+ * that shares its leading components; a prerelease pin is below its own `X.Y.Z` release.
+ * @param {string} pinnedVersion - Version accepted by `CI_PACKAGE_MANAGER_VERSION_PATTERN`, such as `10.9.0`, `11` or `11.6.0-rc.1`.
+ * @param {string} minimumVersion - Stable `X.Y.Z` minimum.
+ * @returns {boolean} True when the pinned npm can satisfy the minimum.
  */
-export function assertCiCompatiblePublication(config) {
-  if (!isRegistryProvider(config.publish) || config.publication?.authentication !== BROWSER_AUTHENTICATION) return;
+function canPinnedVersionReach(pinnedVersion, minimumVersion) {
+  const prereleaseSeparatorIndex = pinnedVersion.indexOf("-");
+  const releasePart = prereleaseSeparatorIndex === -1 ? pinnedVersion : pinnedVersion.slice(0, prereleaseSeparatorIndex);
+  const pinnedComponents = releasePart.split(".").map(Number);
+  const minimumComponents = parseReleaseVersion(minimumVersion);
+  const differentIndex = pinnedComponents.findIndex((component, index) => component !== minimumComponents[index]);
+  if (differentIndex !== -1) return pinnedComponents[differentIndex] > minimumComponents[differentIndex];
+  return pinnedComponents.length < minimumComponents.length || prereleaseSeparatorIndex === -1;
+}
+
+/**
+ * Rejects registry authentication that a non-interactive GitHub Actions worker can never complete,
+ * before the immutable release commit and tag exist (or before a retry dispatches them again).
+ * OIDC stays allowed, since only the worker can prove it, except when the npm version pinned by
+ * `packageManager`, which the worker installs, cannot perform npm trusted publishing: the worker
+ * would reject it only after the release was pushed. The pin is never raised silently because that
+ * would change the client that runs `npm ci` against the committed lockfile.
+ * @param {import("./config.js").ResolvedCreateVersionConfig} config - Project configuration.
+ * @param {string} repositoryRoot - Project root whose `package.json` pins the worker's package manager.
+ * @returns {void}
+ * @throws {ReleaseStepError} When the registry publication authorizes from a browser, or uses npm OIDC with an npm pin below the trusted publishing minimum.
+ */
+export function assertCiCompatiblePublication(config, repositoryRoot) {
+  if (!isRegistryProvider(config.publish)) return;
+  if (config.publication?.authentication === BROWSER_AUTHENTICATION) {
+    throw new ReleaseStepError(
+      `${config.publish} con publication.authentication "${BROWSER_AUTHENTICATION}" no puede publicar desde GitHub Actions: el worker no es interactivo.`,
+      `Configurá publication.authentication "oidc" (con el paquete vinculado al repositorio) o "token" con su secret, o usá --${CREATE_VERSION_FLAG.local}; no se creó la versión ni el tag.`
+    );
+  }
+  if (config.publish !== NPM_REGISTRY_PROVIDER || config.publication?.authentication !== OIDC_AUTHENTICATION || config.commands.packageManager !== PACKAGE_MANAGER.npm) return;
+  const manifestPath = path.join(repositoryRoot, PACKAGE_MANIFEST_FILE);
+  if (!existsSync(manifestPath)) return;
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  } catch (error) {
+    throw new ReleaseStepError(`No se pudo leer ${PACKAGE_MANIFEST_FILE} para comprobar la versión de npm que instala el worker de CI.`, `Corregí ${PACKAGE_MANIFEST_FILE}; no se creó, subió ni reenvió ningún release.`, { cause: error });
+  }
+  const pinnedNpmVersion = extractPinnedPackageManagerVersion(manifest);
+  if (pinnedNpmVersion === null || canPinnedVersionReach(pinnedNpmVersion, NPM_OIDC_MINIMUM_VERSION)) return;
   throw new ReleaseStepError(
-    `${config.publish} con publication.authentication "${BROWSER_AUTHENTICATION}" no puede publicar desde GitHub Actions: el worker no es interactivo.`,
-    `Configurá publication.authentication "oidc" (con el paquete vinculado al repositorio) o "token" con su secret, o usá --${CREATE_VERSION_FLAG.local}; no se creó la versión ni el tag.`
+    `packageManager fija npm@${pinnedNpmVersion}, que el worker de CI instala, pero la publicación npm con publication.authentication "${OIDC_AUTHENTICATION}" requiere npm >= ${NPM_OIDC_MINIMUM_VERSION}; el worker la rechazaría después de subir el tag.`,
+    `Subí packageManager a npm@${NPM_OIDC_MINIMUM_VERSION} o superior en un commit propio (regenerá el workflow si ya existe), configurá publication.authentication "token" con su secret o usá --${CREATE_VERSION_FLAG.local}; no se creó, subió ni reenvió ningún release.`
   );
 }
 

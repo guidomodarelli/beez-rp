@@ -48,6 +48,15 @@ export function describeCiEnvironment(config) {
 }
 
 /**
+ * Reads the package manager version pinned by `packageManager`, the exact one the generated workflow installs.
+ * @param {Record<string, unknown>} manifest - Parsed project `package.json`.
+ * @returns {string | null} Pinned version such as `11.5.1`, or `null` when the field is absent or not a safe pin.
+ */
+export function extractPinnedPackageManagerVersion(manifest) {
+  return typeof manifest.packageManager === "string" ? CI_PACKAGE_MANAGER_VERSION_PATTERN.exec(manifest.packageManager)?.[1] ?? null : null;
+}
+
+/**
  * Renders a workflow that installs the project's package manager and finishes a pinned release.
  * @param {string} repositoryRoot - Project checkout.
  * @param {ResolvedCreateVersionConfig} config - Release hooks and package manager.
@@ -56,7 +65,7 @@ export function describeCiEnvironment(config) {
 export function renderCiReleaseWorkflow(repositoryRoot, config) {
   const manifest = JSON.parse(readFileSync(path.join(repositoryRoot, PACKAGE_MANIFEST_FILE), "utf8"));
   const manager = config.commands.packageManager;
-  const pinnedVersion = typeof manifest.packageManager === "string" ? CI_PACKAGE_MANAGER_VERSION_PATTERN.exec(manifest.packageManager)?.[1] : null;
+  const pinnedVersion = extractPinnedPackageManagerVersion(manifest);
   const nodeSetup = [
     "      - name: Configurar Node.js", "        uses: actions/setup-node@v4", "        with:",
     existsSync(path.join(repositoryRoot, PINNED_NODE_VERSION_FILE)) ? `          node-version-file: '${PINNED_NODE_VERSION_FILE}'` : `          node-version: '${process.versions.node.split(".")[0]}'`,
