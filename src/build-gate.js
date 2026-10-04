@@ -11,11 +11,12 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import { PACKAGE_MANIFEST_FILE, PREVIOUS_REVISION } from "./constants/build-gate.js";
 import { isStableReleaseVersion, listAllowedVersionsAfter } from "./versions.js";
+import { CI_RELEASE_METADATA_FILE, RELEASE_EXECUTION } from "./constants/ci-release.js";
 
 /**
  * @typedef {{ shouldBuild: boolean, reason: string }} BuildDecision
@@ -88,6 +89,15 @@ export function decideBuildForCheckout(repositoryRoot) {
     })
   );
   const currentVersion = readVersion(() => readFileSync(path.join(repositoryRoot, PACKAGE_MANIFEST_FILE), "utf8"));
+  const metadataPath = path.join(repositoryRoot, CI_RELEASE_METADATA_FILE);
+  if (existsSync(metadataPath)) {
+    try {
+      const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
+      if (metadata.version === currentVersion && metadata.execution === RELEASE_EXECUTION.ci) return { shouldBuild: false, reason: `Release ${currentVersion} is delegated to CI. Production deployment waits for its checks. Skipping build.` };
+    } catch {
+      return { shouldBuild: false, reason: "CI release metadata could not be read. Skipping build." };
+    }
+  }
 
   return decideBuild(previousVersion, currentVersion);
 }

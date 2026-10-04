@@ -32,6 +32,8 @@ import { RELEASE_TYPE, RELEASE_TYPE_ORDER } from "../constants/versions.js";
 import { DEFAULT_PROJECT_COMMANDS, describeProjectCommands, detectPackageManager } from "../package-manager.js";
 import { isRegistryProvider, resolvePublicationOptions } from "./registry-config.js";
 import { isPreMajorShiftActive } from "../versions.js";
+import { resolveCiReleaseConfig } from "./ci-config.js";
+import { CI_CONFIG_EXPORT } from "../constants/ci-release.js";
 
 /**
  * @typedef {import("./process.js").GitReader} GitReader
@@ -72,6 +74,7 @@ import { isPreMajorShiftActive } from "../versions.js";
  *   versionFiles?: string[],
  *   packages?: "workspaces" | string[],
  *   tagFormat?: string,
+ *   ci?: import("./ci-config.js").CiReleaseConfig | null,
  * }} CreateVersionConfig
  *   `summary` lines replace `{version}` with the released version (in monorepo mode, a line with
  *   `{version}` or `{name}` is printed once per released package). Without `checks`, the release
@@ -104,6 +107,7 @@ import { isPreMajorShiftActive } from "../versions.js";
  *   versionFiles: string[],
  *   packages: "workspaces" | string[] | null,
  *   tagFormat: string | null,
+ *   ci: import("./ci-config.js").ResolvedCiReleaseConfig | null,
  *   commands: ProjectCommands,
  * }} ResolvedCreateVersionConfig
  *   `checks` is empty when they are skipped on purpose and `null` when none are configured nor
@@ -218,6 +222,7 @@ export function resolveCreateVersionConfig(rawConfig, { packageScripts = {}, com
   }
 
   const config = /** @type {Record<string, unknown>} */ (rawConfig);
+  const ci = resolveCiReleaseConfig(config.ci);
   if (config.projectName !== undefined && (typeof config.projectName !== "string" || config.projectName.trim() === "")) {
     throw invalidField("projectName", "a non-empty string");
   }
@@ -330,6 +335,7 @@ export function resolveCreateVersionConfig(rawConfig, { packageScripts = {}, com
     packages: /** @type {"workspaces" | string[] | null} */ (packages),
     tagFormat: /** @type {string | null} */ (tagFormat),
     commands,
+    ci,
   };
 }
 
@@ -383,7 +389,9 @@ export async function loadCreateVersionConfig(repositoryRoot) {
 
   const manifest = readProjectManifest(repositoryRoot);
   const scripts = manifest?.scripts;
-  return resolveCreateVersionConfig(module.default, {
+  return resolveCreateVersionConfig(module.default && typeof module.default === "object" && !Array.isArray(module.default)
+    ? { ...module.default, ci: module.default.ci ?? module[CI_CONFIG_EXPORT] }
+    : module.default, {
     packageScripts: scripts && typeof scripts === "object" && !Array.isArray(scripts) ? /** @type {Record<string, unknown>} */ (scripts) : {},
     commands: describeProjectCommands(detectPackageManager(repositoryRoot, manifest ?? undefined)),
   });

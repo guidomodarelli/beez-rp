@@ -17,7 +17,7 @@
  * @module create-version/run
  */
 
-import { existsSync, lstatSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { CHANGELOG_FILE, CHANGELOG_UPDATE_REQUIRED_CODE } from "../constants/changelog.js";
@@ -89,6 +89,11 @@ import { isRegistryProvider } from "./registry-config.js";
 import { checkRegistryAccess, lookupRegistryVersions, publishRegistryRelease, resolveRegistry, selectProjectRegistry } from "./registry.js";
 import { prepareJsrVersionUpdates, readJsrManifest } from "./jsr.js";
 import { JSR_REGISTRY_PROVIDER, REGISTRY_LABELS } from "../constants/registry.js";
+import { CI_DISPATCH_STATUS, CI_GIT_HOOKS_OPTION, CI_VERCEL_DEPLOYMENT, CI_WORKFLOW_DIRECTORY, DISPATCH_CI_RELEASE_STEP, RELEASE_EXECUTION } from "../constants/ci-release.js";
+import { appendCiDispatch, assertCiCompatiblePublication, assertCiWorkflowFile, assertGeneratedCiWorkflowCurrent, assertResumeExecutionMatches, buildCiWorkerPlan, chooseReleaseExecution, defaultCiReleaseConfig, readCiReleaseIdentity, readCommittedCiWorkflow } from "./ci.js";
+import { assertCiSetupFilesUnchanged, describeCiEnvironment, prepareCiReleaseMetadata, prepareCiSetupFiles } from "./ci-setup.js";
+import { createGithubWorkflowClient } from "./github-workflow.js";
+import { findLastRelease } from "./state.js";
 
 /**
  * @typedef {import("./config.js").ResolvedCreateVersionConfig} ResolvedCreateVersionConfig
@@ -110,6 +115,10 @@ import { JSR_REGISTRY_PROVIDER, REGISTRY_LABELS } from "../constants/registry.js
  *   registryLabel: string | null,
  *   commands: import("../package-manager.js").ProjectCommands,
  *   changelogFiles: import("./changelog.js").PreservedReleaseFile[],
+ *   execution?: "local" | "ci",
+ *   ciWorker?: boolean,
+ *   ciSetupFiles?: ReleaseFileUpdate[],
+ *   workflowClient?: import("./github-workflow.js").GithubWorkflowClient,
  * }} ReleaseContext
  * @typedef {{
  *   repositoryRoot: string,
@@ -117,6 +126,9 @@ import { JSR_REGISTRY_PROVIDER, REGISTRY_LABELS } from "../constants/registry.js
  *   config: ResolvedCreateVersionConfig,
  *   commands: import("../package-manager.js").ProjectCommands,
  *   state: { migrations: import("./config.js").MigrationCheck | null },
+ *   execution?: "local" | "ci",
+ *   ciWorker?: boolean,
+ *   version?: string | null,
  * }} StepContext
  *   What the steps shared with the monorepo mode read: both release contexts satisfy it.
  * @typedef {{ mode: string, steps: import("./plan.js").ReleasePlanStep[], blockers: import("./plan.js").ReleaseBlocker[], warnings: string[] }} RenderablePlan
@@ -378,7 +390,8 @@ export function renderPlan(plan) {
  * @returns {Promise<void>}
  */
 export async function runGitStep(context, gitArguments, failureMessage, hint) {
-  const exitCode = await runInherited("git", gitArguments, { cwd: context.repositoryRoot });
+  const argumentsWithHooks = context.execution === RELEASE_EXECUTION.ci ? ["-c", CI_GIT_HOOKS_OPTION, ...gitArguments] : gitArguments;
+  const exitCode = await runInherited("git", argumentsWithHooks, { cwd: context.repositoryRoot });
 
   if (exitCode !== 0) {
     throw new ReleaseStepError(`${failureMessage} (git ${gitArguments[0]} salió con código ${exitCode}).`, hint);
@@ -514,15 +527,20 @@ export async function applyMigrationsStep(context) {
     return;
   }
 
-  const hookContext = createHookContext(context.repositoryRoot, context.reader, null);
+  const hookContext = createHookContext(context.repositoryRoot, context.reader, context.ciWorker ? context.version ?? null : null);
   await adapter.apply(hookContext);
   const recheck = await adapter.check(hookContext);
 
   if (recheck.status === MIGRATION_STATUS.pending) {
     throw new ReleaseStepError(
       `Siguen pendientes ${recheck.pending.length} migración(es) después de migrar.`,
-      "Revisá el journal de migraciones y la tabla de migraciones aplicadas; no se subió ninguna versión."
+      context.ciWorker ? "Revisá el journal y la base antes de reintentar este mismo tag; no se publicó el release." : "Revisá el journal de migraciones y la tabla de migraciones aplicadas; no se subió ninguna versión."
     );
+  }
+
+  if (context.ciWorker && recheck.status !== MIGRATION_STATUS.upToDate) {
+    context.state.migrations = recheck;
+    throw new ReleaseStepError("Las migraciones se ejecutaron, pero no se pudo confirmar que la base esté al día.", "Verificá la base y las credenciales antes de reintentar el workflow de este mismo tag; no se publicó el release.");
   }
 
   print(`${ICON.success} Base de datos al día.`);
@@ -860,6 +878,7 @@ export async function commitReleaseFiles(context, releaseFiles, subject, preserv
   try {
     for (const { filePath, content } of releaseFiles) {
       try {
+        mkdirSync(path.dirname(path.join(context.repositoryRoot, filePath)), { recursive: true });
         writeFileSync(path.join(context.repositoryRoot, filePath), content);
       } catch (error) {
         throw new ReleaseStepError(`No se pudo escribir ${filePath} para el release (${error instanceof Error ? error.message : String(error)}).`, "Revisá que se pueda escribir (permisos, solo lectura).", {
@@ -949,11 +968,15 @@ async function bumpVersionStep(context) {
     throw new ReleaseStepError("No se eligió ninguna versión.", `Volvé a correr ${context.commands.createVersion}.`);
   }
 
+  assertCiSetupFilesUnchanged(context.repositoryRoot, context.ciSetupFiles ?? []);
+
   /** @type {ReleaseFileUpdate[]} */
   const releaseFiles = [
     { filePath: PACKAGE_MANIFEST_FILE, originalBytes: manifest.originalBytes, content: rewriteManifestVersion(context, PACKAGE_MANIFEST_FILE, manifest.text, nextRelease.version) },
     ...(await prepareVersionFileUpdates(context, context.config.versionFiles, nextRelease.version)),
     ...(context.config.publish === JSR_REGISTRY_PROVIDER ? await prepareJsrVersionUpdates(context, context.repositoryRoot, context.config.publication, nextRelease.version) : []),
+    ...(context.ciSetupFiles ?? []),
+    ...(context.config.ci?.deployment === CI_VERCEL_DEPLOYMENT ? [prepareCiReleaseMetadata(context.repositoryRoot, nextRelease.version, context.execution ?? RELEASE_EXECUTION.local)] : []),
   ];
   await commitReleaseFiles(context, releaseFiles, nextRelease.version, context.changelogFiles);
 
@@ -1220,7 +1243,24 @@ const STEP_EXECUTORS = {
   [RELEASE_STEP.pushRelease]: pushReleaseStep,
   [RELEASE_STEP.pushReleaseTag]: pushReleaseTagStep,
   [RELEASE_STEP.publishRelease]: publishReleaseStep,
+  [DISPATCH_CI_RELEASE_STEP]: dispatchCiReleaseStep,
 };
+
+/**
+ * Dispatches the pushed tag without performing any project checks or publication locally.
+ * @param {ReleaseContext} context - Prepared release and GitHub adapter.
+ * @returns {Promise<void>} Resolves when GitHub accepted the workflow.
+ * @throws {ReleaseStepError} When dispatch remains unconfirmed.
+ */
+async function dispatchCiReleaseStep(context) {
+  const tag = toReleaseTag(requireReleaseVersion(context));
+  const workflow = context.config.ci?.workflow;
+  if (!workflow || !context.workflowClient) throw new ReleaseStepError("No hay un workflow disponible para enviar el release.", `Reintentá con ${context.commands.createVersion} --retry-ci ${tag}.`);
+  const release = await readCiReleaseIdentity(context.reader, tag);
+  const result = await context.workflowClient.dispatch(workflow, release, `${context.commands.createVersion} --retry-ci ${tag}`);
+  print(`${ICON.success} ${tag} ${result.status === CI_DISPATCH_STATUS.existing ? "ya tiene una ejecución activa o exitosa" : "enviado a CI"}. Los checks y la publicación se ejecutan en GitHub.`);
+  if (result.url) print(`${ICON.info} ${result.url}`);
+}
 
 /**
  * Renders the closing summary of a pushed or published release.
@@ -1234,6 +1274,7 @@ function renderReleaseSummary(context, remoteUrl, startedAt) {
   const version = /** @type {string} */ (context.version);
   const tag = toReleaseTag(version);
   const lines = [`${ICON.success} ${paint("bold", "Versión")}   ${paint(["bold", "greenBright"], version)}  ${paint("gray", `(${tag})`)}`];
+  if (context.execution === RELEASE_EXECUTION.ci) return renderBox({ title: `${tag} enviado a CI`, lines: [...lines, "El release todavía no está confirmado: revisá el resultado del workflow en Actions."], tone: BOX_TONE.info });
 
   if (context.commitCount !== null) {
     lines.push(`${ICON.success} ${paint("bold", "Commits")}   ${context.commitCount}`);
@@ -1341,6 +1382,7 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   const startedAt = Date.now();
   // Usage and argument errors are printed before the configuration loads.
   const usage = buildReleaseUsage(describeProjectCommands(detectPackageManager(repositoryRoot)));
+  /** @type {import("./plan.js").ReleaseOptions} */
   let options;
 
   try {
@@ -1366,15 +1408,52 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   }
 
   if (config.packages) {
+    if ((config.ci && options.execution !== RELEASE_EXECUTION.local) || options.execution === RELEASE_EXECUTION.ci || options.setupCi || options.ciRelease || options.retryCi) {
+      print(`${ICON.failure} CI por tag vX.Y.Z requiere un proyecto con una única versión; para monorepos usá --local sin ci configurado.`);
+      return FAILURE_EXIT_CODE;
+    }
     // Imported lazily: the monorepo mode imports this module for the steps it shares.
     const { runMonorepoCreateVersion } = await import("../monorepo/run.js");
     return runMonorepoCreateVersion({ repositoryRoot, config, options, startedAt });
   }
 
+  const ciWasConfigured = config.ci !== null;
+  let selection;
+  try {
+    selection = await chooseReleaseExecution(config, options);
+  } catch (error) {
+    print(`${ICON.failure} ${error instanceof Error ? error.message : String(error)}${error instanceof ReleaseStepError ? ` ${error.hint}` : ""}`);
+    return FAILURE_EXIT_CODE;
+  }
+  if (!selection) return 0;
+  if (selection.setup && !config.ci) config = { ...config, ci: defaultCiReleaseConfig(repositoryRoot, config) };
+  if (selection.setup && ciWasConfigured && config.ci && existsSync(path.join(repositoryRoot, CI_WORKFLOW_DIRECTORY, config.ci.workflow))) {
+    // An existing workflow turns setup into an ordinary CI release only while it still matches the current configuration.
+    try {
+      await assertGeneratedCiWorkflowCurrent(repositoryRoot, config);
+    } catch (error) {
+      print(`${ICON.failure} ${error instanceof Error ? error.message : String(error)}${error instanceof ReleaseStepError ? ` ${error.hint}` : ""}`);
+      return FAILURE_EXIT_CODE;
+    }
+    selection = { ...selection, setup: false };
+  }
+  const isCiPreparation = selection.execution === RELEASE_EXECUTION.ci;
+  // Rejected before diagnosing or bumping: a pushed tag could never be published by a non-interactive worker.
+  if (isCiPreparation) {
+    try {
+      await assertCiCompatiblePublication(config, repositoryRoot);
+    } catch (error) {
+      print(`${ICON.failure} ${error instanceof Error ? error.message : String(error)}${error instanceof ReleaseStepError ? ` ${error.hint}` : ""}`);
+      return FAILURE_EXIT_CODE;
+    }
+  }
+  const workflowClient = isCiPreparation ? createGithubWorkflowClient(repositoryRoot) : undefined;
+
   const reader = createGitReader(repositoryRoot);
   const remoteUrl = (await reader.tryGit(["remote", "get-url", RELEASE_REMOTE])) ?? "";
   const { migrations } = config;
   let capabilities = describeReleaseCapabilities(config);
+  if (isCiPreparation) capabilities = { ...capabilities, checks: false, prepare: false, publish: false };
   const planOptions = { skipUnpublished: options.skipUnpublished, ignoreLocalChanges: options.ignoreLocalChanges };
   const spinner = startSpinner("Diagnosticando el repositorio");
   let state;
@@ -1382,16 +1461,18 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   try {
     state = await collectReleaseState({
       repositoryRoot,
+      // CI preparation still reads the registry: the plan must block (or require --skip-unpublished)
+      // when the last release is missing, before an immutable tag is pushed for the worker.
       trackNpm: config.registry !== null,
       registrySelection: selectProjectRegistry(config),
-      checkMigrations: migrations ? () => migrations.check(createHookContext(repositoryRoot, reader, null)) : null,
+      checkMigrations: !isCiPreparation && migrations ? () => migrations.check(createHookContext(repositoryRoot, reader, null)) : null,
       // The credentials are checked when the plan would publish to npm, and also when the npm lookup
       // failed: an authenticated `npm view` rejected with E401/E403 means the token, not the connection, is wrong.
       checkNpmAuth: (snapshot) =>
-        isRegistryProvider(config.publish) &&
+        !isCiPreparation && isRegistryProvider(config.publish) &&
         // Planned as if local changes were ignored: the run may still offer to ignore them, and
         // that plan must not publish with unchecked credentials.
-        (hasFailedNpmLookup(snapshot) ||
+        (Boolean(options.ciRelease && !snapshot.npm?.publishedVersions.includes(snapshot.headVersion ?? "")) || hasFailedNpmLookup(snapshot) ||
           buildReleasePlan(snapshot, capabilities, { ...planOptions, ignoreLocalChanges: true }).steps.some((planStep) => planStep.id === RELEASE_STEP.publishRelease)),
       onProgress: (label) => spinner.update(label),
     });
@@ -1404,6 +1485,7 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
 
   const latestPublished = state.npm?.publishedVersions.at(-1);
   capabilities = describeReleaseCapabilities(config, state.npm?.registryLabel);
+  if (isCiPreparation) capabilities = { ...capabilities, checks: false, prepare: false, publish: false };
   const publishedLabel = state.npm
     ? latestPublished ? `v${latestPublished} en ${state.npm.registryLabel ?? "npm"}` : null
     : state.releasedVersion ? `v${state.releasedVersion} ${config.publishedLabel}` : null;
@@ -1411,10 +1493,38 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   print(renderDiagnosis(state, repositoryRoot));
 
   let plan = buildReleasePlan(state, capabilities, planOptions);
+  if (options.ciRelease) {
+    try {
+      const release = await readCiReleaseIdentity(reader, options.ciRelease, true);
+      state.lastRelease = await findLastRelease(reader, "HEAD^");
+      plan = buildCiWorkerPlan(state, capabilities, release.version, config.ci?.deployment === CI_VERCEL_DEPLOYMENT);
+      plan.steps.unshift({ id: RELEASE_STEP.verifyChangelog, title: "Verificar el CHANGELOG del release recibido" });
+    } catch (error) {
+      print(`${ICON.failure} ${error instanceof Error ? error.message : String(error)}${error instanceof ReleaseStepError ? ` ${error.hint}` : ""}`);
+      return FAILURE_EXIT_CODE;
+    }
+  }
+
+  if (options.retryCi) {
+    try {
+      if (!config.ci || !workflowClient) throw new ReleaseStepError("No hay un workflow configurado para reenviar el release.", "Configurá ci.workflow y volvé a ejecutar --retry-ci con el mismo tag.");
+      assertCiWorkflowFile(repositoryRoot, config.ci.workflow);
+      const release = await readCiReleaseIdentity(reader, options.retryCi);
+      if (options.dryRun) { print(`--dry-run: se reenviaría ${release.tag} a ${config.ci.workflow}; no se cambió nada.`); return 0; }
+      const environment = describeCiEnvironment(config);
+      await workflowClient.preflight(config.ci.workflow, environment.secrets, environment.variables);
+      const submitted = await workflowClient.dispatch(config.ci.workflow, release, `${config.commands.createVersion} --retry-ci ${release.tag}`);
+      print(`${release.tag} ${submitted.status === CI_DISPATCH_STATUS.existing ? "ya tiene una ejecución activa o exitosa" : "enviado a CI"}: ${submitted.url ?? "revisá Actions"}. No se creó otra versión.`);
+      return 0;
+    } catch (error) {
+      print(`${ICON.failure} ${error instanceof Error ? error.message : String(error)}${error instanceof ReleaseStepError ? ` ${error.hint}` : ""}`);
+      return FAILURE_EXIT_CODE;
+    }
+  }
 
   // Uncommitted changes are the only blocker when ignoring them unblocks the plan: an interactive
   // run asks instead of stopping (a dry run, or one without terminal, keeps the blocker and its hint).
-  if (plan.blockers.length > 0 && !options.ignoreLocalChanges && !options.dryRun && process.stdin.isTTY) {
+  if (!options.ciRelease && plan.blockers.length > 0 && !options.ignoreLocalChanges && !options.dryRun && process.stdin.isTTY) {
     const planIgnoringChanges = buildReleasePlan(state, capabilities, { ...planOptions, ignoreLocalChanges: true });
 
     if (planIgnoringChanges.blockers.length === 0 && planIgnoringChanges.steps.length > 0) {
@@ -1427,6 +1537,7 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
       plan = planIgnoringChanges;
     }
   }
+  if (isCiPreparation) plan = appendCiDispatch(plan);
 
   if (plan.mode === RELEASE_MODE.upToDate) {
     const since = state.lastRelease?.version ? toReleaseTag(state.lastRelease.version) : "el inicio";
@@ -1442,7 +1553,7 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
 
   // A missing manual changelog update must fail CI; other diagnostic blockers retain their exit behavior.
   if (plan.blockers.length > 0) {
-    return plan.blockers.some((blocker) => blocker.code === CHANGELOG_UPDATE_REQUIRED_CODE) ? FAILURE_EXIT_CODE : 0;
+    return isCiPreparation || options.ciRelease || plan.blockers.some((blocker) => blocker.code === CHANGELOG_UPDATE_REQUIRED_CODE) ? FAILURE_EXIT_CODE : 0;
   }
 
   if (plan.mode === RELEASE_MODE.newRelease && state.headVersion) {
@@ -1459,6 +1570,8 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   // A resume never rewrites versionFiles: before pushing or publishing, HEAD must already carry the pending version.
   if (plan.mode === RELEASE_MODE.resume && plan.pendingVersion) {
     try {
+      // The worker always runs the release committed for CI; local runs must resume in the committed mode.
+      if (!options.ciRelease) await assertResumeExecutionMatches(reader, plan.pendingVersion, selection.execution);
       await verifyReleasedVersionFiles({ repositoryRoot, config, reader, commands: config.commands }, plan.pendingVersion);
       if (config.publish === JSR_REGISTRY_PROVIDER && readJsrManifest(repositoryRoot, config.publication.configFile).manifest.version !== plan.pendingVersion) {
         throw new ReleaseStepError("El manifest JSR no coincide con la versión del release pendiente.", "Corregilo dentro del commit de release antes de subir o publicar; no se reescribió ningún archivo.");
@@ -1482,6 +1595,24 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
     return FAILURE_EXIT_CODE;
   }
 
+  /** @type {ReleaseFileUpdate[]} */
+  let ciSetupFiles = [];
+  if (isCiPreparation && config.ci && workflowClient) {
+    try {
+      if (selection.setup && plan.mode !== RELEASE_MODE.newRelease) throw new ReleaseStepError("La configuración automática de CI requiere un release nuevo.", "Completá el release pendiente con --local y después ejecutá --setup-ci.");
+      if (selection.setup) ciSetupFiles = await prepareCiSetupFiles(repositoryRoot, config, !ciWasConfigured);
+      // The release commit is built from HEAD and dispatched with --ref main: the workflow must already be committed.
+      else await readCommittedCiWorkflow(repositoryRoot, config.ci.workflow);
+      const environment = describeCiEnvironment(config);
+      await workflowClient.preflight(config.ci.workflow, environment.secrets, environment.variables);
+      if (config.migrations && environment.secrets.length === 0) print(`${ICON.warning} El worker necesita las variables de las migraciones: declaralas en ci.secrets o ci.variables y configurá Actions antes de publicar.`);
+      print(`${ICON.info} CI ejecutará los checks y hooks; la preparación local omite los hooks de Git.`);
+    } catch (error) {
+      print(`${ICON.failure} ${error instanceof Error ? error.message : String(error)}${error instanceof ReleaseStepError ? ` ${error.hint}` : ""}`);
+      return FAILURE_EXIT_CODE;
+    }
+  }
+
   /** @type {ReleaseContext} */
   const context = {
     repositoryRoot,
@@ -1498,6 +1629,10 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
     registryLabel: state.npm?.registryLabel ?? null,
     commands: config.commands,
     changelogFiles: [],
+    execution: selection.execution,
+    ciWorker: Boolean(options.ciRelease),
+    ciSetupFiles,
+    workflowClient,
   };
   const changesToSetAside = options.ignoreLocalChanges ? listLocalChangesToSetAside(state, plan.mode) : [];
   let setAside = null;
@@ -1565,7 +1700,10 @@ async function runPlanSteps(context, plan, remoteUrl, startedAt) {
         lines.push("", `${paint("bold", "Qué hacer:")} ${error.hint}`);
       }
       const releaseOnOrigin = await describeReleaseOnOrigin(context, remoteUrl);
-      lines.push("", releaseOnOrigin ? `${ICON.warning} ${paint("bold", releaseOnOrigin)}` : paint("gray", `${context.commands.createVersion} retoma desde el primer paso que falte.`));
+      lines.push("", context.execution === RELEASE_EXECUTION.ci && context.version && context.pushed
+        ? `${ICON.warning} ${toReleaseTag(context.version)} ya está en origin. Revisá Actions y reenviá el mismo release con ${context.commands.createVersion} --retry-ci ${toReleaseTag(context.version)}; no hagas otro bump.`
+        : context.ciWorker && context.version ? `${ICON.warning} ${toReleaseTag(context.version)} ya está en origin. Corregí el paso y reintentá el workflow de este mismo tag; no se hizo otro bump ni push.`
+        : releaseOnOrigin ? `${ICON.warning} ${paint("bold", releaseOnOrigin)}` : paint("gray", `${context.commands.createVersion} retoma desde el primer paso que falte.`));
       print(renderBox({ title: `Falló el paso ${index + 1}: ${planStep.title}`, lines, tone: BOX_TONE.danger }));
       return FAILURE_EXIT_CODE;
     }

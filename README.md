@@ -61,6 +61,51 @@ it.each(REJECTED_VERSION_BUMP_CASES)("rechaza %s (%j)", (_reason, version) => {
 
 Cada proyecto versiona con el mismo comando y describe sus diferencias en `beez-rp.config.js` (o `beez-rp.config.mjs`, que tiene prioridad y conviene en proyectos sin `"type": "module"`).
 
+### Elegir local o CI
+
+En una terminal interactiva, `pnpm cv` pregunta dónde ejecutar el release. Si el repo configura `ci.workflow`, **CI queda seleccionado por defecto** y se puede elegir **Local**. Sin configuración, ofrece **Configurar CI automáticamente**, **Continuar en local** o **Cancelar**. Sin terminal conserva el modo local cuando no hay `ci`; con `ci` usa CI. Dentro de un runtime CI nunca despacha otro workflow.
+
+```js
+export default {
+  checks: ["pnpm run ci"],
+  ci: {
+    workflow: "release.yml",           // archivo dentro de .github/workflows
+    secrets: ["DATABASE_MIGRATION_URL"], // nombres; los valores van en Actions
+    variables: [],
+    deployment: "vercel",              // opcional: deploy después de los checks
+  },
+};
+```
+
+En **CI**, el proceso local verifica el CHANGELOG manual, el estado de Git, `gh` y las credenciales del worker; elige la versión, hace el bump, crea commit + tag, hace push y dispara el workflow. Omite checks, migraciones, preparación, publicación y hooks de Git locales: esas validaciones se ejecutan en el worker. La terminal informa **enviado a CI**, no publicado.
+
+El worker hace checkout del tag exacto y, antes de configurar herramientas o instalar dependencias (es decir, antes de ejecutar código del proyecto con los secrets y el permiso OIDC del job), un paso que solo usa Git rechaza el release si `tag` no es `v<version>` estable, si no apunta exactamente al `sha` enviado o si ese commit no está en `origin/main`. Después vuelve a comprobar su versión y SHA antes de ejecutar checks, migraciones, preparación y publicación. Usa `--ci-release vX.Y.Z`; nunca vuelve a hacer bump ni push. Un check fallido corta el release. Una versión que el registry ya confirma publicada no se vuelve a publicar. Tampoco se ejecuta un tag anterior a la versión vigente en `origin/main`.
+
+En **Local**, se conserva el flujo completo en la máquina actual, incluidos sus hooks. Se puede elegir por flag:
+
+```bash
+pnpm cv --local --bump patch
+pnpm cv --ci --bump minor
+pnpm cv --setup-ci --bump patch
+pnpm cv --ci --dry-run
+pnpm cv --retry-ci v1.2.4
+```
+
+`--setup-ci` prepara el workflow y agrega `export const ci = ...` al config existente, sin reemplazar sus hooks. Se aceptan tanto un objeto `ci` dentro de `export default` como ese export nombrado; el objeto del default tiene prioridad y un campo ausente o `null` permite usar el export nombrado. Los archivos se incluyen en el mismo commit del bump y se restauran si el commit falla. Los workflows existentes no se sobrescriben: si `ci` ya estaba configurado y el workflow commiteado difiere del que generaría la configuración actual (por ejemplo, un secret o token de publicación nuevo), `--setup-ci` se detiene antes de crear el commit, el tag o el dispatch; regeneralo borrándolo en un commit propio, actualizalo a mano o, si está personalizado a propósito, usá `--ci`. Los archivos que modifica el setup, como `.gitignore`, deben estar commiteados y limpios incluso con `--ignore-local-changes`. El comando detecta el package manager y `.nvmrc`; usa instalación con lockfile y una versión predeterminada de pnpm si solo hay lockfile. Para proyectos con `vercel.json` y sin publisher propio, configura el deploy de Vercel; los nombres de variables explícitos en `migrations.targetHint` se incluyen como secrets del worker.
+
+El workflow recibe tres inputs `string`: `version`, `tag` y `sha`. Debe declarar `workflow_dispatch`, tener un `run-name` como `beez-rp release ${{ inputs.tag }} ${{ inputs.sha }}` y llamar al script `create-version` con `--ci-release`. La configuración automática genera ese contrato. Ejemplo del despacho que hace beez-rp ([GitHub CLI](https://cli.github.com/manual/gh_workflow_run)):
+
+```bash
+gh workflow run release.yml --ref main \
+  -f version=1.2.4 -f tag=v1.2.4 -f sha=<commit-del-tag>
+```
+
+Se requiere `origin` de GitHub, `main` como rama por defecto y `gh auth login` con acceso al repo. Las credenciales de publicación y los nombres de `ci.secrets` / `ci.variables` se comprueban antes del bump, aceptando tanto los del repo como los secrets/variables de organización compartidos con él; si no se pueden listar los de organización, el preflight bloquea indicando los nombres sin verificar. Se configuran con `gh secret set NPM_TOKEN`, por ejemplo. El entorno configurado también está disponible durante la instalación de dependencias privadas. OIDC usa `id-token: write`; GitHub Packages con `GITHUB_TOKEN` usa el token del workflow y `packages: write`. Si JSR selecciona `jsrClient: "deno"`, el workflow instala Deno. Con npm y OIDC, el Node.js que fija `.nvmrc` (o el major local si no existe) debe alcanzar Node >= 22.14.0 antes del bump; con pnpm, Yarn o Bun el workflow instala además npm 11.5.1 solo para publicar; con npm se valida el pin de `packageManager` y, sin pin, el workflow instala npm 11.5.1 después de `npm ci`; además, el registry efectivo (`publication.registryUrl`, `publishConfig` o el `.npmrc` del proyecto) debe ser el público de npm. Otros secretos usados por hooks deben declararse explícitamente. Un estado de migraciones desconocido, antes o después de aplicar, corta el worker. Este protocolo de tag `vX.Y.Z` corresponde al modo de una única versión; los monorepos conservan el modo local.
+
+Si el despacho falla después del push, el tag queda en origin y el error indica `--retry-ci vX.Y.Z`: conserva la misma versión y no repite el push. Antes de despachar, consulta las ejecuciones con el mismo tag y SHA; reutiliza una activa o exitosa. Si una respuesta fallida no permite confirmar la aceptación, pide revisar Actions antes de reenviar y nunca reintenta automáticamente.
+
+Con `deployment: "vercel"`, se necesitan `VERCEL_TOKEN`, `VERCEL_ORG_ID` y `VERCEL_PROJECT_ID` como secrets de Actions. La configuración automática conserva el `ignoreCommand` anterior detrás de un gate sin dependencias, que evita el deploy por Git del release delegado a CI. `.beez-rp/release.json` registra la versión y el destino de ese release; un release local vuelve a usar el gate original. Después de los checks, migraciones y hooks, el workflow obtiene el entorno de producción y recién entonces construye y despliega con `vercel deploy --prebuilt --prod` ([flujo oficial de Vercel](https://vercel.com/kb/guide/how-can-i-use-github-actions-with-vercel)). Un workflow configurado manualmente debe incluir ese gate o desactivar el deploy automático por Git para que producción espere a CI. beez-rp no configura cuentas ni sube secretos desde `.env`.
+
 Funciona con pnpm, bun, npm o yarn: beez-rp detecta el package manager por el campo `packageManager` del `package.json` (por ejemplo `"bun@1.3.11"`), si no por el lockfile (`bun.lock`, `pnpm-lock.yaml`, `yarn.lock`, `package-lock.json`) y, sin ninguno, asume pnpm. Con eso arma los checks por defecto (`bun run ci`) y cada "volvé a correr" de los mensajes (`bun run create-version`; `npm run create-version`; `pnpm` y `yarn` corren el script directo). Los ejemplos de abajo usan pnpm. npm, GitHub Packages y GitLab se publican con el CLI de npm; JSR usa su cliente oficial o Deno.
 
 ```json

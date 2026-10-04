@@ -6,6 +6,10 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y e
 
 ## [Unreleased]
 
+### Added
+
+- Elección entre releases locales y en GitHub Actions: CI queda seleccionado por defecto cuando está configurado. Sin configuración, el comando ofrece crear el workflow y agregar sus ajustes al repo. El bump, el CHANGELOG manual y el push se preparan en local; los checks y la publicación continúan en CI sobre el mismo tag, con comprobación de credenciales, recuperación sin otro bump y configuración del despliegue de Vercel después de los checks.
+
 ## [0.6.1] - 2026-10-03
 
 - 121502f agrega directorio a la ejecución de pruebas
@@ -113,4 +117,3 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y e
 - Módulos `changelog` y `changelog-ai` para liberar el bloque `[Unreleased]` de Keep a Changelog y completarlo con Codex.
 - Módulo `terminal-ui` con cajas, spinner y selector interactivo para comandos de release.
 - Fixtures `beez-rp/testing` con todas las variantes de versión rechazadas, para los tests de cada proyecto.
-
