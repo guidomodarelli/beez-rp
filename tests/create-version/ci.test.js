@@ -726,6 +726,46 @@ describe("local CI preparation with real Git", () => {
     expect(github.dispatch).not.toHaveBeenCalled();
   }, GIT_FIXTURE_TEST_TIMEOUT_MS);
 
+  it.each([
+    ["the configuration disables the npm publication the committed release performs", "beez-rp.config.mjs", "export default { checks: ['node checks.mjs'], publish: null, ci: { workflow: 'release.yml' } };\n"],
+    ["the committed lockfile is edited", "package-lock.json", "{}\n"],
+    ["another package manager's lockfile is added", "yarn.lock", "# yarn lockfile v1\n"],
+    ["an uncommitted Node.js pin is added", ".nvmrc", "24\n"],
+    ["the configured workflow is edited", ".github/workflows/release.yml", "name: Release editado\n"],
+  ])("should block an ordinary CI release with --ignore-local-changes before any commit, tag or dispatch when %s", async (_scenario, changedPath, changedContent) => {
+    // Arrange
+    const { root, remote, originalSha } = createCiProject();
+    writeFileSync(path.join(root, changedPath), changedContent);
+    const changesBefore = runGit(["status", "--porcelain"], root);
+    const github = isolateGithub();
+    // Act
+    const status = await runCreateVersion({ repositoryRoot: root, argv: ["--ci", "--bump", "patch", "--ignore-local-changes"] });
+    // Assert
+    expect(status).toBe(1);
+    expect(runGit(["rev-parse", "HEAD"], root)).toBe(originalSha);
+    expect(runGit(["rev-parse", "main"], remote)).toBe(originalSha);
+    expect(runGit(["tag", "--list"], remote)).toBe("v1.2.3");
+    expect(runGit(["status", "--porcelain"], root)).toBe(changesBefore);
+    expect(runGit(["stash", "list"], root)).toBe("");
+    expect(github.preflight).not.toHaveBeenCalled();
+    expect(github.dispatch).not.toHaveBeenCalled();
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+
+  it("should still set aside an unrelated change and dispatch an ordinary CI release with --ignore-local-changes", async () => {
+    // Arrange
+    const { root, remote } = createCiProject();
+    writeFileSync(path.join(root, "notes.txt"), "Borrador local\n");
+    const github = isolateGithub();
+    // Act
+    const status = await runCreateVersion({ repositoryRoot: root, argv: ["--ci", "--bump", "patch", "--ignore-local-changes"] });
+    // Assert
+    expect(status).toBe(0);
+    expect(runGit(["rev-parse", "v1.2.4^{commit}"], remote)).toBe(runGit(["rev-parse", "HEAD"], root));
+    expect(runGit(["ls-tree", "--name-only", "HEAD", "notes.txt"], root)).toBe("");
+    expect(readFileSync(path.join(root, "notes.txt"), "utf8")).toBe("Borrador local\n");
+    expect(github.dispatch).toHaveBeenCalledOnce();
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+
   it("should preview setup without writes or GitHub calls when dry-run is requested", async () => {
     // Arrange
     const { root, originalSha } = createCiProject({ configured: false });

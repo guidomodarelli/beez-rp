@@ -89,7 +89,7 @@ import { isRegistryProvider } from "./registry-config.js";
 import { checkRegistryAccess, lookupRegistryVersions, publishRegistryRelease, resolveRegistry, selectProjectRegistry } from "./registry.js";
 import { prepareJsrVersionUpdates, readJsrManifest } from "./jsr.js";
 import { JSR_REGISTRY_PROVIDER, REGISTRY_LABELS } from "../constants/registry.js";
-import { CI_DISPATCH_STATUS, CI_GIT_HOOKS_OPTION, CI_VERCEL_DEPLOYMENT, CI_WORKFLOW_DIRECTORY, DISPATCH_CI_RELEASE_STEP, RELEASE_EXECUTION } from "../constants/ci-release.js";
+import { CI_DISPATCH_STATUS, CI_GIT_HOOKS_OPTION, CI_VERCEL_DEPLOYMENT, CI_WORKER_CONFIGURATION_FILES, CI_WORKFLOW_DIRECTORY, DISPATCH_CI_RELEASE_STEP, RELEASE_EXECUTION } from "../constants/ci-release.js";
 import { findCompletedCiPublication, requiresCiPublicationHistory } from "./ci-publication-history.js";
 import { appendCiDispatch, assertCiCompatiblePublication, assertCiInstallLockfileCommitted, assertCiNodeVersionFileCommitted, assertCiWorkflowFile, assertGeneratedCiWorkflowCurrent, assertResumeExecutionMatches, buildCiWorkerPlan, chooseReleaseExecution, defaultCiReleaseConfig, readCiReleaseIdentity, readCommittedCiWorkflow } from "./ci.js";
 import { assertCiSetupFilesUnchanged, describeCiEnvironment, prepareCiReleaseMetadata, prepareCiSetupFiles } from "./ci-setup.js";
@@ -1467,7 +1467,9 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   const { migrations } = config;
   let capabilities = describeReleaseCapabilities(config);
   if (isCiPreparation) capabilities = { ...capabilities, checks: false, prepare: false, publish: false };
-  const planOptions = { skipUnpublished: options.skipUnpublished, ignoreLocalChanges: options.ignoreLocalChanges };
+  // The worker reloads these files from the release tag: setting their changes aside would preflight another configuration.
+  const ciWorkerFiles = isCiPreparation && config.ci ? [...CI_WORKER_CONFIGURATION_FILES, `${CI_WORKFLOW_DIRECTORY}/${config.ci.workflow}`] : [];
+  const planOptions = { skipUnpublished: options.skipUnpublished, ignoreLocalChanges: options.ignoreLocalChanges, ciWorkerFiles };
   const spinner = startSpinner("Diagnosticando el repositorio");
   let state;
 

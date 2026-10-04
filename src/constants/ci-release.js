@@ -3,6 +3,9 @@
  * @module constants/ci-release
  */
 
+import { CREATE_VERSION_CONFIG_FILES, PACKAGE_MANIFEST_FILE, PINNED_NODE_VERSION_FILE, PROJECT_NPM_CONFIG_FILE } from "./create-version.js";
+import { LOCKFILE_PACKAGE_MANAGERS } from "./package-manager.js";
+
 /** Release execution locations offered by the CLI. */
 export const RELEASE_EXECUTION = Object.freeze({ local: "local", ci: "ci" });
 
@@ -147,6 +150,20 @@ export const CI_VERCEL_IGNORE_PLACEHOLDER = "__ORIGINAL_IGNORE_COMMAND__";
 
 /** Rendered workflow lines quoted when a committed generated workflow drifted from the current configuration. */
 export const CI_WORKFLOW_DRIFT_PREVIEW_LINES = 3;
+
+/**
+ * Root-relative files that shape what the CI worker runs besides the configured workflow: the
+ * configuration modules, the manifest, the project npm config, the Node.js pin and every lockfile.
+ * Local preparation reads them from the working tree while the worker checks them out from the
+ * release tag, so `--ignore-local-changes` must not set changes to them aside during CI preparation.
+ */
+export const CI_WORKER_CONFIGURATION_FILES = Object.freeze([
+  ...CREATE_VERSION_CONFIG_FILES,
+  PACKAGE_MANIFEST_FILE,
+  PROJECT_NPM_CONFIG_FILE,
+  PINNED_NODE_VERSION_FILE,
+  ...LOCKFILE_PACKAGE_MANAGERS.map(([lockfileName]) => lockfileName),
+]);
 
 /** Prefix of the `run-name` the generated workflow gives each dispatched release, followed by its tag and commit. */
 export const CI_RELEASE_RUN_TITLE_PREFIX = "beez-rp release";

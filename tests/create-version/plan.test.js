@@ -228,6 +228,25 @@ describe("create-version plan", () => {
     }
   });
 
+  it.each([
+    { name: "a modified lockfile", change: " M pnpm-lock.yaml" },
+    { name: "an untracked Node.js pin", change: "?? .nvmrc" },
+    { name: "a modified configured workflow", change: " M .github/workflows/release.yml" },
+    { name: "a rename into a lockfile", change: "R  notes.txt -> yarn.lock" },
+  ])("should block a CI preparation with --ignore-local-changes when the changes to set aside include $name", ({ change }) => {
+    const ciWorkerFiles = ["pnpm-lock.yaml", "yarn.lock", ".nvmrc", ".github/workflows/release.yml"];
+    const state = createMainState({ workingTreeChanges: [change, "?? notes.md", " M CHANGELOG.md"] });
+
+    const plan = buildReleasePlan(state, DEPLOYED_APP, { ignoreLocalChanges: true, ciWorkerFiles });
+    const localPlan = buildReleasePlan(state, DEPLOYED_APP, { ignoreLocalChanges: true });
+
+    expect(plan.mode).toBe(RELEASE_MODE.blocked);
+    expect(plan.steps).toEqual([]);
+    expect(plan.blockers[0].title).toContain("no aparta cambios en archivos que definen el worker de CI");
+    expect(plan.blockers[0].details).toEqual([change, expect.stringContaining("No se creó la versión ni el tag")]);
+    expect(localPlan.mode).toBe(RELEASE_MODE.newRelease);
+  });
+
   it("should block resuming a release commit while the configuration has uncommitted changes, a rename included", () => {
     const npm = { status: NPM_LOOKUP_STATUS.ok, publishedVersions: ["0.1.0"], reason: null };
 

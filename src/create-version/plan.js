@@ -86,9 +86,11 @@ import { describeNpmAuthProblem, describeNpmFirstPublicationWarning } from "./np
  * @typedef {{ bump: "patch" | "minor" | "major" | null, setVersion: string | null, dryRun: boolean, skipUnpublished: boolean, ignoreLocalChanges: boolean, acceptSuggested: boolean, help: boolean, execution?: "local" | "ci" | null, setupCi?: boolean, ciRelease?: string | null, retryCi?: string | null }} ReleaseOptions
  *   `acceptSuggested` takes the release type the commits suggest instead of asking.
  * @typedef {{ version: string, latestPublished: string | null, resumable: boolean, registryLabel?: string }} UnpublishedRelease
- * @typedef {{ skipUnpublished?: boolean, ignoreLocalChanges?: boolean }} PlanOptions
+ * @typedef {{ skipUnpublished?: boolean, ignoreLocalChanges?: boolean, ciWorkerFiles?: readonly string[] }} PlanOptions
  *   `skipUnpublished` plans a new release even when the last release is missing from npm.
  *   `ignoreLocalChanges` plans the release despite uncommitted changes, which the run sets aside.
+ *   `ciWorkerFiles` lists, only for CI preparation, the root-relative files the worker reads from the
+ *   release tag; `ignoreLocalChanges` cannot set changes to them aside.
  */
 
 /** Capabilities of a project without checks, preparation or publication. */
@@ -414,6 +416,45 @@ export function codeChangesToSetAsideBlocker(codeChanges, commands) {
       ...codeChanges.slice(0, MAX_LISTED_ITEMS),
       `La configuración ya se cargó con esos cambios y puede depender de ellos: commitealos en una rama o guardalos con git stash, y volvé a correr ${commands.createVersion}.`,
     ],
+  };
+}
+
+/**
+ * Blocks a runnable CI preparation whose `--ignore-local-changes` would set aside changes to files
+ * that shape the worker (configuration, manifest, npm config, Node.js pin, lockfiles or workflow):
+ * the preparation and its preflight read them from the working tree, while the worker checks out
+ * the committed versions from the release tag, so the pushed tag could fail only in CI.
+ *
+ * @param {ReleasePlan} plan - Plan.
+ * @param {ReleaseState} state - Snapshot.
+ * @param {boolean} ignoreLocalChanges - Whether `--ignore-local-changes` was chosen.
+ * @param {readonly string[]} ciWorkerFiles - Root-relative files the worker reads from the tag; empty outside CI preparation.
+ * @param {ProjectCommands} commands - Project commands quoted by the hints.
+ * @returns {ReleasePlan} The same plan, or a blocked plan when a worker file would be set aside.
+ */
+function refuseToSetAsideCiWorkerChanges(plan, state, ignoreLocalChanges, ciWorkerFiles, commands) {
+  const workerChanges = ignoreLocalChanges && ciWorkerFiles.length > 0 && plan.steps.length > 0
+    ? listLocalChangesToSetAside(state, plan.mode).filter((line) => listPorcelainPaths(line).some((changedPath) => ciWorkerFiles.includes(changedPath)))
+    : [];
+
+  if (workerChanges.length === 0) {
+    return plan;
+  }
+
+  return {
+    mode: RELEASE_MODE.blocked,
+    steps: [],
+    blockers: [
+      {
+        title: `--${CREATE_VERSION_FLAG.ignoreLocalChanges} no aparta cambios en archivos que definen el worker de CI`,
+        details: [
+          ...workerChanges.slice(0, MAX_LISTED_ITEMS),
+          `La preparación los leería del working tree y el worker usaría los commiteados en el tag: commitealos en un commit propio o guardalos con git stash, y volvé a correr ${commands.createVersion}. No se creó la versión ni el tag.`,
+        ],
+      },
+    ],
+    warnings: [],
+    pendingVersion: null,
   };
 }
 
@@ -830,7 +871,8 @@ export function missingChecksBlocker(commands) {
 export function buildReleasePlan(state, capabilities = DEFAULT_CAPABILITIES, planOptions = {}) {
   const commands = capabilities.commands ?? DEFAULT_PROJECT_COMMANDS;
   const ignoreLocalChanges = planOptions.ignoreLocalChanges ?? false;
-  const plan = refuseToSetAsideCodeChanges(planRelease(state, capabilities, planOptions), state, ignoreLocalChanges, commands);
+  const codeSafePlan = refuseToSetAsideCodeChanges(planRelease(state, capabilities, planOptions), state, ignoreLocalChanges, commands);
+  const plan = refuseToSetAsideCiWorkerChanges(codeSafePlan, state, ignoreLocalChanges, planOptions.ciWorkerFiles ?? [], commands);
   return warnAboutSetAsideChanges(applyNpmAuth(plan, state.npmAuth, commands), state, ignoreLocalChanges);
 }
 
