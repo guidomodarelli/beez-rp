@@ -21,13 +21,18 @@ export const PACKAGE_MANAGER_FIELD = "packageManager";
 /** Name part of a `packageManager` value such as `bun@1.3.11`. */
 export const PACKAGE_MANAGER_FIELD_PATTERN = /^(pnpm|npm|yarn|bun)@/u;
 
-/** Lockfiles that reveal the package manager when `packageManager` is missing, checked in order. */
+/**
+ * Lockfiles of each package manager, checked in order to reveal the package manager when
+ * `packageManager` is missing. The generated CI workflow installs with a frozen lockfile, so it
+ * also needs one of its package manager's lockfiles committed.
+ */
 export const LOCKFILE_PACKAGE_MANAGERS = Object.freeze([
   ["bun.lock", PACKAGE_MANAGER.bun],
   ["bun.lockb", PACKAGE_MANAGER.bun],
   ["pnpm-lock.yaml", PACKAGE_MANAGER.pnpm],
   ["yarn.lock", PACKAGE_MANAGER.yarn],
   ["package-lock.json", PACKAGE_MANAGER.npm],
+  ["npm-shrinkwrap.json", PACKAGE_MANAGER.npm],
 ]);
 
 /**

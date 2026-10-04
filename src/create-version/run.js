@@ -90,7 +90,7 @@ import { checkRegistryAccess, lookupRegistryVersions, publishRegistryRelease, re
 import { prepareJsrVersionUpdates, readJsrManifest } from "./jsr.js";
 import { JSR_REGISTRY_PROVIDER, REGISTRY_LABELS } from "../constants/registry.js";
 import { CI_DISPATCH_STATUS, CI_GIT_HOOKS_OPTION, CI_VERCEL_DEPLOYMENT, CI_WORKFLOW_DIRECTORY, DISPATCH_CI_RELEASE_STEP, RELEASE_EXECUTION } from "../constants/ci-release.js";
-import { appendCiDispatch, assertCiCompatiblePublication, assertCiWorkflowFile, assertGeneratedCiWorkflowCurrent, assertResumeExecutionMatches, buildCiWorkerPlan, chooseReleaseExecution, defaultCiReleaseConfig, readCiReleaseIdentity, readCommittedCiWorkflow } from "./ci.js";
+import { appendCiDispatch, assertCiCompatiblePublication, assertCiInstallLockfileCommitted, assertCiWorkflowFile, assertGeneratedCiWorkflowCurrent, assertResumeExecutionMatches, buildCiWorkerPlan, chooseReleaseExecution, defaultCiReleaseConfig, readCiReleaseIdentity, readCommittedCiWorkflow } from "./ci.js";
 import { assertCiSetupFilesUnchanged, describeCiEnvironment, prepareCiReleaseMetadata, prepareCiSetupFiles } from "./ci-setup.js";
 import { createGithubWorkflowClient } from "./github-workflow.js";
 import { findLastRelease } from "./state.js";
@@ -1427,6 +1427,8 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   }
   if (!selection) return 0;
   if (selection.setup && !config.ci) config = { ...config, ci: defaultCiReleaseConfig(repositoryRoot, config) };
+  // Setup either writes the generated workflow or keeps an existing one that still matches it; both install from the committed lockfile.
+  const usesGeneratedWorkflow = selection.setup;
   if (selection.setup && ciWasConfigured && config.ci && existsSync(path.join(repositoryRoot, CI_WORKFLOW_DIRECTORY, config.ci.workflow))) {
     // An existing workflow turns setup into an ordinary CI release only while it still matches the current configuration.
     try {
@@ -1442,6 +1444,7 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   if (isCiPreparation) {
     try {
       await assertCiCompatiblePublication(config, repositoryRoot);
+      if (usesGeneratedWorkflow) await assertCiInstallLockfileCommitted(repositoryRoot, config.commands.packageManager);
     } catch (error) {
       print(`${ICON.failure} ${error instanceof Error ? error.message : String(error)}${error instanceof ReleaseStepError ? ` ${error.hint}` : ""}`);
       return FAILURE_EXIT_CODE;

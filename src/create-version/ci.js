@@ -11,7 +11,7 @@ import {
   CI_MIGRATION_ENVIRONMENT_PATTERN, CI_NODE_VERSION_PIN_PATTERN, CI_RELEASE_METADATA_FILE, CI_VERCEL_CONFIG_FILE, CI_VERCEL_DEPLOYMENT, CI_WORKFLOW_DRIFT_PREVIEW_LINES,
 } from "../constants/ci-release.js";
 import { BROWSER_AUTHENTICATION, NPM_OIDC_MINIMUM_NODE_VERSION, NPM_OIDC_MINIMUM_VERSION, NPM_REGISTRY_PROVIDER, OIDC_AUTHENTICATION } from "../constants/registry.js";
-import { PACKAGE_MANAGER } from "../constants/package-manager.js";
+import { LOCKFILE_PACKAGE_MANAGERS, PACKAGE_MANAGER } from "../constants/package-manager.js";
 import { CREATE_VERSION_FLAG, DEFAULT_NPM_REGISTRY_URL, MAIN_BRANCH, MIGRATION_STATUS, NPM_AUTH_STATUS, NPM_LOOKUP_STATUS, PACKAGE_MANIFEST_FILE, PINNED_NODE_VERSION_FILE, RELEASE_MODE, RELEASE_REMOTE, RELEASE_STEP, REMOTE_MAIN_REF } from "../constants/create-version.js";
 import { RELEASE_TAG_PREFIX } from "../constants/versions.js";
 import { compareReleaseVersions, findHighestStableVersion, isStableReleaseVersion, parseReleaseVersion, toReleaseTag } from "../versions.js";
@@ -243,6 +243,28 @@ export async function readCommittedCiWorkflow(repositoryRoot, workflow, missingH
   const committed = await runCaptured("git", ["show", `HEAD:${workflowPath}`], { cwd: repositoryRoot });
   if (committed.status !== 0) throw new ReleaseStepError(`${workflowPath} existe pero no está commiteado en HEAD; el worker de CI no lo recibiría.`, missingHint);
   return committed.stdout;
+}
+
+/**
+ * Rejects the generated workflow when HEAD has no lockfile of the project's package manager: it
+ * installs dependencies with a frozen lockfile (`npm ci`, `pnpm install --frozen-lockfile`,
+ * `yarn install --frozen-lockfile`/`--immutable`, `bun install --frozen-lockfile`), which fails
+ * without one, so the worker would stop only after the release commit and tag were pushed.
+ * A file present on disk is not enough: the worker checks out the pushed release commit.
+ * @param {string} repositoryRoot - Project root.
+ * @param {import("../package-manager.js").PackageManagerName} packageManager - Package manager the workflow installs with.
+ * @returns {Promise<void>}
+ * @throws {ReleaseStepError} When HEAD cannot be listed or contains none of the package manager's lockfiles.
+ */
+export async function assertCiInstallLockfileCommitted(repositoryRoot, packageManager) {
+  const lockfiles = LOCKFILE_PACKAGE_MANAGERS.filter(([, lockfileManager]) => lockfileManager === packageManager).map(([fileName]) => fileName);
+  const listed = await runCaptured("git", ["ls-tree", "--name-only", "HEAD", "--", ...lockfiles], { cwd: repositoryRoot });
+  if (listed.status !== 0) throw new ReleaseStepError(`No se pudo comprobar si HEAD contiene ${lockfiles.join(" o ")} para el workflow de CI (git ls-tree terminó con status ${listed.status}).`, "Revisá el repositorio Git antes de configurar CI; no se creó la versión ni el tag.");
+  if (listed.stdout.trim() !== "") return;
+  throw new ReleaseStepError(
+    `El workflow generado instala dependencias con ${packageManager} y lockfile congelado, pero HEAD no contiene ${lockfiles.join(" ni ")}; el worker fallaría después de subir el tag.`,
+    `Generá el lockfile con ${packageManager} install y commitealo en un commit propio, o usá --${CREATE_VERSION_FLAG.local}; no se creó la versión ni el tag.`
+  );
 }
 
 /**

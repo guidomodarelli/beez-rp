@@ -10,7 +10,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { loadCreateVersionConfig, resolveCreateVersionConfig } from "../../src/create-version/config.js";
-import { assertCiCompatiblePublication, assertGeneratedCiWorkflowCurrent, chooseReleaseExecution } from "../../src/create-version/ci.js";
+import { assertCiCompatiblePublication, assertCiInstallLockfileCommitted, assertGeneratedCiWorkflowCurrent, chooseReleaseExecution } from "../../src/create-version/ci.js";
 import { CiReleaseError } from "../../src/create-version/errors.js";
 import * as githubWorkflow from "../../src/create-version/github-workflow.js";
 import { parseReleaseArguments } from "../../src/create-version/plan.js";
@@ -32,6 +32,8 @@ function createCiProject({ configured = true, failChecks = false, updateChangelo
   runGit(["clone", "--quiet", remote, root], fixture);
   for (const [name, value] of [["user.name", "Release Fixture"], ["user.email", "release@example.test"], ["commit.gpgsign", "false"], ["tag.gpgsign", "false"], ["core.autocrlf", "false"]]) runGit(["config", name, value], root);
   writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "fixture-ci-app", version: "1.2.3", type: "module", packageManager: "npm@11.11.1", scripts: { "create-version": "beez-rp create-version" } }));
+  // The generated workflow installs with `npm ci`, which needs this lockfile committed.
+  writeFileSync(path.join(root, "package-lock.json"), JSON.stringify({ name: "fixture-ci-app", version: "1.2.3", lockfileVersion: 3, requires: true, packages: { "": { name: "fixture-ci-app", version: "1.2.3" } } }));
   writeFileSync(path.join(root, ".gitignore"), "*.log\nnode_modules\n");
   writeFileSync(path.join(root, "CHANGELOG.md"), "# Changelog\n\n- Primera versión.\n");
   writeFileSync(path.join(root, "checks.mjs"), `import { appendFileSync } from 'node:fs'; appendFileSync('release.log', 'checks\\n'); ${failChecks ? "process.exitCode = 1;" : ""}\n`);
@@ -514,6 +516,82 @@ describe("local CI preparation with real Git", () => {
     expect(runGit(["rev-parse", "main"], remote)).toBe(originalSha);
     expect(github.preflight).not.toHaveBeenCalled();
     expect(github.dispatch).not.toHaveBeenCalled();
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+
+  it.each([
+    ["missing from the project", false, false],
+    ["only on disk because Git ignores it", true, false],
+    ["missing while setup reuses the existing generated workflow", false, true],
+  ])("should block setup before any commit, tag or dispatch when the npm lockfile `npm ci` needs is %s", async (_scenario, keepIgnoredOnDisk, reuseGeneratedWorkflow) => {
+    // Arrange
+    const { root, remote } = createCiProject({ configured: reuseGeneratedWorkflow });
+    if (reuseGeneratedWorkflow) commitGeneratedWorkflow(root);
+    runGit(["rm", "--quiet", ...(keepIgnoredOnDisk ? ["--cached"] : []), "package-lock.json"], root);
+    if (keepIgnoredOnDisk) writeFileSync(path.join(root, ".gitignore"), "*.log\nnode_modules\npackage-lock.json\n");
+    runGit(["commit", "--quiet", "-am", "chore: stop committing the lockfile"], root);
+    runGit(["push", "--quiet", "origin", "main"], root);
+    const lockfilelessSha = runGit(["rev-parse", "HEAD"], root);
+    const github = isolateGithub();
+    // Act
+    const status = await runCreateVersion({ repositoryRoot: root, argv: ["--setup-ci", "--bump", "patch"] });
+    const directCheck = assertCiInstallLockfileCommitted(root, "npm");
+    // Assert
+    await expect(directCheck).rejects.toThrow(/package-lock\.json ni npm-shrinkwrap\.json/);
+    await expect(directCheck).rejects.toMatchObject({ hint: expect.stringContaining("npm install") });
+    expect(status).toBe(1);
+    expect(existsSync(path.join(root, "package-lock.json"))).toBe(keepIgnoredOnDisk);
+    expect(runGit(["rev-parse", "HEAD"], root)).toBe(lockfilelessSha);
+    expect(runGit(["rev-parse", "main"], remote)).toBe(lockfilelessSha);
+    expect(runGit(["tag", "--list"], remote)).toBe("v1.2.3");
+    expect(runGit(["status", "--porcelain"], root)).toBe("");
+    expect(existsSync(path.join(root, ".github/workflows/release.yml"))).toBe(reuseGeneratedWorkflow);
+    expect(github.preflight).not.toHaveBeenCalled();
+    expect(github.dispatch).not.toHaveBeenCalled();
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+
+  /**
+   * Replaces the fixture's committed npm lockfile with another committed lockfile, or with none.
+   * @param {string} root - Fixture checkout.
+   * @param {string | null} committedLockfile - Lockfile committed instead, or `null` for none.
+   * @returns {void}
+   */
+  function commitOnlyLockfile(root, committedLockfile) {
+    runGit(["rm", "--quiet", "package-lock.json"], root);
+    if (committedLockfile) {
+      writeFileSync(path.join(root, committedLockfile), "lockfile\n");
+      runGit(["add", committedLockfile], root);
+    }
+    runGit(["commit", "--quiet", "-m", "chore: switch lockfile"], root);
+  }
+
+  it.each(/** @type {const} */ ([
+    ["npm", "npm-shrinkwrap.json"],
+    ["pnpm", "pnpm-lock.yaml"],
+    ["yarn", "yarn.lock"],
+    ["bun", "bun.lockb"],
+  ]))("should accept the frozen %s install when HEAD commits its %s lockfile", async (packageManager, committedLockfile) => {
+    // Arrange
+    const { root } = createCiProject();
+    commitOnlyLockfile(root, committedLockfile);
+    // Act
+    const check = assertCiInstallLockfileCommitted(root, packageManager);
+    // Assert
+    await expect(check).resolves.toBeUndefined();
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+
+  it.each(/** @type {const} */ ([
+    ["pnpm", "package-lock.json"],
+    ["yarn", "pnpm-lock.yaml"],
+    ["bun", null],
+  ]))("should reject the frozen %s install when HEAD only commits %s", async (packageManager, committedLockfile) => {
+    // Arrange
+    const { root } = createCiProject();
+    commitOnlyLockfile(root, committedLockfile);
+    // Act
+    const check = assertCiInstallLockfileCommitted(root, packageManager);
+    // Assert
+    await expect(check).rejects.toThrow(new RegExp(`instala dependencias con ${packageManager} .*el worker fallaría`, "u"));
+    await expect(check).rejects.toMatchObject({ hint: expect.stringContaining(`${packageManager} install`) });
   }, GIT_FIXTURE_TEST_TIMEOUT_MS);
 
   it.each([
