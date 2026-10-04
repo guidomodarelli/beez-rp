@@ -11,9 +11,10 @@
  * `.beez-rp/release.json` against its first parent, the same commit scoping the
  * generated `.beez-rp/vercel-ignore-build.mjs` applies (that template stays
  * dependency-free, so it inlines the check). Later commits keep the metadata
- * untouched and fall through to the version rule; without a readable parent
- * (shallow clone) the release commit cannot be told apart, so the version rule
- * decides as well.
+ * untouched and fall through to the version rule. Without a readable parent
+ * (shallow clone or first commit) the release commit is recognized by its own
+ * `Beez-Rp-Execution: ci` trailer, which later commits never carry, so the
+ * deployment still waits for the release workflow.
  *
  * @module build-gate
  */
@@ -24,7 +25,7 @@ import path from "node:path";
 
 import { CURRENT_REVISION, GIT_DIFF_CHANGED_STATUS, PACKAGE_MANIFEST_FILE, PREVIOUS_REVISION } from "./constants/build-gate.js";
 import { isStableReleaseVersion, listAllowedVersionsAfter } from "./versions.js";
-import { CI_RELEASE_METADATA_FILE, RELEASE_EXECUTION } from "./constants/ci-release.js";
+import { CI_RELEASE_METADATA_FILE, RELEASE_EXECUTION, RELEASE_EXECUTION_TRAILER } from "./constants/ci-release.js";
 
 /**
  * @typedef {{ shouldBuild: boolean, reason: string }} BuildDecision
@@ -82,15 +83,41 @@ function readVersion(readManifest) {
 }
 
 /**
- * Tells whether the deployed commit is the one that wrote the CI release
- * metadata, comparing it against its first parent. A missing parent (first
- * commit or shallow clone) or any Git failure counts as "not the release
- * commit", so the caller falls back to the version rule.
+ * Tells whether the deployed commit carries exactly one `Beez-Rp-Execution: ci`
+ * trailer, the commit-local mark `create-version` writes in a release delegated
+ * to CI. A Git failure counts as "no trailer".
  *
  * @param {string} repositoryRoot - Checkout whose `HEAD` is being deployed.
- * @returns {boolean} Whether `HEAD` changed the release metadata.
+ * @returns {boolean} Whether `HEAD` declares a CI release execution.
+ */
+function hasCiReleaseTrailer(repositoryRoot) {
+  const trailers = spawnSync("git", ["log", "-1", `--format=%(trailers:key=${RELEASE_EXECUTION_TRAILER},valueonly=true)`, CURRENT_REVISION], {
+    cwd: repositoryRoot,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+    windowsHide: true,
+  });
+  if (trailers.status !== 0) return false;
+  const recordedValues = [...new Set(trailers.stdout.split("\n").map((value) => value.trim()).filter(Boolean))];
+  return recordedValues.length === 1 && recordedValues[0] === RELEASE_EXECUTION.ci;
+}
+
+/**
+ * Tells whether the deployed commit is the one that wrote the CI release
+ * metadata. With a readable first parent it compares the metadata against it;
+ * without one (first commit or shallow clone) it relies on the release commit's
+ * own `Beez-Rp-Execution: ci` trailer, so the CI gate holds in shallow checkouts.
+ *
+ * @param {string} repositoryRoot - Checkout whose `HEAD` is being deployed.
+ * @returns {boolean} Whether `HEAD` is the CI release commit.
  */
 function isReleaseMetadataCommit(repositoryRoot) {
+  const parentLookup = spawnSync("git", ["rev-parse", "--verify", "--quiet", `${PREVIOUS_REVISION}^{commit}`], {
+    cwd: repositoryRoot,
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  if (parentLookup.status !== 0) return hasCiReleaseTrailer(repositoryRoot);
   const metadataDiff = spawnSync("git", ["diff", "--quiet", PREVIOUS_REVISION, CURRENT_REVISION, "--", CI_RELEASE_METADATA_FILE], {
     cwd: repositoryRoot,
     stdio: "ignore",

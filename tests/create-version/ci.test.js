@@ -384,7 +384,7 @@ describe("local CI preparation with real Git", () => {
   it.each([
     ["the original ignoreCommand", { ignoreCommand: "node -e \"process.exit(7)\"" }, 7],
     ["a normal build", {}, 1],
-  ])("should skip only the delegated release commit and let later commits without a bump reach %s", async (_outcome, vercelConfig, laterCommitStatus) => {
+  ])("should skip only the delegated release commit, also in shallow clones, and let later commits without a bump reach %s", async (_outcome, vercelConfig, laterCommitStatus) => {
     // Arrange
     const { root, remote } = createCiProject({ configured: false });
     writeFileSync(path.join(root, "vercel.json"), JSON.stringify(vercelConfig));
@@ -394,18 +394,24 @@ describe("local CI preparation with real Git", () => {
     runGit(["push", "--quiet", "origin", "main"], root);
     isolateGithub();
     const status = await runCreateVersion({ repositoryRoot: root, argv: ["--setup-ci", "--bump", "patch"] });
-    const shallowCheckout = path.join(createTemporaryDirectory("beez-rp-vercel-shallow-"), "checkout");
-    runGit(["clone", "--quiet", "--depth", "1", pathToFileURL(remote).href, shallowCheckout], root);
+    const shallowReleaseCheckout = path.join(createTemporaryDirectory("beez-rp-vercel-shallow-"), "checkout");
+    runGit(["clone", "--quiet", "--depth", "1", pathToFileURL(remote).href, shallowReleaseCheckout], root);
     // Act
     const releaseGate = runVercelGate(root);
-    const shallowReleaseGate = runVercelGate(shallowCheckout);
+    const shallowReleaseGate = runVercelGate(shallowReleaseCheckout);
     writeFileSync(path.join(root, "feature.txt"), "Follow-up change without a version bump\n");
     runGit(["commit", "--quiet", "-am", "fix: follow-up change"], root);
+    runGit(["push", "--quiet", "origin", "main"], root);
+    const shallowLaterCheckout = path.join(createTemporaryDirectory("beez-rp-vercel-shallow-later-"), "checkout");
+    runGit(["clone", "--quiet", "--depth", "1", pathToFileURL(remote).href, shallowLaterCheckout], root);
     const laterCommitGate = runVercelGate(root);
+    const shallowLaterCommitGate = runVercelGate(shallowLaterCheckout);
     // Assert
     expect(status).toBe(0);
     expect(releaseGate.status, releaseGate.stderr).toBe(0);
-    expect(shallowReleaseGate.status, shallowReleaseGate.stderr).toBe(laterCommitStatus);
+    expect(shallowReleaseGate.status, shallowReleaseGate.stderr).toBe(0);
+    expect(runGit(["log", "-1", "--format=%(trailers:key=Beez-Rp-Execution,valueonly=true)"], shallowReleaseCheckout)).toBe("ci");
+    expect(shallowLaterCommitGate.status, shallowLaterCommitGate.stderr).toBe(laterCommitStatus);
     expect(JSON.parse(runGit(["show", "HEAD:.beez-rp/release.json"], root))).toEqual({ version: "1.2.4", execution: "ci" });
     expect(JSON.parse(runGit(["show", "HEAD:package.json"], root)).version).toBe("1.2.4");
     expect(laterCommitGate.status, laterCommitGate.stderr).toBe(laterCommitStatus);

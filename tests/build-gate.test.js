@@ -77,13 +77,39 @@ function createRepositoryWithVersions(versions) {
  * @param {string} repositoryRoot - Repository.
  * @param {string} version - Released `package.json` version.
  * @param {{ version: string, execution: string }} metadata - Contents of `.beez-rp/release.json`.
+ * @param {string | null} [executionTrailer] - Value of the `Beez-Rp-Execution` trailer, or `null` to omit it.
  */
-function commitRelease(repositoryRoot, version, metadata) {
+function commitRelease(repositoryRoot, version, metadata, executionTrailer = null) {
   mkdirSync(path.join(repositoryRoot, ".beez-rp"), { recursive: true });
   writeFileSync(path.join(repositoryRoot, "package.json"), `${JSON.stringify({ name: "fixture", version }, null, 2)}\n`);
   writeFileSync(path.join(repositoryRoot, ".beez-rp/release.json"), JSON.stringify(metadata));
   runGit(["add", "-A"], repositoryRoot);
-  runGit(["commit", "--quiet", "-m", `chore(release): ${version}`], repositoryRoot);
+  const trailerArguments = executionTrailer === null ? [] : ["--trailer", `Beez-Rp-Execution: ${executionTrailer}`];
+  runGit(["commit", "--quiet", "-m", `chore(release): ${version}`, ...trailerArguments], repositoryRoot);
+}
+
+/**
+ * Commits a follow-up change that keeps `package.json` and the release metadata untouched.
+ *
+ * @param {string} repositoryRoot - Repository.
+ */
+function commitFollowUpChange(repositoryRoot) {
+  writeFileSync(path.join(repositoryRoot, "feature.txt"), "Follow-up change without a version bump\n");
+  runGit(["add", "feature.txt"], repositoryRoot);
+  runGit(["commit", "--quiet", "-m", "fix: follow-up change"], repositoryRoot);
+}
+
+/**
+ * Clones the current `HEAD` of a repository with `--depth 1`, the way Vercel checks out a deployment.
+ *
+ * @param {string} repositoryRoot - Repository to clone.
+ * @returns {string} Shallow checkout whose `HEAD` has no readable parent.
+ */
+function cloneShallow(repositoryRoot) {
+  const shallowCheckout = path.join(mkdtempSync(path.join(os.tmpdir(), "beez-rp-gate-shallow-")), "checkout");
+  temporaryDirectories.push(path.dirname(shallowCheckout));
+  runGit(["clone", "--quiet", "--depth", "1", pathToFileURL(repositoryRoot).href, shallowCheckout], repositoryRoot);
+  return shallowCheckout;
 }
 
 /**
@@ -158,9 +184,7 @@ describe("beez-rp ignore-build", () => {
     commitRelease(root, "1.2.4", { version: "1.2.4", execution: "ci" });
     // Act
     const releaseGate = runCli(root);
-    writeFileSync(path.join(root, "feature.txt"), "Follow-up change without a version bump\n");
-    runGit(["add", "feature.txt"], root);
-    runGit(["commit", "--quiet", "-m", "fix: follow-up change"], root);
+    commitFollowUpChange(root);
     const laterCommitGate = runCli(root);
     // Assert
     expect(releaseGate.lines).toEqual([expect.stringContaining("delegated to CI"), "SKIP"]);
@@ -168,13 +192,31 @@ describe("beez-rp ignore-build", () => {
     expect(laterCommitGate.lines).toEqual(["Version did not change. Skipping build.", "SKIP"]);
   }, GIT_FIXTURE_TEST_TIMEOUT_MS);
 
-  it("should let the version rule decide a CI release deployed from a shallow clone without its parent", () => {
+  it("should skip a CI release deployed from a shallow clone through its commit trailer and build the later commit", () => {
     // Arrange
     const root = createRepositoryWithVersions(["1.2.3"]);
-    commitRelease(root, "1.2.4", { version: "1.2.4", execution: "ci" });
-    const shallowCheckout = path.join(mkdtempSync(path.join(os.tmpdir(), "beez-rp-gate-shallow-")), "checkout");
-    temporaryDirectories.push(path.dirname(shallowCheckout));
-    runGit(["clone", "--quiet", "--depth", "1", pathToFileURL(root).href, shallowCheckout], root);
+    commitRelease(root, "1.2.4", { version: "1.2.4", execution: "ci" }, "ci");
+    const shallowReleaseCheckout = cloneShallow(root);
+    commitFollowUpChange(root);
+    const shallowLaterCheckout = cloneShallow(root);
+    // Act
+    const releaseGate = runCli(shallowReleaseCheckout);
+    const laterCommitGate = runCli(shallowLaterCheckout);
+    // Assert
+    expect(releaseGate.exitCode).toBe(0);
+    expect(releaseGate.lines).toEqual([expect.stringContaining("delegated to CI"), "SKIP"]);
+    expect(laterCommitGate.exitCode).toBe(0);
+    expect(laterCommitGate.lines).toEqual(["Previous package version could not be compared. Building stable 1.2.4.", "BUILD"]);
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+
+  it.each([
+    ["no execution trailer", null],
+    ["a local execution trailer", "local"],
+  ])("should let the version rule decide a shallow release commit with %s", (_trailerCase, executionTrailer) => {
+    // Arrange
+    const root = createRepositoryWithVersions(["1.2.3"]);
+    commitRelease(root, "1.2.4", { version: "1.2.4", execution: "ci" }, executionTrailer);
+    const shallowCheckout = cloneShallow(root);
     // Act
     const { exitCode, lines } = runCli(shallowCheckout);
     // Assert
