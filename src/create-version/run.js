@@ -91,7 +91,7 @@ import { prepareJsrVersionUpdates, readJsrManifest } from "./jsr.js";
 import { JSR_REGISTRY_PROVIDER, REGISTRY_LABELS } from "../constants/registry.js";
 import { CI_DISPATCH_STATUS, CI_GIT_HOOKS_OPTION, CI_VERCEL_DEPLOYMENT, CI_WORKFLOW_DIRECTORY, DISPATCH_CI_RELEASE_STEP, RELEASE_EXECUTION } from "../constants/ci-release.js";
 import { findCompletedCiPublication, requiresCiPublicationHistory } from "./ci-publication-history.js";
-import { appendCiDispatch, assertCiCompatiblePublication, assertCiInstallLockfileCommitted, assertCiWorkflowFile, assertGeneratedCiWorkflowCurrent, assertResumeExecutionMatches, buildCiWorkerPlan, chooseReleaseExecution, defaultCiReleaseConfig, readCiReleaseIdentity, readCommittedCiWorkflow } from "./ci.js";
+import { appendCiDispatch, assertCiCompatiblePublication, assertCiInstallLockfileCommitted, assertCiNodeVersionFileCommitted, assertCiWorkflowFile, assertGeneratedCiWorkflowCurrent, assertResumeExecutionMatches, buildCiWorkerPlan, chooseReleaseExecution, defaultCiReleaseConfig, readCiReleaseIdentity, readCommittedCiWorkflow } from "./ci.js";
 import { assertCiSetupFilesUnchanged, describeCiEnvironment, prepareCiReleaseMetadata, prepareCiSetupFiles } from "./ci-setup.js";
 import { createGithubWorkflowClient } from "./github-workflow.js";
 import { formatReleaseExecutionTrailer } from "./release-execution.js";
@@ -1451,7 +1451,10 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   if (isCiPreparation) {
     try {
       await assertCiCompatiblePublication(config, repositoryRoot);
-      if (usesGeneratedWorkflow) await assertCiInstallLockfileCommitted(repositoryRoot, config.commands.packageManager);
+      if (usesGeneratedWorkflow) {
+        await assertCiInstallLockfileCommitted(repositoryRoot, config.commands.packageManager);
+        await assertCiNodeVersionFileCommitted(repositoryRoot);
+      }
     } catch (error) {
       print(`${ICON.failure} ${error instanceof Error ? error.message : String(error)}${error instanceof ReleaseStepError ? ` ${error.hint}` : ""}`);
       return FAILURE_EXIT_CODE;

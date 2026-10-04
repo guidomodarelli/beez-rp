@@ -11,7 +11,7 @@ import path from "node:path";
 import { resolveCreateVersionConfig } from "../../src/create-version/config.js";
 import { renderCiReleaseWorkflow } from "../../src/create-version/ci-setup.js";
 import { CI_RELEASE_IDENTITY_STEP_NAME } from "../../src/constants/ci-release.js";
-import { GIT_FIXTURE_TEST_TIMEOUT_MS, cleanupTemporaryDirectories, commandEnvironment, createTemporaryDirectory, runGit } from "./support/cli-harness.js";
+import { GIT_FIXTURE_TEST_TIMEOUT_MS, cleanupTemporaryDirectories, commandEnvironment, commitFixtureRepository, createTemporaryDirectory, runGit } from "./support/cli-harness.js";
 
 /** @typedef {{ worker: string, releaseSha: string, unmergedSha: string }} ReleaseOrigin */
 
@@ -22,12 +22,13 @@ const STEP_LINE_PATTERN = /^ {6}- name: (.+)$/u;
 const STEP_SCRIPT_INDENT = " ".repeat(10);
 
 /**
- * Renders the default workflow for a minimal project.
+ * Renders the default workflow for a minimal committed project.
  * @param {string} root - Project directory receiving a `package.json`.
- * @returns {string} Generated GitHub Actions YAML.
+ * @returns {Promise<string>} Generated GitHub Actions YAML.
  */
-function renderFixtureWorkflow(root) {
+async function renderFixtureWorkflow(root) {
   writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "fixture-identity-app", version: "1.2.3", packageManager: "npm@11.11.1" }));
+  commitFixtureRepository(root);
   return renderCiReleaseWorkflow(root, resolveCreateVersionConfig({ checks: ["node checks.mjs"], ci: { workflow: "release.yml" } }));
 }
 
@@ -106,11 +107,11 @@ afterEach(() => {
 });
 
 describe("generated release identity step", () => {
-  it("should authenticate the release right after checkout and before any toolchain or dependency setup, without secrets", () => {
+  it("should authenticate the release right after checkout and before any toolchain or dependency setup, without secrets", async () => {
     // Arrange
     const root = createTemporaryDirectory("beez-rp-ci-identity-order-");
     // Act
-    const workflow = renderFixtureWorkflow(root);
+    const workflow = await renderFixtureWorkflow(root);
     const stepNames = readStepNames(workflow);
     // Assert
     expect(stepNames.indexOf(CI_RELEASE_IDENTITY_STEP_NAME)).toBe(stepNames.indexOf("Checkout del release") + 1);
@@ -120,10 +121,10 @@ describe("generated release identity step", () => {
     expect(workflow).toContain("ref: refs/tags/${{ inputs.tag }}");
   });
 
-  it("should accept a stable tag that resolves to the dispatched commit already merged into origin/main", () => {
+  it("should accept a stable tag that resolves to the dispatched commit already merged into origin/main", async () => {
     // Arrange
     const { worker, releaseSha } = createReleaseOrigin();
-    const { script } = readStep(renderFixtureWorkflow(createTemporaryDirectory("beez-rp-ci-identity-render-")), CI_RELEASE_IDENTITY_STEP_NAME);
+    const { script } = readStep(await renderFixtureWorkflow(createTemporaryDirectory("beez-rp-ci-identity-render-")), CI_RELEASE_IDENTITY_STEP_NAME);
     // Act
     const result = runIdentityScript(worker, script, "refs/tags/v1.2.3", { version: "1.2.3", tag: "v1.2.3", sha: releaseSha });
     // Assert
@@ -139,10 +140,10 @@ describe("generated release identity step", () => {
     { scenario: "a missing tag", checkoutRef: "refs/tags/v1.2.3", inputs: (/** @type {ReleaseOrigin} */ { releaseSha }) => ({ version: "9.9.9", tag: "v9.9.9", sha: releaseSha }), message: "no existe como tag" },
     { scenario: "a checkout that is not the tagged commit", checkoutRef: "origin/collaborator", inputs: (/** @type {ReleaseOrigin} */ { releaseSha }) => ({ version: "1.2.3", tag: "v1.2.3", sha: releaseSha }), message: "El checkout no está en el commit" },
     { scenario: "a collaborator tag outside origin/main", checkoutRef: "refs/tags/v1.2.4", inputs: (/** @type {ReleaseOrigin} */ { unmergedSha }) => ({ version: "1.2.4", tag: "v1.2.4", sha: unmergedSha }), message: "no está en origin/main" },
-  ])("should stop before installing dependencies when dispatched with $scenario", ({ checkoutRef, inputs, message }) => {
+  ])("should stop before installing dependencies when dispatched with $scenario", async ({ checkoutRef, inputs, message }) => {
     // Arrange
     const origin = createReleaseOrigin();
-    const { script } = readStep(renderFixtureWorkflow(createTemporaryDirectory("beez-rp-ci-identity-render-")), CI_RELEASE_IDENTITY_STEP_NAME);
+    const { script } = readStep(await renderFixtureWorkflow(createTemporaryDirectory("beez-rp-ci-identity-render-")), CI_RELEASE_IDENTITY_STEP_NAME);
     // Act
     const result = runIdentityScript(origin.worker, script, checkoutRef, inputs(origin));
     // Assert

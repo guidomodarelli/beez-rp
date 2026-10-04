@@ -10,15 +10,15 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { loadCreateVersionConfig, resolveCreateVersionConfig } from "../../src/create-version/config.js";
-import { assertCiCompatiblePublication, assertCiInstallLockfileCommitted, assertGeneratedCiWorkflowCurrent, assertResumeExecutionMatches, chooseReleaseExecution } from "../../src/create-version/ci.js";
+import { assertCiCompatiblePublication, assertCiInstallLockfileCommitted, assertCiNodeVersionFileCommitted, assertGeneratedCiWorkflowCurrent, assertResumeExecutionMatches, chooseReleaseExecution } from "../../src/create-version/ci.js";
 import { createGitReader } from "../../src/create-version/process.js";
 import { decideBuildForCheckout } from "../../src/build-gate.js";
-import { CiReleaseError } from "../../src/create-version/errors.js";
+import { CiReleaseError, ReleaseStepError } from "../../src/create-version/errors.js";
 import * as githubWorkflow from "../../src/create-version/github-workflow.js";
 import { parseReleaseArguments } from "../../src/create-version/plan.js";
 import { runCreateVersion } from "../../src/create-version/run.js";
-import { describeCiEnvironment, prepareCiSetupFiles, renderCiReleaseWorkflow } from "../../src/create-version/ci-setup.js";
-import { GIT_FIXTURE_TEST_TIMEOUT_MS, cleanupTemporaryDirectories, commandEnvironment, createTemporaryDirectory, flattenOutput, runCliAsync, runGit } from "./support/cli-harness.js";
+import { describeCiEnvironment, describeCiNodeVersion, prepareCiSetupFiles, renderCiReleaseWorkflow } from "../../src/create-version/ci-setup.js";
+import { GIT_FIXTURE_TEST_TIMEOUT_MS, cleanupTemporaryDirectories, commandEnvironment, commitFixtureRepository, createTemporaryDirectory, flattenOutput, runCliAsync, runGit } from "./support/cli-harness.js";
 import { FIXTURE_GITHUB_REPOSITORY, FIXTURE_GITHUB_TOKEN, startFixtureGithubActionsApi } from "./support/fixture-github-actions-api.js";
 import { startFixtureNpmRegistry } from "./support/fixture-npm-registry.js";
 
@@ -32,6 +32,22 @@ const CUSTOM_PUBLISHER_VERCEL_CONFIG = [
   "  ci: { workflow: 'release.yml', deployment: 'vercel' },",
   "};", "",
 ].join("\n");
+
+/**
+ * Renders the release workflow synchronously in a child process, so synchronous fixtures can use
+ * the asynchronous renderer. A child also avoids the per-process ESM cache of the project's config
+ * module, which the test may change before the release under test loads it.
+ * @param {string} root - Fixture checkout with a commit at HEAD.
+ * @param {string} configExpression - JavaScript expression evaluated in the child, with `loadCreateVersionConfig` and `resolveCreateVersionConfig` in scope.
+ * @returns {string} Generated GitHub Actions YAML.
+ */
+function renderWorkflowInChildProcess(root, configExpression) {
+  const configModule = pathToFileURL(path.resolve("src/create-version/config.js")).href;
+  const workflowRenderer = pathToFileURL(path.resolve("src/create-version/ci-setup.js")).href;
+  const rendered = spawnSync(process.execPath, ["--input-type=module", "-e", `import { loadCreateVersionConfig, resolveCreateVersionConfig } from ${JSON.stringify(configModule)}; import { renderCiReleaseWorkflow } from ${JSON.stringify(workflowRenderer)}; process.stdout.write(await renderCiReleaseWorkflow(${JSON.stringify(root)}, ${configExpression}));`], { env: commandEnvironment(), encoding: "utf8" });
+  if (rendered.status !== 0) throw new Error(`renderWorkflowInChildProcess failed to render ${root}: ${rendered.stderr}`);
+  return rendered.stdout;
+}
 
 /**
  * Creates a real checkout and a bare origin with one unreleased feature.
@@ -60,12 +76,15 @@ function createCiProject({ configured = true, failChecks = false, updateChangelo
     ...(configured ? ["  ci: { workflow: 'release.yml' },"] : declaredNullCi ? ["  ci: null,"] : []),
     "};", "",
   ].join("\n"));
-  if (configured) {
-    mkdirSync(path.join(root, ".github/workflows"), { recursive: true });
-    writeFileSync(path.join(root, ".github/workflows/release.yml"), renderCiReleaseWorkflow(root, resolveCreateVersionConfig({ checks: ["node checks.mjs"], ci: { workflow: "release.yml" } })));
-  }
   runGit(["add", "-A"], root);
   runGit(["commit", "--quiet", "-m", "1.2.3"], root);
+  if (configured) {
+    // The workflow follows the committed state (its Node.js pin is read from HEAD), so it is rendered once HEAD exists.
+    mkdirSync(path.join(root, ".github/workflows"), { recursive: true });
+    writeFileSync(path.join(root, ".github/workflows/release.yml"), renderWorkflowInChildProcess(root, `resolveCreateVersionConfig(${JSON.stringify({ checks: ["node checks.mjs"], ci: { workflow: "release.yml" } })})`));
+    runGit(["add", "-A"], root);
+    runGit(["commit", "--quiet", "--amend", "--no-edit"], root);
+  }
   runGit(["tag", "-a", "v1.2.3", "-m", "1.2.3"], root);
   writeFileSync(path.join(root, "feature.txt"), "New feature\n");
   if (updateChangelog) writeFileSync(path.join(root, "CHANGELOG.md"), "# Changelog\n\n- Primera versión.\n- Nueva funcionalidad documentada manualmente.\n");
@@ -78,17 +97,11 @@ function createCiProject({ configured = true, failChecks = false, updateChangelo
 /**
  * Commits and pushes the workflow `--setup-ci` renders for the project's loaded configuration, so
  * the fixture starts without drift (the default fixture workflow targets the default package manager).
- * The configuration is loaded in a child process because ESM caches the project's config module per
- * process, and the test may change that file before the release under test loads it.
  * @param {string} root - Fixture checkout.
  * @returns {string} Pushed commit SHA.
  */
 function commitGeneratedWorkflow(root) {
-  const configLoader = pathToFileURL(path.resolve("src/create-version/config.js")).href;
-  const workflowRenderer = pathToFileURL(path.resolve("src/create-version/ci-setup.js")).href;
-  const rendered = spawnSync(process.execPath, ["--input-type=module", "-e", `import { loadCreateVersionConfig } from ${JSON.stringify(configLoader)}; import { renderCiReleaseWorkflow } from ${JSON.stringify(workflowRenderer)}; process.stdout.write(renderCiReleaseWorkflow(${JSON.stringify(root)}, await loadCreateVersionConfig(${JSON.stringify(root)})));`], { env: commandEnvironment(), encoding: "utf8" });
-  if (rendered.status !== 0) throw new Error(`commitGeneratedWorkflow failed to render ${root}: ${rendered.stderr}`);
-  writeFileSync(path.join(root, ".github/workflows/release.yml"), rendered.stdout);
+  writeFileSync(path.join(root, ".github/workflows/release.yml"), renderWorkflowInChildProcess(root, `await loadCreateVersionConfig(${JSON.stringify(root)})`));
   runGit(["commit", "--quiet", "-am", "ci: regenerate release workflow"], root);
   runGit(["push", "--quiet", "origin", "main"], root);
   return runGit(["rev-parse", "HEAD"], root);
@@ -164,15 +177,16 @@ describe("release location and configuration", () => {
     expect(() => describeCiEnvironment(resolveCreateVersionConfig({ publish: "github", ci: { workflow: "release.yml", variables: ["GITHUB_TOKEN"] } }))).toThrow(/GITHUB_TOKEN/);
   });
 
-  it("should bind Vercel credentials only to the Vercel steps while preflight still requires them", () => {
+  it("should bind Vercel credentials only to the Vercel steps while preflight still requires them", async () => {
     // Arrange
     const root = createTemporaryDirectory("beez-rp-ci-vercel-scope-");
     writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "fixture-vercel-app", version: "1.0.0", packageManager: "npm@11.11.1" }));
     const config = resolveCreateVersionConfig({ checks: ["node checks.mjs"], ci: { workflow: "release.yml", deployment: "vercel", secrets: ["DATABASE_URL"] } });
+    commitFixtureRepository(root);
     const vercelSecrets = ["VERCEL_TOKEN", "VERCEL_ORG_ID", "VERCEL_PROJECT_ID"];
     // Act
     const environment = describeCiEnvironment(config);
-    const { jobEnvironment, stepEnvironments } = readWorkflowEnvironmentScopes(renderCiReleaseWorkflow(root, config));
+    const { jobEnvironment, stepEnvironments } = readWorkflowEnvironmentScopes(await renderCiReleaseWorkflow(root, config));
     // Assert
     expect(environment.secrets).toEqual(["DATABASE_URL", ...vercelSecrets]);
     expect(jobEnvironment).toContain("DATABASE_URL");
@@ -184,13 +198,14 @@ describe("release location and configuration", () => {
     expect(unscopedSteps).toEqual(expect.arrayContaining(["Instalar dependencias", "Checks y publicación del release"]));
   });
 
-  it("should pull the Vercel production environment only after release checks and right before the production build", () => {
+  it("should pull the Vercel production environment only after release checks and right before the production build", async () => {
     // Arrange
     const root = createTemporaryDirectory("beez-rp-ci-vercel-order-");
     writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "fixture-vercel-app", version: "1.0.0", packageManager: "npm@11.11.1" }));
     const config = resolveCreateVersionConfig({ checks: ["node checks.mjs"], ci: { workflow: "release.yml", deployment: "vercel" } });
+    commitFixtureRepository(root);
     // Act
-    const stepNames = [...readWorkflowEnvironmentScopes(renderCiReleaseWorkflow(root, config)).stepEnvironments.keys()];
+    const stepNames = [...readWorkflowEnvironmentScopes(await renderCiReleaseWorkflow(root, config)).stepEnvironments.keys()];
     // Assert
     const releaseStepIndex = stepNames.indexOf("Checks y publicación del release");
     const pullStepIndex = stepNames.indexOf("Obtener entorno de producción");
@@ -199,15 +214,16 @@ describe("release location and configuration", () => {
     expect(stepNames.slice(pullStepIndex + 1)).toEqual(["Construir artefacto de producción", "Desplegar producción después de los checks"]);
   });
 
-  it("should keep explicitly declared Vercel credentials step-scoped and deduplicated", () => {
+  it("should keep explicitly declared Vercel credentials step-scoped and deduplicated", async () => {
     // Arrange
     const root = createTemporaryDirectory("beez-rp-ci-vercel-declared-");
     writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "fixture-vercel-app", version: "1.0.0", packageManager: "npm@11.11.1" }));
     const config = resolveCreateVersionConfig({ checks: ["node checks.mjs"], ci: { workflow: "release.yml", deployment: "vercel", secrets: ["VERCEL_TOKEN", "DATABASE_URL", "VERCEL_PROJECT_ID"] } });
+    commitFixtureRepository(root);
     const vercelSecrets = ["VERCEL_TOKEN", "VERCEL_ORG_ID", "VERCEL_PROJECT_ID"];
     // Act
     const environment = describeCiEnvironment(config);
-    const { jobEnvironment, stepEnvironments } = readWorkflowEnvironmentScopes(renderCiReleaseWorkflow(root, config));
+    const { jobEnvironment, stepEnvironments } = readWorkflowEnvironmentScopes(await renderCiReleaseWorkflow(root, config));
     // Assert
     expect(environment.secrets).toEqual(["VERCEL_TOKEN", "DATABASE_URL", "VERCEL_PROJECT_ID", "VERCEL_ORG_ID"]);
     expect(environment.deploymentSecrets).toEqual(vercelSecrets);
@@ -221,13 +237,14 @@ describe("release location and configuration", () => {
   it.each([
     { publisher: "a custom function", publish: () => {}, readsHistory: true },
     { publisher: "a registry", publish: "npm", readsHistory: false },
-  ])("should let the Vercel worker read its Actions history only when $publisher publishes", ({ publish, readsHistory }) => {
+  ])("should let the Vercel worker read its Actions history only when $publisher publishes", async ({ publish, readsHistory }) => {
     // Arrange
     const root = createTemporaryDirectory("beez-rp-ci-vercel-history-");
     writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "fixture-vercel-app", version: "1.0.0", packageManager: "npm@11.11.1" }));
     const config = resolveCreateVersionConfig({ checks: ["node checks.mjs"], publish, publication: { authentication: "token" }, ci: { workflow: "release.yml", deployment: "vercel" } });
+    commitFixtureRepository(root);
     // Act
-    const workflow = renderCiReleaseWorkflow(root, config);
+    const workflow = await renderCiReleaseWorkflow(root, config);
     const { jobEnvironment, stepEnvironments } = readWorkflowEnvironmentScopes(workflow);
     // Assert
     expect(stepEnvironments.has("Checks y publicación del release")).toBe(true);
@@ -623,6 +640,64 @@ describe("local CI preparation with real Git", () => {
     // Assert
     await expect(check).rejects.toThrow(new RegExp(`instala dependencias con ${packageManager} .*el worker fallaría`, "u"));
     await expect(check).rejects.toMatchObject({ hint: expect.stringContaining(`${packageManager} install`) });
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+
+  it.each([
+    { scenario: "committed at HEAD", nvmrcState: "committed", followsPinFile: true, accepted: true },
+    { scenario: "only on disk and untracked", nvmrcState: "untracked", followsPinFile: false, accepted: false },
+    { scenario: "only on disk because Git ignores it", nvmrcState: "ignored", followsPinFile: false, accepted: false },
+    { scenario: "absent", nvmrcState: "absent", followsPinFile: false, accepted: true },
+  ])("should pin the generated workflow to .nvmrc only when it is $scenario and accept it for setup: $accepted", async ({ nvmrcState, followsPinFile, accepted }) => {
+    // Arrange
+    const root = createTemporaryDirectory("beez-rp-ci-node-file-");
+    writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "fixture-node-file", version: "1.0.0", packageManager: "npm@11.11.1" }));
+    if (nvmrcState === "ignored") writeFileSync(path.join(root, ".gitignore"), ".nvmrc\n");
+    if (nvmrcState === "committed") writeFileSync(path.join(root, ".nvmrc"), "v24.1.0\n");
+    commitFixtureRepository(root);
+    if (nvmrcState === "untracked" || nvmrcState === "ignored") writeFileSync(path.join(root, ".nvmrc"), "v24.1.0\n");
+    const config = resolveCreateVersionConfig({ checks: ["node checks.mjs"], ci: { workflow: "release.yml" } });
+    // Act
+    const workflow = await renderCiReleaseWorkflow(root, config);
+    const nodeVersion = await describeCiNodeVersion(root);
+    let rejection = { message: "", hint: "" };
+    try {
+      await assertCiNodeVersionFileCommitted(root);
+    } catch (error) {
+      rejection = { message: error instanceof Error ? error.message : String(error), hint: error instanceof ReleaseStepError ? error.hint : "" };
+    }
+    // Assert
+    const runningNodeMajor = process.versions.node.split(".")[0];
+    expect(nodeVersion).toEqual(followsPinFile ? { pinnedFile: ".nvmrc", version: "24.1.0" } : { pinnedFile: null, version: runningNodeMajor });
+    expect(workflow.includes("node-version-file: '.nvmrc'")).toBe(followsPinFile);
+    expect(workflow.includes(`node-version: '${runningNodeMajor}'`)).toBe(!followsPinFile);
+    expect(/\.nvmrc existe en el checkout pero HEAD no lo contiene como archivo regular commiteado/u.test(rejection.message)).toBe(!accepted);
+    expect(rejection.hint.includes("Commiteá .nvmrc")).toBe(!accepted);
+  }, GIT_FIXTURE_TEST_TIMEOUT_MS);
+
+  it.each([
+    ["untracked and set aside by --ignore-local-changes", false, ["--ignore-local-changes"]],
+    ["ignored by Git", true, []],
+  ])("should block setup before any commit, tag or dispatch when .nvmrc is %s instead of committed at HEAD", async (_scenario, ignoredByGit, extraArguments) => {
+    // Arrange
+    const { root, remote } = createCiProject({ configured: false });
+    if (ignoredByGit) {
+      writeFileSync(path.join(root, ".gitignore"), "*.log\nnode_modules\n.nvmrc\n");
+      runGit(["commit", "--quiet", "-am", "chore: ignore the Node.js pin"], root);
+      runGit(["push", "--quiet", "origin", "main"], root);
+    }
+    const uncommittedPinSha = runGit(["rev-parse", "HEAD"], root);
+    writeFileSync(path.join(root, ".nvmrc"), "24\n");
+    const github = isolateGithub();
+    // Act
+    const status = await runCreateVersion({ repositoryRoot: root, argv: ["--setup-ci", "--bump", "patch", ...extraArguments] });
+    // Assert
+    expect(status).toBe(1);
+    expect(runGit(["rev-parse", "HEAD"], root)).toBe(uncommittedPinSha);
+    expect(runGit(["rev-parse", "main"], remote)).toBe(uncommittedPinSha);
+    expect(runGit(["tag", "--list"], remote)).toBe("v1.2.3");
+    expect(existsSync(path.join(root, ".github/workflows/release.yml"))).toBe(false);
+    expect(github.preflight).not.toHaveBeenCalled();
+    expect(github.dispatch).not.toHaveBeenCalled();
   }, GIT_FIXTURE_TEST_TIMEOUT_MS);
 
   it.each([
@@ -1043,6 +1118,7 @@ describe("CI preparation invariants shared with local releases", () => {
     writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "fixture-npm-pin", version: "1.0.0", packageManager }));
     writeFileSync(path.join(root, "beez-rp.config.mjs"), `export default { publish: 'npm', publication: { authentication: '${authentication}' } };\n`);
     const config = await loadCreateVersionConfig(root);
+    commitFixtureRepository(root);
     // Act
     let rejectionMessage = null;
     try {
@@ -1074,6 +1150,7 @@ describe("CI preparation invariants shared with local releases", () => {
     if (nvmrc !== null) writeFileSync(path.join(root, ".nvmrc"), nvmrc);
     writeFileSync(path.join(root, "beez-rp.config.mjs"), `export default { publish: 'npm', publication: { authentication: '${authentication}' } };\n`);
     const config = await loadCreateVersionConfig(root);
+    commitFixtureRepository(root);
     // Act
     let rejectionMessage = null;
     try {
@@ -1101,6 +1178,7 @@ describe("CI preparation invariants shared with local releases", () => {
     if (npmrc !== null) writeFileSync(path.join(root, ".npmrc"), npmrc);
     writeFileSync(path.join(root, "beez-rp.config.mjs"), `export default { publish: 'npm', publication: ${JSON.stringify({ ...publication, authentication })} };\n`);
     const config = await loadCreateVersionConfig(root);
+    commitFixtureRepository(root);
     // Act
     let rejectionMessage = null;
     try {
@@ -1125,8 +1203,9 @@ describe("CI preparation invariants shared with local releases", () => {
     writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "fixture-npm-client", version: "1.0.0", packageManager }));
     writeFileSync(path.join(root, "beez-rp.config.mjs"), `export default { publish: 'npm', publication: { authentication: '${authentication}' }, ci: { workflow: 'release.yml' } };\n`);
     const config = await loadCreateVersionConfig(root);
+    commitFixtureRepository(root);
     // Act
-    const workflow = renderCiReleaseWorkflow(root, config);
+    const workflow = await renderCiReleaseWorkflow(root, config);
     const stepNames = [...readWorkflowEnvironmentScopes(workflow).stepEnvironments.keys()];
     // Assert
     const clientStepIndex = stepNames.indexOf("Configurar npm para trusted publishing");
@@ -1144,8 +1223,9 @@ describe("CI preparation invariants shared with local releases", () => {
     writeFileSync(path.join(root, "package-lock.json"), JSON.stringify({ name: "fixture-npm-unpinned", version: "1.0.0", lockfileVersion: 3, requires: true, packages: {} }));
     writeFileSync(path.join(root, "beez-rp.config.mjs"), `export default { publish: 'npm', publication: { authentication: '${authentication}' }, ci: { workflow: 'release.yml' } };\n`);
     const config = await loadCreateVersionConfig(root);
+    commitFixtureRepository(root);
     // Act
-    const workflow = renderCiReleaseWorkflow(root, config);
+    const workflow = await renderCiReleaseWorkflow(root, config);
     const stepNames = [...readWorkflowEnvironmentScopes(workflow).stepEnvironments.keys()];
     // Assert
     expect(config.commands.packageManager).toBe("npm");

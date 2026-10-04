@@ -16,6 +16,7 @@ import {
 import { CREATE_VERSION_CONFIG_FILES, PACKAGE_MANIFEST_FILE, PINNED_NODE_VERSION_FILE, VERSION_PREFIX_PATTERN } from "../constants/create-version.js";
 import { PACKAGE_MANAGER } from "../constants/package-manager.js";
 import { requiresCiPublicationHistory } from "./ci-publication-history.js";
+import { readCommittedRegularFile } from "./committed-tree.js";
 import { renderCiReleaseIdentityStep } from "./ci-release-identity-step.js";
 import { ReleaseStepError } from "./errors.js";
 import { runCaptured } from "./process.js";
@@ -60,15 +61,28 @@ export function extractPinnedPackageManagerVersion(manifest) {
 }
 
 /**
- * Describes the Node.js version the generated workflow asks `actions/setup-node` for: the
- * `.nvmrc` pin when the project has one, otherwise the major of the Node.js running setup.
- * @param {string} repositoryRoot - Project checkout.
- * @returns {{ pinnedFile: string | null, version: string }} Pin file the workflow reads (or `null`) and its version without a `v` prefix.
+ * Reads the major of the Node.js running setup, the runtime the generated workflow falls back to
+ * when HEAD commits no `.nvmrc`.
+ * @returns {string} Major version such as `22`.
  */
-export function describeCiNodeVersion(repositoryRoot) {
-  const pinnedPath = path.join(repositoryRoot, PINNED_NODE_VERSION_FILE);
-  if (!existsSync(pinnedPath)) return { pinnedFile: null, version: process.versions.node.split(".")[0] };
-  return { pinnedFile: PINNED_NODE_VERSION_FILE, version: readFileSync(pinnedPath, "utf8").trim().replace(VERSION_PREFIX_PATTERN, "") };
+export function readRunningNodeMajor() {
+  return process.versions.node.split(".")[0];
+}
+
+/**
+ * Describes the Node.js version the generated workflow asks `actions/setup-node` for: the
+ * `.nvmrc` pin when HEAD commits it as a regular file, otherwise the major of the Node.js running
+ * setup. Only HEAD counts because the worker checks out the release commit built from it: an
+ * untracked, ignored or set-aside `.nvmrc` would make `node-version-file` fail there after the tag
+ * was pushed. Reading HEAD also keeps the rendered workflow deterministic for the drift check.
+ * @param {string} repositoryRoot - Project checkout.
+ * @returns {Promise<{ pinnedFile: string | null, version: string }>} Pin file the workflow reads (or `null`) and its version without a `v` prefix.
+ * @throws {ReleaseStepError} When Git cannot list or read HEAD.
+ */
+export async function describeCiNodeVersion(repositoryRoot) {
+  const committedPin = await readCommittedRegularFile(repositoryRoot, PINNED_NODE_VERSION_FILE);
+  if (committedPin === null) return { pinnedFile: null, version: readRunningNodeMajor() };
+  return { pinnedFile: PINNED_NODE_VERSION_FILE, version: committedPin.trim().replace(VERSION_PREFIX_PATTERN, "") };
 }
 
 /**
@@ -90,13 +104,14 @@ export function requiresCiNpmOidcClient(config, pinnedVersion = null) {
  * Renders a workflow that installs the project's package manager and finishes a pinned release.
  * @param {string} repositoryRoot - Project checkout.
  * @param {ResolvedCreateVersionConfig} config - Release hooks and package manager.
- * @returns {string} GitHub Actions YAML.
+ * @returns {Promise<string>} GitHub Actions YAML.
+ * @throws {ReleaseStepError} When Git cannot list or read HEAD to resolve the Node.js pin.
  */
-export function renderCiReleaseWorkflow(repositoryRoot, config) {
+export async function renderCiReleaseWorkflow(repositoryRoot, config) {
   const manifest = JSON.parse(readFileSync(path.join(repositoryRoot, PACKAGE_MANIFEST_FILE), "utf8"));
   const manager = config.commands.packageManager;
   const pinnedVersion = extractPinnedPackageManagerVersion(manifest);
-  const nodeVersion = describeCiNodeVersion(repositoryRoot);
+  const nodeVersion = await describeCiNodeVersion(repositoryRoot);
   const npmOidcClientSetup = requiresCiNpmOidcClient(config, pinnedVersion) ? ["      - name: Configurar npm para trusted publishing", `        run: npm install --global npm@${NPM_OIDC_MINIMUM_VERSION}`] : [];
   const nodeSetup = [
     "      - name: Configurar Node.js", "        uses: actions/setup-node@v4", "        with:",
@@ -174,7 +189,7 @@ export async function prepareCiSetupFiles(repositoryRoot, config, writeConfigura
   /** @type {ReleaseFileUpdate[]} */
   const updates = [
     ...(writeConfiguration ? [{ filePath: configFile, originalBytes, content }] : []),
-    { filePath: workflowPath, originalBytes: null, content: renderCiReleaseWorkflow(repositoryRoot, config) },
+    { filePath: workflowPath, originalBytes: null, content: await renderCiReleaseWorkflow(repositoryRoot, config) },
   ];
   if (config.ci?.deployment === CI_VERCEL_DEPLOYMENT) {
     for (const fileName of [".gitignore", CI_VERCEL_CONFIG_FILE, CI_VERCEL_GATE_FILE]) assertSafeCiPath(repositoryRoot, fileName);

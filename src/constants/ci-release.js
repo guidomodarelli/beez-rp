@@ -57,6 +57,9 @@ export const CI_PACKAGE_MANAGER_VERSION_PATTERN = /^(?:pnpm|npm|yarn|bun)@([0-9]
 /** Numeric Node.js pins (`22`, `22.14`, `v22.14.0` without its `v`) that setup-node resolves to a comparable release; aliases such as `lts/*` stay unverifiable. */
 export const CI_NODE_VERSION_PIN_PATTERN = /^[0-9]+(?:\.[0-9]+){0,2}(?:-[a-zA-Z0-9.-]+)?$/u;
 
+/** Git tree modes of regular files (non-executable and executable); symlinks (`120000`) and submodules are excluded. */
+export const GIT_REGULAR_FILE_MODES = Object.freeze(["100644", "100755"]);
+
 /** Maximum external diagnostic length displayed by the CLI, in characters. */
 export const CI_DIAGNOSTIC_LIMIT = 800;
 

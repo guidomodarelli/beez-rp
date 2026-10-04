@@ -17,7 +17,8 @@ import { RELEASE_TAG_PREFIX } from "../constants/versions.js";
 import { compareReleaseVersions, findHighestStableVersion, isStableReleaseVersion, parseReleaseVersion, toReleaseTag } from "../versions.js";
 import { print, select } from "../terminal-ui.js";
 import { ReleaseStepError } from "./errors.js";
-import { assertSafeCiPath, describeCiNodeVersion, extractPinnedPackageManagerVersion, renderCiReleaseWorkflow } from "./ci-setup.js";
+import { assertSafeCiPath, describeCiNodeVersion, extractPinnedPackageManagerVersion, readRunningNodeMajor, renderCiReleaseWorkflow } from "./ci-setup.js";
+import { listCommittedTreeEntries, readCommittedRegularFile } from "./committed-tree.js";
 import { runCaptured } from "./process.js";
 import { readReleaseExecutionTrailer } from "./release-execution.js";
 import { isRegistryProvider } from "./registry-config.js";
@@ -92,12 +93,12 @@ function canPinnedVersionReach(pinnedVersion, minimumVersion) {
  * Rejects the Node.js runtime the generated workflow selects when it is provably older than npm
  * trusted publishing requires, whatever package manager installs dependencies. Aliases such as
  * `lts/*` cannot be resolved locally, so only the worker can judge them.
- * @param {string} repositoryRoot - Project root whose `.nvmrc`, or the local Node.js major, selects the worker's runtime.
- * @returns {void}
+ * @param {string} repositoryRoot - Project root whose `.nvmrc` committed at HEAD, or the local Node.js major, selects the worker's runtime.
+ * @returns {Promise<void>}
  * @throws {ReleaseStepError} When the selected Node.js cannot reach the npm OIDC minimum.
  */
-function assertCiNodeSupportsNpmOidc(repositoryRoot) {
-  const nodeVersion = describeCiNodeVersion(repositoryRoot);
+async function assertCiNodeSupportsNpmOidc(repositoryRoot) {
+  const nodeVersion = await describeCiNodeVersion(repositoryRoot);
   if (!CI_NODE_VERSION_PIN_PATTERN.test(nodeVersion.version) || canPinnedVersionReach(nodeVersion.version, NPM_OIDC_MINIMUM_NODE_VERSION)) return;
   const runtimeSource = nodeVersion.pinnedFile ? `${nodeVersion.pinnedFile} fija Node ${nodeVersion.version}` : `Sin ${PINNED_NODE_VERSION_FILE}, el workflow usa Node ${nodeVersion.version} (el major de este Node.js)`;
   throw new ReleaseStepError(
@@ -131,7 +132,7 @@ export async function assertCiCompatiblePublication(config, repositoryRoot) {
     );
   }
   if (config.publish !== NPM_REGISTRY_PROVIDER || config.publication?.authentication !== OIDC_AUTHENTICATION) return;
-  assertCiNodeSupportsNpmOidc(repositoryRoot);
+  await assertCiNodeSupportsNpmOidc(repositoryRoot);
   const manifestPath = path.join(repositoryRoot, PACKAGE_MANIFEST_FILE);
   if (!existsSync(manifestPath)) return;
   let manifest;
@@ -265,12 +266,29 @@ export async function readCommittedCiWorkflow(repositoryRoot, workflow, missingH
  */
 export async function assertCiInstallLockfileCommitted(repositoryRoot, packageManager) {
   const lockfiles = LOCKFILE_PACKAGE_MANAGERS.filter(([, lockfileManager]) => lockfileManager === packageManager).map(([fileName]) => fileName);
-  const listed = await runCaptured("git", ["ls-tree", "--name-only", "HEAD", "--", ...lockfiles], { cwd: repositoryRoot });
-  if (listed.status !== 0) throw new ReleaseStepError(`No se pudo comprobar si HEAD contiene ${lockfiles.join(" o ")} para el workflow de CI (git ls-tree terminó con status ${listed.status}).`, "Revisá el repositorio Git antes de configurar CI; no se creó la versión ni el tag.");
-  if (listed.stdout.trim() !== "") return;
+  if ((await listCommittedTreeEntries(repositoryRoot, lockfiles)).length > 0) return;
   throw new ReleaseStepError(
     `El workflow generado instala dependencias con ${packageManager} y lockfile congelado, pero HEAD no contiene ${lockfiles.join(" ni ")}; el worker fallaría después de subir el tag.`,
     `Generá el lockfile con ${packageManager} install y commitealo en un commit propio, o usá --${CREATE_VERSION_FLAG.local}; no se creó la versión ni el tag.`
+  );
+}
+
+/**
+ * Rejects the generated workflow when the checkout has a `.nvmrc` that HEAD does not commit as a
+ * regular file (untracked, ignored, set aside by `--ignore-local-changes`, or committed as a
+ * symlink). The workflow only follows the committed pin, so it would silently run the local
+ * Node.js major instead of the pinned runtime, and the npm OIDC check would judge that other
+ * version; stopping before the bump lets the user commit the pin or drop it deliberately.
+ * @param {string} repositoryRoot - Project root.
+ * @returns {Promise<void>}
+ * @throws {ReleaseStepError} When `.nvmrc` exists locally but not as a regular file committed at HEAD, or HEAD cannot be read.
+ */
+export async function assertCiNodeVersionFileCommitted(repositoryRoot) {
+  if (!lstatSync(path.join(repositoryRoot, PINNED_NODE_VERSION_FILE), { throwIfNoEntry: false })) return;
+  if ((await readCommittedRegularFile(repositoryRoot, PINNED_NODE_VERSION_FILE)) !== null) return;
+  throw new ReleaseStepError(
+    `${PINNED_NODE_VERSION_FILE} existe en el checkout pero HEAD no lo contiene como archivo regular commiteado; el workflow generado usaría Node ${readRunningNodeMajor()} (el major de este Node.js) en lugar de ese pin.`,
+    `Commiteá ${PINNED_NODE_VERSION_FILE} como archivo regular en un commit propio (sin ignorarlo), o borralo para usar el major de este Node.js, o usá --${CREATE_VERSION_FLAG.local}; no se creó la versión ni el tag.`
   );
 }
 
@@ -298,7 +316,7 @@ export async function assertGeneratedCiWorkflowCurrent(repositoryRoot, config) {
   const workflowPath = `${CI_WORKFLOW_DIRECTORY}/${config.ci.workflow}`;
   const regenerateHint = `Regeneralo con --${CREATE_VERSION_FLAG.setupCi} después de borrarlo en un commit propio, o actualizalo y commitealo a mano; si lo personalizaste a propósito, usá --${CREATE_VERSION_FLAG.ci}. No se creó la versión ni el tag.`;
   const committedLines = toWorkflowLines(await readCommittedCiWorkflow(repositoryRoot, config.ci.workflow, regenerateHint));
-  const renderedLines = toWorkflowLines(renderCiReleaseWorkflow(repositoryRoot, config));
+  const renderedLines = toWorkflowLines(await renderCiReleaseWorkflow(repositoryRoot, config));
   if (committedLines.length === renderedLines.length && committedLines.every((line, index) => line === renderedLines[index])) return;
   const missingLines = renderedLines.filter((line) => line.trim() !== "" && !committedLines.includes(line)).map((line) => line.trim());
   const missingDetail = missingLines.length > 0 ? ` Líneas esperadas ausentes: ${missingLines.slice(0, CI_WORKFLOW_DRIFT_PREVIEW_LINES).join(" | ")}.` : "";
