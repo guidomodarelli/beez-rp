@@ -70,15 +70,18 @@ export function describeCiNodeVersion(repositoryRoot) {
 }
 
 /**
- * Tells whether the worker publishes to npm through OIDC with a package manager other than npm.
- * Publication still runs the npm CLI, whose Node-bundled version predates trusted publishing on
- * most runtimes, so the workflow installs a capable npm used only to publish: the project's own
- * package manager keeps installing dependencies from its lockfile.
+ * Tells whether the worker publishes to npm through OIDC with an npm client the workflow does not
+ * otherwise control: a package manager other than npm, or npm without a `packageManager` pin.
+ * Publication runs the npm CLI, whose Node-bundled version predates trusted publishing on most
+ * runtimes, so the workflow installs a capable npm. A pinned npm is never replaced (it is checked
+ * before tagging instead); an unpinned npm project gets the capable client only after `npm ci`, so
+ * the client setup-node bundles keeps installing dependencies from the committed lockfile.
  * @param {ResolvedCreateVersionConfig} config - Release hooks and package manager.
+ * @param {string | null} [pinnedVersion] - Version pinned by `packageManager`, from {@link extractPinnedPackageManagerVersion}.
  * @returns {boolean} True when the generated workflow must install the npm trusted publishing client.
  */
-export function requiresCiNpmOidcClient(config) {
-  return config.publish === NPM_REGISTRY_PROVIDER && config.publication?.authentication === OIDC_AUTHENTICATION && config.commands.packageManager !== PACKAGE_MANAGER.npm;
+export function requiresCiNpmOidcClient(config, pinnedVersion = null) {
+  return config.publish === NPM_REGISTRY_PROVIDER && config.publication?.authentication === OIDC_AUTHENTICATION && (config.commands.packageManager !== PACKAGE_MANAGER.npm || pinnedVersion === null);
 }
 
 /**
@@ -92,10 +95,12 @@ export function renderCiReleaseWorkflow(repositoryRoot, config) {
   const manager = config.commands.packageManager;
   const pinnedVersion = extractPinnedPackageManagerVersion(manifest);
   const nodeVersion = describeCiNodeVersion(repositoryRoot);
+  const npmOidcClientSetup = requiresCiNpmOidcClient(config, pinnedVersion) ? ["      - name: Configurar npm para trusted publishing", `        run: npm install --global npm@${NPM_OIDC_MINIMUM_VERSION}`] : [];
   const nodeSetup = [
     "      - name: Configurar Node.js", "        uses: actions/setup-node@v4", "        with:",
     nodeVersion.pinnedFile ? `          node-version-file: '${nodeVersion.pinnedFile}'` : `          node-version: '${nodeVersion.version}'`,
-    ...(requiresCiNpmOidcClient(config) ? ["      - name: Configurar npm para trusted publishing", `        run: npm install --global npm@${NPM_OIDC_MINIMUM_VERSION}`] : []),
+    // npm projects install their dependencies with the bundled client and get this one afterwards.
+    ...(manager === PACKAGE_MANAGER.npm ? [] : npmOidcClientSetup),
   ].join("\n");
   let packageSetup;
   if (manager === "pnpm") {
@@ -105,7 +110,7 @@ export function renderCiReleaseWorkflow(repositoryRoot, config) {
   } else if (manager === "yarn") {
     packageSetup = ["      - name: Configurar Yarn", `        run: npm install --global ${pinnedVersion && Number(pinnedVersion.split(".")[0]) > 1 ? "@yarnpkg/cli-dist" : "yarn"}@${pinnedVersion ?? CI_DEFAULT_YARN_VERSION}`, "      - name: Instalar dependencias", `        run: yarn install ${pinnedVersion && Number(pinnedVersion.split(".")[0]) > 1 ? "--immutable" : "--frozen-lockfile"}`].join("\n");
   } else {
-    packageSetup = [...(pinnedVersion ? ["      - name: Configurar npm", `        run: npm install --global npm@${pinnedVersion}`] : []), "      - name: Instalar dependencias", "        run: npm ci"].join("\n");
+    packageSetup = [...(pinnedVersion ? ["      - name: Configurar npm", `        run: npm install --global npm@${pinnedVersion}`] : []), "      - name: Instalar dependencias", "        run: npm ci", ...npmOidcClientSetup].join("\n");
   }
   const environment = describeCiEnvironment(config);
   const bindings = [

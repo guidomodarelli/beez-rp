@@ -861,6 +861,26 @@ describe("CI preparation invariants shared with local releases", () => {
   });
 
   it.each([
+    { authentication: "oidc", installsNpmClient: true },
+    { authentication: "token", installsNpmClient: false },
+  ])("should install the npm trusted publishing client after npm ci for an unpinned package-lock.json project with $authentication npm publication: $installsNpmClient", async ({ authentication, installsNpmClient }) => {
+    // Arrange
+    const root = createTemporaryDirectory("beez-rp-ci-npm-unpinned-");
+    writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "fixture-npm-unpinned", version: "1.0.0" }));
+    writeFileSync(path.join(root, "package-lock.json"), JSON.stringify({ name: "fixture-npm-unpinned", version: "1.0.0", lockfileVersion: 3, requires: true, packages: {} }));
+    writeFileSync(path.join(root, "beez-rp.config.mjs"), `export default { publish: 'npm', publication: { authentication: '${authentication}' }, ci: { workflow: 'release.yml' } };\n`);
+    const config = await loadCreateVersionConfig(root);
+    // Act
+    const workflow = renderCiReleaseWorkflow(root, config);
+    const stepNames = [...readWorkflowEnvironmentScopes(workflow).stepEnvironments.keys()];
+    // Assert
+    expect(config.commands.packageManager).toBe("npm");
+    expect(stepNames).not.toContain("Configurar npm");
+    expect(stepNames.indexOf("Configurar npm para trusted publishing")).toBe(installsNpmClient ? stepNames.indexOf("Instalar dependencias") + 1 : -1);
+    expect(workflow.includes("npm install --global npm@11.5.1")).toBe(installsNpmClient);
+  });
+
+  it.each([
     { argv: ["--bump", "patch"], regenerateWorkflow: false },
     { argv: ["--setup-ci", "--bump", "patch"], regenerateWorkflow: true },
   ])("should reject OIDC npm publication from a pnpm project whose .nvmrc predates trusted publishing before creating the CI release for $argv", async ({ argv, regenerateWorkflow }) => {

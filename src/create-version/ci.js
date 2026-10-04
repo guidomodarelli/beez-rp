@@ -111,8 +111,9 @@ function assertCiNodeSupportsNpmOidc(repositoryRoot) {
  * workflow sets up provably cannot perform npm trusted publishing: the worker would reject it only
  * after the release was pushed. The Node.js runtime is checked for every package manager. With npm,
  * the version pinned by `packageManager` is checked too and never raised silently, because that
- * would change the client that runs `npm ci` against the committed lockfile; other package managers
- * get a capable npm installed by the workflow only for publication.
+ * would change the client that runs `npm ci` against the committed lockfile; an unpinned npm
+ * project and other package managers get a capable npm installed by the workflow for publication
+ * (see `requiresCiNpmOidcClient`), after `npm ci` in the unpinned npm case.
  * @param {import("./config.js").ResolvedCreateVersionConfig} config - Project configuration.
  * @param {string} repositoryRoot - Project root whose `package.json` and `.nvmrc` pin the worker's runtime.
  * @returns {void}
