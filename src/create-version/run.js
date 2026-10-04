@@ -1610,7 +1610,7 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
     try {
       if (selection.setup && plan.mode !== RELEASE_MODE.newRelease) throw new ReleaseStepError("La configuración automática de CI requiere un release nuevo.", "Completá el release pendiente con --local y después ejecutá --setup-ci.");
       if (selection.setup) ciSetupFiles = await prepareCiSetupFiles(repositoryRoot, config, !ciWasConfigured);
-      // The release commit is built from HEAD and dispatched with --ref main: the workflow must already be committed.
+      // The release commit is built from HEAD and dispatched with --ref <tag>: the workflow must already be committed.
       else await readCommittedCiWorkflow(repositoryRoot, config.ci.workflow);
       const environment = describeCiEnvironment(config);
       await workflowClient.preflight(config.ci.workflow, environment.secrets, environment.variables);

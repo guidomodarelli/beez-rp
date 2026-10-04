@@ -5,7 +5,7 @@
 
 import {
   CI_DIAGNOSTIC_LIMIT, CI_DISPATCH_STATUS, CI_FAILURE_CODE, CI_GITHUB_TOKEN_VARIABLES, CI_ORGANIZATION_BINDING_PAGE_SIZE,
-  CI_ORGANIZATION_BINDING_RESOURCE, CI_RUN_LOOKUP_LIMIT,
+  CI_ORGANIZATION_BINDING_RESOURCE, CI_RUN_LOOKUP_LIMIT, CI_WORKFLOW_DIRECTORY,
 } from "../constants/ci-release.js";
 import { GITHUB_REPOSITORY_PATTERN, MAIN_BRANCH, RELEASE_REMOTE } from "../constants/create-version.js";
 import { CiReleaseError } from "./errors.js";
@@ -82,6 +82,21 @@ export function createGithubWorkflowClient(repositoryRoot, capture = runCaptured
     return result.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
   }
 
+  /**
+   * Requires the release tag to contain the workflow, since dispatching with `--ref <tag>` runs the
+   * definition stored in that tag instead of whatever `main` holds today.
+   * @param {string} workflow - Workflow filename.
+   * @param {CiReleaseIdentity} release - Existing immutable release.
+   * @param {string} retryCommand - Recovery command preserving the tag.
+   * @returns {Promise<void>} Resolves when the tag carries the workflow.
+   * @throws {CiReleaseError} When the tag has no such workflow; nothing is dispatched.
+   */
+  async function assertWorkflowInReleaseTag(workflow, release, retryCommand) {
+    const workflowPath = `${CI_WORKFLOW_DIRECTORY}/${workflow}`;
+    const contained = await capture("git", ["cat-file", "-e", `refs/tags/${release.tag}:${workflowPath}`], { cwd: repositoryRoot });
+    if (contained.status !== 0) throw new CiReleaseError(CI_FAILURE_CODE.preflight, `${release.tag} no contiene ${workflowPath}; el release solo se ejecuta con el workflow de su propio tag, no con el de ${MAIN_BRANCH}.`, `No se envió ninguna ejecución. Publicá ${release.tag} con --local, o traé el tag con git fetch ${RELEASE_REMOTE} tag ${release.tag} si falta localmente y volvé a correr ${retryCommand}.`);
+  }
+
   return {
     /**
      * Checks GitHub CLI, authentication, default branch and configured worker credentials.
@@ -122,7 +137,9 @@ export function createGithubWorkflowClient(repositoryRoot, capture = runCaptured
     },
 
     /**
-     * Submits the exact pushed tag; reconciles a failed response without automatic resubmission.
+     * Submits the exact pushed tag pinned to the workflow version stored in that tag (`--ref <tag>`), so a
+     * retry never runs a newer workflow from `main` against the older tagged checkout; reconciles a failed
+     * response without automatic resubmission.
      * @param {string} workflow - Workflow filename.
      * @param {CiReleaseIdentity} release - Version, tag and commit already on origin.
      * @param {string} retryCommand - Explicit retry command that never creates another bump.
@@ -132,7 +149,8 @@ export function createGithubWorkflowClient(repositoryRoot, capture = runCaptured
     async dispatch(workflow, release, retryCommand) {
       const existing = await findAcceptedRun(workflow, release, retryCommand);
       if (existing) return { status: CI_DISPATCH_STATUS.existing, url: existing.url };
-      const dispatched = await github(["workflow", "run", workflow, "--repo", repository, "--ref", MAIN_BRANCH, "-f", `version=${release.version}`, "-f", `tag=${release.tag}`, "-f", `sha=${release.sha}`]);
+      await assertWorkflowInReleaseTag(workflow, release, retryCommand);
+      const dispatched = await github(["workflow", "run", workflow, "--repo", repository, "--ref", release.tag, "-f", `version=${release.version}`, "-f", `tag=${release.tag}`, "-f", `sha=${release.sha}`]);
       if (dispatched.status !== 0) {
         let accepted = null;
         try { accepted = await findAcceptedRun(workflow, release, retryCommand); } catch { /* The original dispatch remains unconfirmed; do not repeat it. */ }

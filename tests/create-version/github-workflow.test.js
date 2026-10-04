@@ -10,15 +10,18 @@ afterEach(() => vi.unstubAllEnvs());
 
 /**
  * Simulates external CLI responses while retaining a publication request counter.
- * @param {{ runStatus?: string, conclusion?: string | null, dispatchExit?: number, lookupExit?: number, acceptedAfterDispatch?: boolean, secrets?: string[], variables?: string[], inOrganization?: boolean, organizationSecrets?: string[], organizationVariables?: string[], organizationExit?: number, diagnostic?: string }} [options] - External service outcomes.
- * @returns {{ client: import("../../src/create-version/github-workflow.js").GithubWorkflowClient, submissions: () => number, organizationLookups: () => number }} Real adapter and observed requests.
+ * @param {{ runStatus?: string, conclusion?: string | null, dispatchExit?: number, lookupExit?: number, acceptedAfterDispatch?: boolean, secrets?: string[], variables?: string[], inOrganization?: boolean, organizationSecrets?: string[], organizationVariables?: string[], organizationExit?: number, diagnostic?: string, workflowInTag?: boolean }} [options] - External service outcomes.
+ * @returns {{ client: import("../../src/create-version/github-workflow.js").GithubWorkflowClient, submissions: () => number, organizationLookups: () => number, dispatchedArguments: () => string[][] }} Real adapter and observed requests.
  */
-function createGithubFixture({ runStatus, conclusion = null, dispatchExit = 0, lookupExit = 0, acceptedAfterDispatch = false, secrets = [], variables = [], inOrganization = false, organizationSecrets = [], organizationVariables = [], organizationExit = 0, diagnostic = "Upstream unavailable" } = {}) {
+function createGithubFixture({ runStatus, conclusion = null, dispatchExit = 0, lookupExit = 0, acceptedAfterDispatch = false, secrets = [], variables = [], inOrganization = false, organizationSecrets = [], organizationVariables = [], organizationExit = 0, diagnostic = "Upstream unavailable", workflowInTag = true } = {}) {
   let submissions = 0;
+  /** @type {string[][]} */
+  const dispatched = [];
   let organizationLookups = 0;
   const releaseSha = "a".repeat(40);
   /** @type {typeof import("../../src/create-version/process.js").runCaptured} */
   const capture = async (command, args) => {
+    if (command === "git" && args[0] === "cat-file") return { status: workflowInTag ? 0 : 1, stdout: "", stderr: workflowInTag ? "" : "fatal: path does not exist" };
     if (command === "git") return { status: 0, stdout: "git@github.com:fixture/app.git", stderr: "" };
     if (args[0] === "repo") return { status: 0, stdout: JSON.stringify({ defaultBranchRef: { name: "main" }, isInOrganization: inOrganization }), stderr: "" };
     if (args[0] === "secret" || args[0] === "variable") return { status: 0, stdout: JSON.stringify((args[0] === "secret" ? secrets : variables).map((name) => ({ name }))), stderr: "" };
@@ -29,13 +32,37 @@ function createGithubFixture({ runStatus, conclusion = null, dispatchExit = 0, l
       return { status: organizationExit, stdout: organizationExit === 0 ? shared.map((name) => `${name}\r\n`).join("") : "", stderr: diagnostic };
     }
     if (args[0] === "run") return { status: lookupExit, stdout: JSON.stringify(runStatus || (acceptedAfterDispatch && submissions > 0) ? [{ displayTitle: `beez-rp release v1.2.4 ${releaseSha}`, status: runStatus ?? "queued", conclusion, url: "https://github.com/fixture/app/actions/runs/1" }] : []), stderr: diagnostic };
-    if (args[0] === "workflow") { submissions += 1; return { status: dispatchExit, stdout: "", stderr: diagnostic }; }
+    if (args[0] === "workflow") { submissions += 1; dispatched.push(args); return { status: dispatchExit, stdout: "", stderr: diagnostic }; }
     return { status: 0, stdout: "gh", stderr: "" };
   };
-  return { client: createGithubWorkflowClient("fixture", capture), submissions: () => submissions, organizationLookups: () => organizationLookups };
+  return { client: createGithubWorkflowClient("fixture", capture), submissions: () => submissions, organizationLookups: () => organizationLookups, dispatchedArguments: () => dispatched };
 }
 
 describe("GitHub workflow acceptance", () => {
+  it("should run the workflow version stored in the release tag instead of the one on main", async () => {
+    // Arrange
+    const { client, dispatchedArguments } = createGithubFixture();
+    await client.preflight("release.yml", [], []);
+    // Act
+    const result = await client.dispatch("release.yml", { version: "1.2.4", tag: "v1.2.4", sha: "a".repeat(40) }, "pnpm cv --retry-ci v1.2.4");
+    // Assert
+    expect(result.status).toBe("submitted");
+    expect(dispatchedArguments()).toHaveLength(1);
+    const [dispatchArguments] = dispatchedArguments();
+    expect(dispatchArguments[dispatchArguments.indexOf("--ref") + 1]).toBe("v1.2.4");
+  });
+
+  it("should not dispatch a release whose tag does not contain the workflow", async () => {
+    // Arrange
+    const { client, submissions } = createGithubFixture({ workflowInTag: false });
+    await client.preflight("release.yml", [], []);
+    // Act
+    const result = client.dispatch("release.yml", { version: "1.2.4", tag: "v1.2.4", sha: "a".repeat(40) }, "pnpm cv --retry-ci v1.2.4");
+    // Assert
+    await expect(result).rejects.toMatchObject({ code: "ci-preflight-failed", message: expect.stringContaining("v1.2.4 no contiene .github/workflows/release.yml"), hint: expect.stringContaining("--retry-ci v1.2.4") });
+    expect(submissions()).toBe(0);
+  });
+
   it("should preserve the current release without another mutation when existing runs cannot be queried", async () => {
     // Arrange
     const { client, submissions } = createGithubFixture({ lookupExit: 1 });

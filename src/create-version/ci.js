@@ -236,7 +236,7 @@ export function assertCiWorkflowFile(repositoryRoot, workflow) {
 
 /**
  * Reads the configured workflow from HEAD after checking it is a regular file inside the project.
- * `gh workflow run --ref main` only finds workflows contained in the pushed release commit, so a
+ * `gh workflow run --ref <tag>` only finds workflows contained in the pushed release commit, so a
  * local file that is untracked, ignored or set aside by `--ignore-local-changes` is not enough.
  * @param {string} repositoryRoot - Project root.
  * @param {string} workflow - Validated workflow filename.
