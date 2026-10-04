@@ -1449,11 +1449,13 @@ export async function runCreateVersion({ repositoryRoot, argv }) {
   }
   const isCiPreparation = selection.execution === RELEASE_EXECUTION.ci;
   // Rejected before diagnosing or bumping: a pushed tag could never be published by a non-interactive worker.
-  if (isCiPreparation) {
+  // A retry skips these checks: the worker reruns the configuration, workflow and files stored in the
+  // tag, which passed them when the tag was prepared, while the working tree may have changed since.
+  if (isCiPreparation && !options.retryCi) {
     try {
       await assertCiCompatiblePublication(config, repositoryRoot);
-      // An ordinary CI release with the generated workflow committed installs the same way; a retry reuses its tag's files.
-      const usesGeneratedWorkflow = setsUpGeneratedWorkflow || (!options.retryCi && await isCommittedCiWorkflowGenerated(repositoryRoot, config));
+      // An ordinary CI release with the generated workflow committed installs the same way.
+      const usesGeneratedWorkflow = setsUpGeneratedWorkflow || await isCommittedCiWorkflowGenerated(repositoryRoot, config);
       if (usesGeneratedWorkflow) {
         await assertCiInstallLockfileCommitted(repositoryRoot, config.commands.packageManager);
         await assertCiNodeVersionFileCommitted(repositoryRoot);

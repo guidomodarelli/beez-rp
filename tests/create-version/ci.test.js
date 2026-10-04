@@ -1467,7 +1467,7 @@ describe("CI preparation invariants shared with local releases", () => {
   it.each([
     { packageManager: "npm@10.9.0", rejectedBy: "the npm pin" },
     { packageManager: "npm@11.5.1", rejectedBy: "the non-public registry" },
-  ])("should refuse to retry an OIDC npm release through CI with $packageManager because of $rejectedBy", async ({ packageManager }) => {
+  ])("should retry the tagged release through CI when main later switched to an OIDC npm publication with $packageManager that preparation rejects because of $rejectedBy", async ({ packageManager }) => {
     // Arrange
     const registry = await startFixtureNpmRegistry({ users: { "fixture-owner-token": "fixture-owner" }, packages: { "fixture-ci-app": { maintainers: ["fixture-owner"], versions: ["1.2.3"] } } });
     try {
@@ -1477,11 +1477,10 @@ describe("CI preparation invariants shared with local releases", () => {
       const github = isolateGithub();
       // Act
       const status = await runCreateVersion({ repositoryRoot: root, argv: ["--retry-ci", "v1.2.3"] });
-      // Assert
-      expect(status).toBe(1);
+      // Assert: the worker reruns the configuration stored in v1.2.3, which predates the OIDC publication.
+      expect(status).toBe(0);
       expect(runGit(["tag", "--list"], remote)).toBe("v1.2.3");
-      expect(github.preflight).not.toHaveBeenCalled();
-      expect(github.dispatch).not.toHaveBeenCalled();
+      expect(github.dispatch).toHaveBeenCalledWith("release.yml", expect.objectContaining({ version: "1.2.3", tag: "v1.2.3" }), "npm run create-version --retry-ci v1.2.3");
     } finally {
       await registry.close();
     }
